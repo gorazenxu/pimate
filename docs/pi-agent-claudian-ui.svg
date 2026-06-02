@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="760" viewBox="0 0 900 760">
+  <defs>
+    <style>
+      .bg{fill:#202020}.panel{fill:#1f1f1f;stroke:#3e3e3e;stroke-width:1}.user{fill:rgba(0,0,0,.3)}.text{fill:#d7d7d7;font-family:'Segoe UI','Microsoft YaHei',Arial,sans-serif}.muted{fill:#999}.faint{fill:#777}.brand{fill:#D97757}.accent{fill:#a681ff}.green{fill:#4ade80}.red{fill:#dc3545}.mono{font-family:Consolas,'Cascadia Mono',monospace}.b{font-weight:600}.xs{font-size:12px}.sm{font-size:13px}.base{font-size:14px}.md{font-size:16px}.title{font-size:14px;font-weight:600}.dash{stroke:#3e3e3e;stroke-width:2}.tab{fill:transparent;stroke:#4a4a4a;stroke-width:1}.tabA{fill:rgba(137,92,255,.12);stroke:#8d5cff;stroke-width:1}
+    </style>
+  </defs>
+  <rect class="bg" width="900" height="760"/>
+
+  <!-- Header -->
+  <g transform="translate(12,10)">
+    <text class="brand" x="0" y="18" font-family="Georgia,serif" font-size="23" font-weight="800">π</text>
+    <text class="text title" x="28" y="17">Pisidian</text>
+  </g>
+
+  <!-- Message area -->
+  <g transform="translate(14,52)">
+    <rect class="user" x="640" y="0" width="214" height="38" rx="8"/>
+    <text class="text base" x="654" y="24">帮我改下这篇笔记</text>
+
+    <g transform="translate(0,64)">
+      <text class="accent md" x="0" y="16">✎</text>
+      <text class="text mono sm" x="26" y="16">Edit</text>
+      <text class="muted mono sm" x="72" y="16">系列导航-接下来更什么.md</text>
+      <text class="red md" x="850" y="17">×</text>
+      <text class="brand sm" x="0" y="45">Thought for 1s</text>
+    </g>
+
+    <g transform="translate(0,132)">
+      <text class="accent md" x="0" y="16">⊞</text>
+      <text class="text mono sm" x="26" y="16">Write</text>
+      <text class="muted mono sm" x="80" y="16">系列导航-接下来更什么.md</text>
+      <text class="green mono xs b" x="792" y="16">+25</text>
+      <text class="red mono xs b" x="830" y="16">−23</text>
+      <text class="red md" x="850" y="17">×</text>
+      <text class="brand sm" x="0" y="45">Thought for 3s</text>
+    </g>
+
+    <g transform="translate(0,214)">
+      <text class="text base b" x="0" y="0">改完了，所有夸张的表述都删掉了：</text>
+      <text class="text base" x="14" y="34">• 去掉了“后台炸了”“翻烂书”“20万字笔记”这类过于营销的表述</text>
+      <text class="text base" x="14" y="62">• 删掉了“稳赚”“年化20%”“拿10年”等绝对化、夸大效果的词</text>
+      <text class="text base" x="14" y="90">• 所有内容都留有余地，更客观真实</text>
+      <text class="muted xs" x="0" y="128" font-style="italic">* Smoked for 1m 12s</text>
+    </g>
+  </g>
+
+  <!-- Nav row above input -->
+  <g transform="translate(14,560)">
+    <rect class="tab" x="0" y="0" width="28" height="26" rx="6"/>
+    <text class="muted mono xs" x="11" y="17">1</text>
+    <rect class="tabA" x="34" y="0" width="28" height="26" rx="6"/>
+    <text class="text mono xs" x="45" y="17">2</text>
+    <text class="faint md" x="792" y="18">+</text>
+    <text class="faint md" x="824" y="18">✎</text>
+    <text class="faint md" x="856" y="18">%</text>
+  </g>
+
+  <!-- Input wrapper -->
+  <rect class="panel" x="0.5" y="594.5" width="899" height="165" rx="6"/>
+  <text class="muted base" x="10" y="626">How can I help you today?</text>
+
+  <!-- Toolbar -->
+  <g transform="translate(8,724)">
+    <text class="brand xs" x="0" y="16">DeepSeek V4 Pro</text>
+    <text class="muted xs" x="116" y="16">Effort:</text>
+    <text class="brand xs" x="164" y="16">High</text>
+    <text class="muted xs" x="210" y="16">Ready</text>
+    <rect x="704" y="0" width="46" height="22" rx="11" fill="transparent" stroke="#4a4a4a"/>
+    <text class="brand xs" x="715" y="15">Full</text>
+    <text class="faint md" x="766" y="17">▣</text>
+    <text class="faint md" x="800" y="17">↵</text>
+  </g>
+</svg>

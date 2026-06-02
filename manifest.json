@@ -1,0 +1,10 @@
+{
+  "id": "pisidian",
+  "name": "Pisidian",
+  "version": "1.0.8",
+  "minAppVersion": "1.5.0",
+  "description": "Pisidian embeds Pi Coding Agent into Obsidian as an AI collaborator for your vault.",
+  "author": "Gorazen",
+  "authorUrl": "https://github.com/gorazenxu",
+  "isDesktopOnly": true
+}

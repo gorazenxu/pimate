@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860">
+  <defs>
+    <style>
+      .bg{fill:#1f1f1f}.panel{fill:#202020;stroke:#444;stroke-width:1.5}.text{fill:#ddd;font-family:Segoe UI,Arial,sans-serif}.muted{fill:#9b9b9b}.accent{fill:#ff815f}.purple{fill:#a986ff}.green{fill:#58d68d}.red{fill:#ff4d5a}.line{stroke:#666;stroke-width:1.5;fill:none;stroke-dasharray:5 5}.call{fill:#2d2d2d;stroke:#777;stroke-width:1.2}.num{fill:#ff815f;font-weight:700}.small{font-size:18px}.mid{font-size:24px}.big{font-size:30px;font-weight:800}.mono{font-family:Consolas,monospace}.btn{fill:#2a2a2a;stroke:#555;stroke-width:1}.bubble{fill:#2a2422;stroke:#5a3b33;stroke-width:1.2}
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1280" height="860"/>
+
+  <!-- App mock -->
+  <rect class="panel" x="40" y="36" width="820" height="788" rx="14"/>
+
+  <!-- Header -->
+  <text class="accent big" x="76" y="88">✺</text>
+  <text class="text big" x="116" y="88">Pisidian</text>
+  <rect class="btn" x="610" y="55" width="70" height="34" rx="8"/>
+  <text class="muted small" x="622" y="78">Model</text>
+  <rect class="btn" x="690" y="55" width="36" height="34" rx="8"/>
+  <text class="muted mid" x="703" y="80">+</text>
+  <rect class="btn" x="736" y="55" width="36" height="34" rx="8"/>
+  <text class="muted mid" x="748" y="80">◈</text>
+  <rect class="btn" x="782" y="55" width="44" height="34" rx="8"/>
+  <text class="muted small" x="793" y="78">%</text>
+
+  <!-- Chat content -->
+  <g transform="translate(76,130)">
+    <text class="purple mid" x="0" y="0">✎</text>
+    <text class="text mid mono" x="44" y="0" font-weight="700">Edit</text>
+    <text class="muted mid" x="118" y="0">系列导航-接下来更什么.md</text>
+    <text class="red mid" x="730" y="0">×</text>
+    <text class="accent mid" x="0" y="54">Thought for 1s</text>
+
+    <text class="purple mid" x="0" y="120">⊞</text>
+    <text class="text mid mono" x="44" y="120" font-weight="700">Write</text>
+    <text class="muted mid" x="130" y="120">长期主义笔记.md</text>
+    <text class="green small" x="685" y="120" font-weight="700">+25</text>
+    <text class="red small" x="735" y="120" font-weight="700">−3</text>
+    <text class="accent mid" x="0" y="174">Thought for 3s</text>
+
+    <text class="text mid" x="0" y="248" font-weight="700">已经整理好了：</text>
+    <text class="text mid" x="18" y="300">• 保留核心价值点，删掉夸张表述</text>
+    <text class="text mid" x="18" y="346">• 改成更平实、可信、适合长期笔记的语言</text>
+    <text class="muted small" x="0" y="410" font-style="italic">* Smoked for 42s</text>
+  </g>
+
+  <!-- Bottom composer -->
+  <rect class="panel" x="58" y="592" width="784" height="214" rx="12"/>
+  <text class="muted big" x="82" y="650">How can I help you today?</text>
+  <text class="accent small" x="82" y="772">DeepSeek V4 Pro</text>
+  <text class="muted small" x="238" y="772">Effort:</text>
+  <text class="accent small" x="305" y="772">High</text>
+  <text class="muted small" x="372" y="772">Ready</text>
+  <rect class="btn" x="646" y="746" width="60" height="32" rx="16"/>
+  <text class="accent small" x="660" y="768">Full</text>
+  <text class="muted mid" x="724" y="770">▣</text>
+  <text class="muted mid" x="760" y="770">↙</text>
+  <text class="green mid" x="800" y="770">↵</text>
+
+  <!-- Callouts -->
+  <g>
+    <rect class="call" x="910" y="50" width="320" height="76" rx="10"/>
+    <text class="num mid" x="928" y="82">1</text>
+    <text class="text small" x="960" y="82">Model：搜索/切换 Pi 模型</text>
+    <text class="muted small" x="960" y="108">使用 Obsidian SuggestModal</text>
+    <path class="line" d="M905 88 L680 72"/>
+
+    <rect class="call" x="910" y="145" width="320" height="88" rx="10"/>
+    <text class="num mid" x="928" y="178">2</text>
+    <text class="text small" x="960" y="178">顶部快捷按钮</text>
+    <text class="muted small" x="960" y="204">+ 新会话 / ◈ 压缩上下文 / % 统计</text>
+    <path class="line" d="M905 184 L760 72"/>
+
+    <rect class="call" x="910" y="252" width="320" height="96" rx="10"/>
+    <text class="num mid" x="928" y="286">3</text>
+    <text class="text small" x="960" y="286">工具调用流</text>
+    <text class="muted small" x="960" y="312">Read/Edit/Write/Bash 等真实执行</text>
+    <text class="muted small" x="960" y="336">可显示执行状态与输出预览</text>
+    <path class="line" d="M905 300 L160 250"/>
+
+    <rect class="call" x="910" y="368" width="320" height="86" rx="10"/>
+    <text class="num mid" x="928" y="400">4</text>
+    <text class="text small" x="960" y="400">回复区</text>
+    <text class="muted small" x="960" y="426">Markdown 渲染、列表、代码块</text>
+    <path class="line" d="M905 410 L230 470"/>
+
+    <rect class="call" x="910" y="474" width="320" height="92" rx="10"/>
+    <text class="num mid" x="928" y="506">5</text>
+    <text class="text small" x="960" y="506">底部输入区</text>
+    <text class="muted small" x="960" y="532">Enter 发送 / Shift+Enter 换行</text>
+    <path class="line" d="M905 520 L300 640"/>
+
+    <rect class="call" x="910" y="586" width="320" height="122" rx="10"/>
+    <text class="num mid" x="928" y="618">6</text>
+    <text class="text small" x="960" y="618">底部功能条</text>
+    <text class="muted small" x="960" y="644">模型名 / Effort / 状态</text>
+    <text class="muted small" x="960" y="670">Safe/Full / 选文件 / 插入回复 / 发送</text>
+    <path class="line" d="M905 650 L705 762"/>
+
+    <rect class="call" x="910" y="728" width="320" height="78" rx="10"/>
+    <text class="num mid" x="928" y="760">7</text>
+    <text class="text small" x="960" y="760">Safe 模式</text>
+    <text class="muted small" x="960" y="786">只允许 read/grep/find/ls</text>
+    <path class="line" d="M905 768 L675 762"/>
+  </g>
+</svg>

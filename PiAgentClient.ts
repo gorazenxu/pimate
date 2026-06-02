@@ -1,0 +1,579 @@
+import { ChildProcess, spawn, type SpawnOptions } from "child_process";
+import { StringDecoder } from "string_decoder";
+import { EventEmitter } from "events";
+
+// ─── RPC Types ─────────────────────────────────────────────────────────────
+
+export interface RpcRequest {
+  type: string;
+  id?: string;
+  [key: string]: unknown;
+}
+
+export interface RpcResponse {
+  type: "response";
+  id?: string;
+  command: string;
+  success: boolean;
+  error?: string;
+  data?: unknown;
+}
+
+export interface RpcEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+// Message update delta types
+export type DeltaType =
+  | "start"
+  | "text_start"
+  | "text_delta"
+  | "text_end"
+  | "thinking_start"
+  | "thinking_delta"
+  | "thinking_end"
+  | "toolcall_start"
+  | "toolcall_delta"
+  | "toolcall_end"
+  | "done"
+  | "error";
+
+export interface AssistantMessageEvent {
+  type: DeltaType;
+  contentIndex?: number;
+  delta?: string;
+  partial?: unknown;
+  content?: string;
+  toolCall?: ToolCall;
+  reason?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolResult {
+  toolCallId: string;
+  toolName: string;
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+  details?: Record<string, unknown>;
+}
+
+export interface Message {
+  role: string;
+  content: string | Array<MessageContent>;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+export interface MessageContent {
+  type: string;
+  text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+}
+
+// ─── RPC Client ─────────────────────────────────────────────────────────────
+
+export interface PiAgentClientOptions {
+  piPath: string;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+  apiKey?: string;
+  cwd?: string;
+  noSession?: boolean;
+  tools?: string[];
+}
+
+function quoteWindowsShellArg(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function quoteWindowsExecutable(value: string): string {
+  // Quoting a bare npm shim name like "pi" can break cmd/npm shim resolution.
+  // Quote only real paths or values with shell-sensitive characters.
+  return /^[A-Za-z0-9_.-]+$/.test(value) ? value : quoteWindowsShellArg(value);
+}
+
+export class PiAgentClient extends EventEmitter {
+  private process: ChildProcess | null = null;
+  private buffer = "";
+  private decoder = new StringDecoder("utf8");
+  private nextId = 0;
+  private pendingRequests = new Map<
+    string,
+    {
+      resolve: (value: RpcResponse) => void;
+      reject: (error: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private options: PiAgentClientOptions;
+  private destroyed = false;
+
+  constructor(options: PiAgentClientOptions) {
+    super();
+    this.options = options;
+  }
+
+  /**
+   * Start the pi process and initialize
+   */
+  async start(): Promise<void> {
+    if (this.destroyed) throw new Error("Client destroyed");
+
+    const args = ["--mode", "rpc"];
+
+    if (this.options.provider) {
+      args.push("--provider", this.options.provider);
+    }
+    if (this.options.modelId) {
+      args.push("--model", this.options.modelId);
+    }
+    if (this.options.thinkingLevel) {
+      args.push("--thinking", this.options.thinkingLevel);
+    }
+    if (this.options.noSession) {
+      args.push("--no-session");
+    }
+    if (this.options.tools?.length) {
+      args.push("--tools", this.options.tools.join(","));
+    }
+
+    const env: Record<string, string> = { ...process.env } as Record<
+      string,
+      string
+    >;
+    if (this.options.apiKey) {
+      // Set common API key env vars based on provider
+      const provider = this.options.provider || "anthropic";
+      const keyMap: Record<string, string> = {
+        anthropic: "ANTHROPIC_API_KEY",
+        openai: "OPENAI_API_KEY",
+        google: "GOOGLE_API_KEY",
+        deepseek: "DEEPSEEK_API_KEY",
+        groq: "GROQ_API_KEY",
+        xai: "XAI_API_KEY",
+        mistral: "MISTRAL_API_KEY",
+      };
+      const envVar = keyMap[provider];
+      if (envVar) {
+        env[envVar] = this.options.apiKey;
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        const spawnOptions: SpawnOptions = {
+          cwd: this.options.cwd || process.cwd(),
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        };
+
+        const child =
+          process.platform === "win32"
+            ? spawn(
+                `chcp 65001 >nul && ${[
+                  quoteWindowsExecutable(this.options.piPath),
+                  ...args.map(quoteWindowsShellArg),
+                ].join(" ")}`,
+                { ...spawnOptions, shell: true } as SpawnOptions
+              )
+            : spawn(this.options.piPath, args, spawnOptions);
+
+        this.process = child;
+
+        let settled = false;
+
+        const settle = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (err) reject(err);
+          else resolve();
+        };
+
+        // Handle stdout (events and responses)
+        child.stdout!.on("data", (chunk: Buffer) => {
+          this.handleData(chunk);
+        });
+
+        // Handle stderr
+        child.stderr!.on("data", (chunk: Buffer) => {
+          console.error("[pi-agent stderr]", chunk.toString());
+        });
+
+        // Handle process exit
+        child.on("error", (err) => {
+          console.error("[pi-agent] Process error:", err);
+          if (!settled) settle(err);
+          else this.emit("error", err);
+        });
+
+        child.on("close", (code) => {
+          console.log(`[pi-agent] Process closed with code ${code}`);
+          if (!settled) settle(new Error(`pi exited with code ${code}`));
+          else this.emit("close");
+          this.process = null;
+        });
+
+        // Consider ready after a short delay (pi initializes)
+        // 优化：将 500ms 缩短为 50ms。操作系统管道本身有 Buffer 缓存，
+        // 即使进程尚在启动，写入 stdin 的指令也会缓冲，无需硬等 500ms。
+        setTimeout(() => settle(), 50);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  /**
+   * Handle incoming data from pi stdout
+   */
+  private handleData(chunk: Buffer): void {
+    this.buffer +=
+      typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+
+    while (true) {
+      const newlineIndex = this.buffer.indexOf("\n");
+      if (newlineIndex === -1) break;
+
+      let line = this.buffer.slice(0, newlineIndex);
+      this.buffer = this.buffer.slice(newlineIndex + 1);
+
+      // Strip trailing \r
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+
+      if (line.trim().length === 0) continue;
+
+      try {
+        const parsed = JSON.parse(line) as RpcResponse | RpcEvent;
+
+        if (parsed.type === "response") {
+          // Handle command response
+          const response = parsed as RpcResponse;
+          const pending = this.pendingRequests.get(response.id || "");
+          if (pending) {
+            this.pendingRequests.delete(response.id || "");
+            clearTimeout(pending.timeout);
+            pending.resolve(response);
+          }
+        } else {
+          // Handle event
+          this.emit("event", parsed as RpcEvent);
+        }
+      } catch (err) {
+        console.error("[pi-agent] Failed to parse JSON line:", line, err);
+      }
+    }
+  }
+
+  /**
+   * Send a command and wait for response
+   */
+  private async sendCommand(
+    command: RpcRequest
+  ): Promise<RpcResponse> {
+    if (!this.process || this.process.killed) {
+      throw new Error("Process not running");
+    }
+
+    const id = command.id || `cmd-${++this.nextId}`;
+    command.id = id;
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (this.pendingRequests.has(id)) {
+          this.pendingRequests.delete(id);
+          reject(new Error(`Command ${command.type} timed out`));
+        }
+      }, 60_000);
+
+      this.pendingRequests.set(id, { resolve, reject, timeout });
+
+      const payload = JSON.stringify(command) + "\n";
+      try {
+        this.process!.stdin!.write(payload);
+      } catch (err) {
+        this.pendingRequests.delete(id);
+        clearTimeout(timeout);
+        reject(err);
+      }
+    });
+  }
+
+  /**
+   * Send a fire-and-forget command (no response expected)
+   */
+  private sendFireAndForget(command: RpcRequest): void {
+    if (!this.process || this.process.killed) {
+      console.warn("[pi-agent] Cannot send, process not running");
+      return;
+    }
+    if (!command.id) command.id = `ff-${++this.nextId}`;
+    try {
+      this.process.stdin!.write(JSON.stringify(command) + "\n");
+    } catch (err) {
+      console.error("[pi-agent] Failed to send command:", err);
+    }
+  }
+
+  // ─── Public API ────────────────────────────────────────────────────────
+
+  /**
+   * Send a prompt to the agent
+   */
+  async prompt(
+    message: string,
+    options?: {
+      streamingBehavior?: "steer" | "followUp";
+      images?: Array<{ type: string; data: string; mimeType: string }>;
+    }
+  ): Promise<RpcResponse> {
+    return this.sendCommand({
+      type: "prompt",
+      message,
+      ...(options?.streamingBehavior && {
+        streamingBehavior: options.streamingBehavior,
+      }),
+      ...(options?.images && { images: options.images }),
+    });
+  }
+
+  /**
+   * Queue a steering message during streaming
+   */
+  async steer(
+    message: string,
+    options?: { images?: Array<{ type: string; data: string; mimeType: string }> }
+  ): Promise<RpcResponse> {
+    return this.sendCommand({
+      type: "steer",
+      message,
+      ...(options?.images && { images: options.images }),
+    });
+  }
+
+  /**
+   * Queue a follow-up message
+   */
+  async followUp(
+    message: string,
+    options?: { images?: Array<{ type: string; data: string; mimeType: string }> }
+  ): Promise<RpcResponse> {
+    return this.sendCommand({
+      type: "follow_up",
+      message,
+      ...(options?.images && { images: options.images }),
+    });
+  }
+
+  /**
+   * Abort current agent operation
+   */
+  abort(): void {
+    this.sendFireAndForget({ type: "abort" });
+  }
+
+  /**
+   * Get current session state
+   */
+  async getState(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_state" });
+  }
+
+  /**
+   * Get all messages
+   */
+  async getMessages(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_messages" });
+  }
+
+  /**
+   * Set model
+   */
+  async setModel(provider: string, modelId: string): Promise<RpcResponse> {
+    return this.sendCommand({ type: "set_model", provider, modelId });
+  }
+
+  /**
+   * Set thinking level
+   */
+  async setThinkingLevel(level: string): Promise<RpcResponse> {
+    return this.sendCommand({ type: "set_thinking_level", level });
+  }
+
+  /**
+   * Get available models
+   */
+  async getAvailableModels(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_available_models" });
+  }
+
+  /**
+   * Execute a bash command
+   */
+  async bash(command: string): Promise<RpcResponse> {
+    return this.sendCommand({ type: "bash", command });
+  }
+
+  /**
+   * Get session stats (tokens, cost)
+   */
+  async getSessionStats(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_session_stats" });
+  }
+
+  async switchSession(sessionPath: string): Promise<RpcResponse> {
+    return this.sendCommand({ type: "switch_session", sessionPath });
+  }
+
+  async exportHtml(outputPath?: string): Promise<RpcResponse> {
+    return this.sendCommand({
+      type: "export_html",
+      ...(outputPath ? { outputPath } : {}),
+    });
+  }
+
+  async getCommands(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_commands" });
+  }
+
+  async getLastAssistantText(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_last_assistant_text" });
+  }
+
+  async getForkMessages(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "get_fork_messages" });
+  }
+
+  async fork(entryId: string): Promise<RpcResponse> {
+    return this.sendCommand({ type: "fork", entryId });
+  }
+
+  async clone(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "clone" });
+  }
+
+  async promptAndWait(message: string): Promise<RpcResponse> {
+    await this.prompt(message);
+    return this.waitForAgentEnd().then(() => this.getLastAssistantText());
+  }
+
+  private waitForAgentEnd(timeoutMs = 120_000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.off("event", onEvent);
+        reject(new Error("Timed out waiting for assistant response"));
+      }, timeoutMs);
+      const onEvent = (event: RpcEvent) => {
+        if (event.type === "agent_end") {
+          clearTimeout(timeout);
+          this.off("event", onEvent);
+          resolve();
+        }
+      };
+      this.on("event", onEvent);
+    });
+  }
+
+  /**
+   * Start a new session
+   */
+  async newSession(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "new_session" });
+  }
+
+  /**
+   * Manual compaction
+   */
+  async compact(customInstructions?: string): Promise<RpcResponse> {
+    const cmd: RpcRequest = { type: "compact" };
+    if (customInstructions) {
+      cmd.customInstructions = customInstructions;
+    }
+    return this.sendCommand(cmd);
+  }
+
+  /**
+   * Send extension UI response (for dialog handling)
+   */
+  sendUIResponse(id: string, response: Record<string, unknown>): void {
+    this.sendFireAndForget({
+      type: "extension_ui_response",
+      id,
+      ...response,
+    });
+  }
+
+  /**
+   * Request OAuth login URL.
+   * NOTE: This RPC does not exist in pi-coding-agent. OAuth/device-code login
+   * must be done by importing AuthStorage directly from pi-coding-agent in
+   * the settings tab. We keep this stub returning a failure so the caller
+   * surfaces a clear error instead of silently hanging.
+   */
+  async oauthLogin(provider: string): Promise<RpcResponse> {
+    return {
+      type: "response",
+      command: "oauth_login",
+      success: false,
+      error:
+        "oauth_login is not a Pi RPC command. Use the device-code login flow from the Pisidian settings tab instead.",
+    };
+  }
+
+  /**
+   * Check if the process is running
+   */
+  isRunning(): boolean {
+    return this.process !== null && !this.process.killed;
+  }
+
+  /**
+   * Restart the pi process (e.g., after settings change)
+   */
+  async restart(): Promise<void> {
+    await this.destroy();
+    this.destroyed = false;
+    await this.start();
+  }
+
+  /**
+   * Destroy the client and kill the process
+   */
+  async destroy(): Promise<void> {
+    if (this.destroyed) return;
+    this.destroyed = true;
+
+    // Reject all pending requests
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Client destroyed"));
+    }
+    this.pendingRequests.clear();
+
+    if (this.process) {
+      const p = this.process;
+      this.process = null;
+
+      if (!p.killed) {
+        p.kill("SIGTERM");
+        // Give it a moment to exit gracefully
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!p.killed) {
+          p.kill("SIGKILL");
+        }
+      }
+    }
+  }
+}

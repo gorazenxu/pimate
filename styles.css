@@ -1,0 +1,2008 @@
+/* Pisidian — Claudian-compatible proportions, with π branding */
+
+.pi-agent-container {
+  --pi-brand: #D97757;
+  --pi-brand-rgb: 217, 119, 87;
+  --pi-error: #dc3545;
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  padding: 0 !important;
+  padding-bottom: 28px !important;   /* leave room for Obsidian status bar */
+  overflow: hidden !important;
+  font-family: var(--font-text);
+}
+
+/* Header: matches Claudian's compact header, only π + title */
+.pi-agent-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 12px 12px 12px;
+  flex-shrink: 0;
+}
+
+.pi-agent-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.pi-agent-title span:last-child {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pi-agent-logo {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pi-brand);
+  font-family: Georgia, Cambria, serif;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* Messages wrapper equivalent */
+.pi-agent-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pi-agent-chat::-webkit-scrollbar { width: 6px; }
+.pi-agent-chat::-webkit-scrollbar-track { background: transparent; }
+.pi-agent-chat::-webkit-scrollbar-thumb {
+  background: var(--background-modifier-border);
+  border-radius: 3px;
+}
+.pi-agent-chat::-webkit-scrollbar-thumb:hover {
+  background: var(--background-modifier-border-hover);
+}
+
+.pi-agent-empty-state {
+  margin: auto;
+  max-width: 360px;
+  padding: 24px 18px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.pi-agent-empty-logo {
+  color: var(--pi-brand);
+  font-family: Georgia, Cambria, serif;
+  font-size: 42px;
+  font-weight: 800;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+.pi-agent-empty-title {
+  color: var(--text-normal);
+  font-size: 15px;
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+.pi-agent-empty-subtitle {
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.pi-agent-empty-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+.pi-agent-empty-prompt {
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.pi-agent-empty-prompt:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+/* Messages: Claudian-like bubbles/log stream */
+.pi-agent-message {
+  padding: 8px 12px;
+  border-radius: 8px;
+  max-width: 95%;
+  word-wrap: break-word;
+}
+
+.pi-agent-message-badge { display: none; }
+
+.pi-agent-message-user {
+  position: relative;
+  background: rgba(var(--interactive-accent-rgb), 0.12);
+  border: 1px solid rgba(var(--interactive-accent-rgb), 0.22);
+  align-self: flex-end;
+  border-radius: 8px;
+  border-end-end-radius: 2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.pi-agent-message-user ::selection {
+  background: rgba(255, 255, 255, 0.35);
+  color: inherit;
+}
+
+.pi-agent-message-assistant {
+  background: transparent;
+  align-self: stretch;
+  width: 100%;
+  max-width: 100%;
+  border-end-start-radius: 4px;
+  text-align: start;
+}
+
+.pi-agent-message-content {
+  line-height: 1.5;
+  user-select: text;
+  -webkit-user-select: text;
+  unicode-bidi: plaintext;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.pi-agent-text-block {
+  position: relative;
+  margin: 0;
+}
+
+.pi-agent-text-block + .pi-agent-tool-block,
+.pi-agent-tool-block + .pi-agent-text-block {
+  margin-top: 4px;
+}
+
+.pi-agent-streaming-block {
+  position: relative;
+}
+
+.pi-agent-streaming-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.pi-agent-streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  vertical-align: -2px;
+  margin-inline-start: 1px;
+  background: var(--text-accent);
+  animation: pi-agent-blink 1s steps(2, end) infinite;
+  border-radius: 1px;
+}
+
+@keyframes pi-agent-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.pi-agent-compaction-summary {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary-alt);
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.pi-agent-compaction-header {
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 6px;
+}
+
+.pi-agent-compaction-body {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.pi-agent-message-content p { margin: 0 0 8px 0; }
+.pi-agent-message-content p:last-child { margin-bottom: 0; }
+.pi-agent-message-content ul,
+.pi-agent-message-content ol {
+  margin: 8px 0;
+  padding-inline-start: 20px;
+}
+
+.pi-agent-message-content pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.pi-agent-message-content code {
+  background: var(--background-secondary);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.9em;
+}
+
+/* Thinking block - tree-branch style */
+.pi-agent-thinking-block {
+  margin: 4px 0;
+  padding: 2px 0 2px 14px;
+  margin-inline-start: 7px;
+  border-inline-start: 2px solid var(--background-modifier-border);
+}
+
+.pi-agent-thinking-header {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--pi-brand);
+  margin-bottom: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+
+.pi-agent-thinking-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pi-brand);
+}
+
+.pi-agent-thinking-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: var(--pi-brand);
+}
+
+.pi-agent-thinking-header:hover {
+  opacity: 0.8;
+}
+
+.pi-agent-thinking-header::after {
+  content: "▼";
+  font-size: 8px;
+  display: inline-block;
+  transition: transform 0.2s ease;
+  opacity: 0.7;
+}
+
+.pi-agent-thinking-block.is-collapsed .pi-agent-thinking-header::after {
+  transform: rotate(-90deg);
+}
+
+.pi-agent-thinking-content {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  transition: opacity 0.2s ease;
+}
+
+.pi-agent-thinking-block.is-collapsed .pi-agent-thinking-content {
+  display: none;
+}
+
+.pi-agent-error-block {
+  color: var(--pi-error);
+  font-size: 13px;
+}
+
+/* Tool calls: copied proportions from Claudian tool rows */
+.pi-agent-tool-block { margin: 4px 0; }
+.pi-agent-tool-block + .pi-agent-tool-block { margin-top: 3px; }
+
+.pi-agent-tool-header {
+  display: grid;
+  grid-template-columns: 18px auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.pi-agent-tool-header:hover { opacity: 0.85; }
+
+.pi-agent-tool-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-accent);
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.pi-agent-tool-name {
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-normal);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.pi-agent-tool-args {
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  transition: color 0.15s ease;
+}
+.pi-agent-tool-args.is-clickable {
+  cursor: pointer;
+}
+.pi-agent-tool-args.is-clickable:hover {
+  color: var(--text-normal);
+  text-decoration: underline;
+}
+
+.pi-agent-tool-diff {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pi-agent-tool-add { color: #22c55e; }
+.pi-agent-tool-remove { color: #ef4444; }
+
+.pi-agent-tool-close {
+  color: var(--pi-error);
+  font-size: 16px;
+  line-height: 1;
+}
+.pi-agent-tool-block.is-success .pi-agent-tool-close {
+  color: var(--color-green, #22c55e);
+}
+.pi-agent-tool-close.is-loading {
+  animation: pi-pulse 1.2s infinite;
+  color: var(--text-muted);
+}
+@keyframes pi-pulse {
+  0% { opacity: 0.3; }
+  50% { opacity: 1; }
+  100% { opacity: 0.3; }
+}
+
+.pi-agent-detected-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+.pi-agent-detected-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  user-select: none;
+}
+.pi-agent-detected-files .pi-agent-file-chip {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.pi-agent-detected-files .pi-agent-file-chip:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-widget {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 12px;
+  background: var(--background-secondary-alt);
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+
+.pi-agent-widget-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-agent-widget-icon {
+  color: var(--interactive-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pi-agent-widget-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.pi-agent-widget-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.pi-agent-widget-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.pi-agent-widget-item-icon {
+  font-size: 12px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.pi-agent-widget-item-icon.pi-status-done {
+  color: var(--color-green, #22c55e);
+}
+.pi-agent-widget-item-text.pi-status-done {
+  color: var(--text-muted);
+}
+
+.pi-agent-widget-item-icon.pi-status-active {
+  color: var(--interactive-accent);
+}
+.pi-agent-widget-item-text.pi-status-active {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.pi-agent-widget-item-icon.pi-status-pending {
+  color: var(--text-faint);
+}
+.pi-agent-widget-item-text.pi-status-pending {
+  color: var(--text-faint);
+}
+
+.pi-agent-tool-thought {
+  color: var(--pi-brand);
+  font-size: 13px;
+  margin: 4px 0 2px 0;
+}
+
+.pi-agent-tool-output {
+  display: none;
+  padding: 4px 0;
+  padding-inline-start: 16px;
+  margin-inline-start: 7px;
+  border-inline-start: 2px solid var(--background-modifier-border);
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.pi-agent-tool-output.is-visible { display: block; }
+.pi-agent-tool-output pre { margin: 0; white-space: pre-wrap; }
+.pi-agent-tool-error { color: var(--pi-error); }
+
+.pi-agent-diff-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+.pi-agent-diff-actions button {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.pi-agent-diff-pre { color: var(--text-muted); }
+.pi-agent-diff-line-add { color: var(--color-green); }
+.pi-agent-diff-line-remove { color: var(--color-red); }
+.pi-agent-diff-line-hunk { color: var(--text-accent); }
+.pi-agent-diff-line-meta { color: var(--text-faint); }
+
+.pi-agent-system-msg {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 2px 14px;
+}
+
+/* Nav row above input: tab badges + action icons */
+.pi-agent-composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px 4px 12px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.pi-agent-session-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 0;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pi-agent-composer-tools::-webkit-scrollbar,
+.pi-agent-session-tabs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.pi-agent-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.pi-agent-session-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 26px;
+  max-width: 150px;
+  height: 26px;
+  padding: 0 6px 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-monospace);
+  cursor: pointer;
+}
+.pi-agent-session-tab-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pi-agent-session-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.pi-agent-session-tab:hover .pi-agent-session-tab-close,
+.pi-agent-session-tab.is-active .pi-agent-session-tab-close {
+  opacity: 1;
+}
+.pi-agent-session-tab-close:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.pi-agent-session-tab.is-active {
+  color: var(--pi-brand);
+  border-color: var(--pi-brand);
+  background: rgba(var(--pi-brand-rgb), 0.12);
+}
+
+.pi-agent-mini-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.pi-agent-mini-action:hover { color: var(--text-normal); }
+
+/* Input container/wrapper proportions from Claudian */
+.pi-agent-input-area {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 140px;
+  margin: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  flex-shrink: 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pi-agent-input-area:focus-within {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 4px 20px rgba(var(--interactive-accent-rgb), 0.15);
+}
+
+.pi-agent-context-row {
+  display: none;
+  align-items: flex-start;
+  justify-content: flex-start;
+  flex-shrink: 0;
+  padding: 6px 10px 0 10px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pi-agent-context-row.has-content { display: flex; }
+
+.pi-agent-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1;
+  max-width: 220px;
+  cursor: pointer;
+}
+.pi-agent-file-chip:hover { background: var(--background-modifier-hover); }
+.pi-agent-file-chip-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.pi-agent-file-chip-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--background-modifier-border);
+}
+.pi-agent-file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+}
+.pi-agent-file-chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.pi-agent-file-chip-remove:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-input {
+  width: 100%;
+  flex: 1 1 0;
+  min-height: 60px;
+  resize: none;
+  padding: 8px 10px 10px 10px;
+  border: none !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: none !important;
+  overflow-y: auto;
+  unicode-bidi: plaintext;
+}
+.pi-agent-input:hover,
+.pi-agent-input:focus {
+  outline: none !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.pi-agent-input::placeholder { color: var(--text-muted); }
+.pi-agent-input.is-drag-over {
+  background: rgba(var(--pi-brand-rgb), 0.08) !important;
+}
+.pi-agent-input.is-bash-mode {
+  color: var(--color-orange);
+}
+.pi-agent-input-area:has(.pi-agent-input.is-bash-mode) {
+  border-color: var(--color-orange);
+  box-shadow: 0 0 0 1px rgba(255, 165, 0, 0.15);
+}
+.pi-agent-status.is-bash-mode { color: var(--color-orange); }
+
+.pi-agent-input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-shrink: 0;
+  padding: 4px 6px 6px 6px;
+  gap: 8px;
+}
+
+.pi-agent-input-footer-left,
+.pi-agent-input-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pi-agent-input-footer-right { margin-inline-start: auto; }
+
+/* =========================================================================
+   Model Selector (Compat with Claudian)
+   ========================================================================= */
+.pi-agent-model-selector {
+  position: relative;
+}
+
+.pi-agent-model-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--pi-brand);
+  font-size: 12px;
+}
+
+.pi-agent-model-label {
+  font-weight: 500;
+}
+
+/* =========================================================================
+   Thinking Effort Selector (Compat with Claudian)
+   ========================================================================= */
+.pi-agent-thinking-effort {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-agent-thinking-label-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.pi-agent-thinking-gears {
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pi-agent-thinking-current {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--pi-brand);
+  font-weight: 500;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.pi-agent-thinking-current:hover {
+  background: var(--background-modifier-hover);
+}
+/* =========================================================================
+   YOLO Switch Toggle (Compat with Claudian)
+   ========================================================================= */
+.pi-agent-permission-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-agent-permission-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 28px;
+}
+
+.pi-agent-toggle-switch {
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--background-modifier-border);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+
+.pi-agent-toggle-switch::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.pi-agent-toggle-switch:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pi-agent-toggle-switch.active {
+  background: var(--pi-brand);
+}
+
+.pi-agent-toggle-switch.active::after {
+  transform: translateX(14px);
+  background: #ffffff;
+}
+
+.pi-agent-footer-folder-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.pi-agent-footer-folder-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-footer-folder-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.pi-agent-footer-label,
+.pi-agent-status,
+.pi-agent-context-meter-inline {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pi-agent-context-meter-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--pi-brand);
+  font-family: var(--font-monospace);
+}
+.pi-agent-context-meter-inline svg {
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+.pi-agent-context-meter-bg { stroke: var(--background-modifier-border); }
+.pi-agent-context-meter-fill {
+  stroke: var(--pi-brand);
+  transition: stroke-dashoffset 0.25s ease, stroke 0.2s ease;
+}
+.pi-agent-context-meter-inline.warning,
+.pi-agent-context-meter-inline.warning .pi-agent-context-meter-fill,
+.pi-agent-context-meter-inline.warning .pi-agent-context-meter-percent {
+  color: var(--color-orange);
+  stroke: var(--color-orange);
+}
+.pi-agent-context-meter-inline.danger,
+.pi-agent-context-meter-inline.danger .pi-agent-context-meter-fill,
+.pi-agent-context-meter-inline.danger .pi-agent-context-meter-percent {
+  color: var(--color-red);
+  stroke: var(--color-red);
+}
+.pi-agent-context-meter-percent {
+  min-width: 28px;
+  color: inherit;
+  font-size: 11px;
+}
+.pi-agent-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  cursor: help;
+}
+.pi-agent-status svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.pi-agent-status-error svg { color: var(--pi-error); }
+.pi-agent-status-thinking svg { color: var(--pi-brand); }
+.pi-agent-status-warning svg { color: var(--color-orange); }
+
+.pi-agent-safe-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pi-agent-safe-toggle.is-safe {
+  color: var(--text-normal);
+  background: rgba(92, 184, 92, 0.12);
+}
+.pi-agent-safe-toggle.is-full { color: var(--pi-brand); }
+
+.pi-agent-footer-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.pi-agent-footer-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-send-btn {
+  color: var(--text-normal);
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.pi-agent-abort-btn {
+  color: var(--pi-error);
+  font-weight: bold;
+  font-size: 14px;
+}
+
+/* Suggest / editor modal helpers */
+.pi-agent-suggestion-title { font-weight: 600; color: var(--text-normal); }
+.pi-agent-suggestion-note {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-monospace);
+}
+.pi-agent-editor-modal { display: flex; flex-direction: column; gap: 12px; }
+.pi-agent-editor-modal-textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  font-family: var(--font-text);
+}
+.pi-agent-editor-modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pi-agent-context-preview-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pi-agent-context-preview-image {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+}
+.pi-agent-context-preview-text {
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+/* ─── Typing cursor animation ─── */
+.pi-agent-typing-cursor {
+  display: inline-block;
+  color: var(--pi-brand);
+  animation: pi-cursor-blink 0.8s step-end infinite;
+  margin-left: 2px;
+  font-size: 1.1em;
+  vertical-align: middle;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  opacity: 1;
+  transform: scale(1);
+}
+
+.pi-agent-typing-cursor.is-fading {
+  animation: none;
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+@keyframes pi-cursor-blink {
+  from, to { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ─── Autocomplete Mention Dropdown ─── */
+.pi-agent-mention-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 10px;
+  right: 10px;
+  margin-bottom: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
+  z-index: 9999;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.pi-agent-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-normal);
+  transition: background 0.1s ease;
+}
+
+.pi-agent-mention-item:hover,
+.pi-agent-mention-item.is-active {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-mention-item.is-active {
+  background: rgba(var(--interactive-accent-rgb), 0.15);
+  border-inline-start: 2px solid var(--interactive-accent);
+  padding-inline-start: 8px;
+}
+
+.pi-agent-mention-item-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.pi-agent-mention-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Message Hover Actions ─── */
+.pi-agent-message {
+  position: relative;
+}
+
+.pi-agent-msg-actions {
+  position: absolute;
+  bottom: -12px;
+  right: 12px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 10;
+  transform: translateY(2px);
+}
+
+.pi-agent-message:hover .pi-agent-msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.pi-agent-message-user .pi-agent-msg-actions {
+  right: auto;
+  left: 12px;
+}
+
+.pi-agent-action-btn {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 3px 5px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: all 0.1s ease;
+  line-height: 1;
+}
+
+.pi-agent-action-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+  transform: scale(1.05);
+}
+
+/* ─── Visual Diff Preview inside Modal ─── */
+.pi-agent-diff-view-pre {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin: 0 0 4px 0;
+}
+
+.pi-diff-ins {
+  display: block;
+  background-color: rgba(92, 184, 92, 0.15) !important;
+  color: var(--color-green) !important;
+  text-decoration: none;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.pi-diff-del {
+  display: block;
+  background-color: rgba(217, 83, 79, 0.15) !important;
+  color: var(--color-red) !important;
+  text-decoration: line-through;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* ─── Autocomplete Command Dropdown ─── */
+.pi-agent-command-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 10px;
+  right: 10px;
+  margin-bottom: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
+  z-index: 9999;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.pi-agent-command-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-normal);
+  transition: background 0.1s ease;
+}
+
+.pi-agent-command-item:hover,
+.pi-agent-command-item.is-active {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-command-item.is-active {
+  background: rgba(var(--interactive-accent-rgb), 0.15);
+  border-inline-start: 2px solid var(--interactive-accent);
+  padding-inline-start: 8px;
+}
+
+.pi-agent-command-item-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.pi-agent-command-item-name {
+  font-family: var(--font-monospace);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.pi-agent-command-item-desc {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Live Tool Steps Indicator Line ─── */
+.pi-agent-tool-block {
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: 10px;
+  margin-left: 6px;
+  transition: border-color 0.3s ease;
+}
+
+.pi-agent-tool-block.is-success {
+  border-left-color: rgba(92, 184, 92, 0.75);
+}
+
+.pi-agent-tool-block.is-error {
+  border-left-color: rgba(217, 83, 79, 0.75);
+}
+
+.pi-agent-tool-block.is-success .pi-agent-tool-header .pi-agent-tool-name {
+  color: var(--color-green);
+  font-weight: 550;
+}
+
+.pi-agent-tool-block.is-error .pi-agent-tool-header .pi-agent-tool-name {
+  color: var(--pi-error);
+  font-weight: 550;
+}
+
+/* ─── Header & Mini Actions Styling ─── */
+.pi-agent-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
+}
+
+.pi-agent-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-header-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-header-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.pi-agent-mini-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-mini-action:hover {
+  background: var(--background-modifier-hover);
+  color: var(--pi-brand);
+}
+
+.pi-agent-mini-action svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* ─── Active Session File Path Bar (Compat with Claudian) ─── */
+.pi-agent-session-file-path-bar {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  max-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  direction: ltr;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-session-file-path-bar:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+/* =========================================================================
+   History Panel (CONVERSATIONS list)
+   ========================================================================= */
+.pi-agent-history-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px;
+  background: var(--background-primary);
+}
+
+.pi-agent-history-header {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+  margin-bottom: 4px;
+}
+
+.pi-agent-history-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.pi-agent-history-search-wrap {
+  flex-shrink: 0;
+  padding: 8px 0 10px;
+}
+
+.pi-agent-history-search {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 13px;
+}
+
+.pi-agent-history-search:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding-right: 2px;
+}
+
+.pi-agent-history-list::-webkit-scrollbar { width: 6px; }
+.pi-agent-history-list::-webkit-scrollbar-track { background: transparent; }
+.pi-agent-history-list::-webkit-scrollbar-thumb {
+  background: var(--background-modifier-border);
+  border-radius: 3px;
+}
+.pi-agent-history-list::-webkit-scrollbar-thumb:hover {
+  background: var(--background-modifier-border-hover);
+}
+
+.pi-agent-history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+
+.pi-agent-history-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pi-agent-history-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+
+.pi-agent-history-item-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.pi-agent-history-item-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pi-agent-history-item-name {
+  font-size: 13px;
+  color: var(--text-normal);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pi-agent-history-item-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.pi-agent-history-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.pi-agent-history-error {
+  padding: 24px 0;
+  color: var(--pi-error);
+  font-size: 13px;
+}
+
+.pi-agent-mini-action.is-active {
+  color: var(--pi-brand) !important;
+  background: var(--background-modifier-hover);
+}
+
+/* =========================================================================
+   Model Selector Popup (Compat with Claudian)
+   ========================================================================= */
+.pi-agent-model-selector {
+  position: relative;
+}
+
+.pi-agent-model-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 8px;
+  z-index: 10000;
+  min-width: 160px;
+  width: max-content;
+  max-height: 380px;
+  overflow-y: auto;
+  background: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pi-agent-model-popup::-webkit-scrollbar {
+  width: 4px;
+}
+.pi-agent-model-popup::-webkit-scrollbar-track {
+  background: transparent;
+}
+.pi-agent-model-popup::-webkit-scrollbar-thumb {
+  background: var(--background-modifier-border);
+  border-radius: 2px;
+}
+.pi-agent-model-popup::-webkit-scrollbar-thumb:hover {
+  background: var(--background-modifier-border-hover);
+}
+
+.pi-agent-model-popup-group-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.pi-agent-model-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.pi-agent-model-popup-item:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-model-popup-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: inherit;
+}
+
+.pi-agent-model-popup-item-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.pi-agent-model-popup-item.is-active {
+  color: var(--pi-brand);
+  background: rgba(var(--pi-brand-rgb), 0.12);
+  font-weight: 500;
+}
+
+.pi-agent-model-popup-item-name {
+  font-size: 13px;
+  color: inherit;
+}
+
+.pi-agent-model-popup-divider {
+  height: 1px;
+  background-color: var(--border-color, var(--border));
+  margin: 6px 4px;
+  opacity: 0.4;
+}
+
+
+/* =========================================================================
+   Thinking Effort Selector Popup
+   ========================================================================= */
+.pi-agent-effort-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 8px;
+  z-index: 10000;
+  min-width: 250px;
+  background: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pi-agent-effort-popup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.pi-agent-effort-popup-item:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-effort-popup-item.is-active {
+  color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+  font-weight: 500;
+}
+
+.pi-agent-effort-popup-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pi-agent-effort-popup-item-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  font-size: 12px;
+  visibility: hidden;
+}
+
+.pi-agent-effort-popup-item.is-active .pi-agent-effort-popup-item-check {
+  visibility: visible;
+  color: var(--interactive-accent);
+}
+
+.pi-agent-effort-popup-item-name {
+  font-size: 13px;
+  color: inherit;
+}
+
+.pi-agent-effort-popup-item-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 20px;
+}
+
+/* =========================================================================
+   Models Config Modal (内置模型凭证配置弹窗样式)
+   ========================================================================= */
+.pi-agent-models-config-modal-content {
+  padding: 16px 20px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pi-agent-provider-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.pi-agent-provider-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.22s cubic-bezier(0.25, 0.8, 0.25, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.pi-agent-provider-card:hover {
+  background: var(--background-secondary-alt);
+  border-color: var(--border-color-hover, var(--text-dim));
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+.pi-agent-provider-card.is-configured {
+  border-color: rgba(var(--pi-brand-rgb), 0.28);
+  box-shadow: 0 2px 6px rgba(var(--pi-brand-rgb), 0.05);
+}
+
+.pi-agent-provider-card.is-expanded {
+  border-color: var(--pi-brand);
+  background: var(--background-secondary-alt);
+}
+
+.pi-agent-provider-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pi-agent-provider-card-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pi-agent-provider-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+  transition: color 0.2s;
+}
+
+.pi-agent-provider-card:hover .pi-agent-provider-card-icon {
+  color: var(--text-normal);
+}
+
+.pi-agent-provider-card.is-configured .pi-agent-provider-card-icon {
+  color: var(--pi-brand);
+}
+
+.pi-agent-provider-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.pi-agent-provider-card-right {
+  display: flex;
+  align-items: center;
+}
+
+.pi-agent-provider-card-status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  user-select: none;
+}
+
+.pi-agent-provider-card-status.is-ok {
+  background: rgba(var(--pi-brand-rgb), 0.12);
+  color: var(--pi-brand);
+}
+
+.pi-agent-provider-card-status.is-empty {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.pi-agent-provider-card-detail {
+  padding: 0 16px 16px 16px;
+  border-top: 1px dashed var(--background-modifier-border);
+  animation: pi-slide-down 0.2s ease-out;
+}
+
+.pi-agent-provider-input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.pi-agent-provider-input-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.pi-agent-provider-input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  transition: all 0.2s ease;
+}
+
+.pi-agent-provider-input:focus {
+  border-color: var(--pi-brand);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--pi-brand-rgb), 0.18);
+}
+
+.pi-agent-provider-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.pi-agent-provider-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: none;
+}
+
+.pi-agent-provider-btn.is-save {
+  background: var(--pi-brand);
+  color: #fff;
+}
+
+.pi-agent-provider-btn.is-save:hover {
+  background: var(--pi-brand-hover, #e08343);
+  transform: translateY(-1px);
+}
+
+.pi-agent-provider-btn.is-delete {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.pi-agent-provider-btn.is-delete:hover {
+  background: #ea580c;
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.pi-agent-provider-hint {
+  font-size: 10.5px;
+  color: var(--text-dim, var(--text-muted));
+  line-height: 1.5;
+  margin-top: 10px;
+  font-style: italic;
+}
+
+@keyframes pi-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* =========================================================================
+   Active Running States & Generating Indicators
+   ========================================================================= */
+
+/* 1. 炫彩顶部跑马灯加载进度条 (Generating Progress Line) */
+.is-generating::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  z-index: 10005;
+  background: linear-gradient(90deg, #d8894f, #3b82f6, #d8894f);
+  background-size: 200% 100%;
+  animation: pi-agent-generating-flow 1.5s infinite linear;
+}
+@keyframes pi-agent-generating-flow {
+  0% { background-position: 0% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 2. 输入光标呼吸闪动动画 (Blinking Cursor) */
+.pi-agent-typing-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  vertical-align: middle;
+  animation: pi-agent-cursor-blink 0.8s infinite step-end;
+}
+@keyframes pi-agent-cursor-blink {
+  from, to { opacity: 0 }
+  50% { opacity: 1 }
+}
+
+/* 3. 工具运行中的左侧蓝色边框呼吸灯 */
+.pi-agent-tool-block:not(.is-success):not(.is-error) {
+  border-left: 2px solid var(--interactive-accent) !important;
+  animation: pi-agent-tool-running 1.2s infinite ease-in-out;
+}
+@keyframes pi-agent-tool-running {
+  0%, 100% { opacity: 0.6; border-left-color: var(--background-modifier-border); }
+  50% { opacity: 1; border-left-color: var(--interactive-accent); }
+}
+
+/* 4. 底部状态栏 SVG 矢量加载圈旋转动画 & 大脑/整理呼吸动画 */
+.pi-agent-status svg.lucide-loader-2 {
+  animation: pi-agent-spin 1.4s infinite linear;
+}
+@keyframes pi-agent-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.pi-agent-status svg.lucide-brain,
+.pi-agent-status svg.lucide-shrink {
+  animation: pi-agent-pulse 1.6s infinite ease-in-out;
+}
+@keyframes pi-agent-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.95); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+/* =========================================================================
+   History Groups & Collapsible Details (历史会话分组折叠)
+   ========================================================================= */
+details.pi-agent-history-group {
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: var(--background-secondary-alt);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+details.pi-agent-history-group[open] {
+  border-color: var(--interactive-accent);
+}
+
+summary.pi-agent-history-group-title {
+  padding: 8px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  transition: background 0.15s ease;
+}
+
+summary.pi-agent-history-group-title:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+.pi-agent-history-group-list {
+  padding: 4px 6px 6px;
+  border-top: 1px solid var(--border-color);
+  background: var(--background-primary);
+}
+
