@@ -1,9 +1,9 @@
 {
   "id": "pimate",
   "name": "Pimate",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "minAppVersion": "1.5.0",
-  "description": "Pimate embeds Pi Coding Agent into Obsidian as an AI collaborator for your vault.",
+  "description": "Embeds Pi Coding Agent as an AI collaborator for your vault. Chat, edit files, and run commands — all without leaving your editor.",
   "author": "Gorazen",
   "authorUrl": "https://github.com/gorazenxu",
   "isDesktopOnly": true

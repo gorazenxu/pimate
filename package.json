@@ -1,7 +1,7 @@
 {
   "name": "pimate",
-  "version": "1.0.10",
-  "description": "Pimate embeds Pi Coding Agent into Obsidian",
+  "version": "1.0.11",
+  "description": "Embeds Pi Coding Agent as an AI collaborator for your vault.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
