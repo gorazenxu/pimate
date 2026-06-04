@@ -4,8 +4,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/status-active-brightgreen" alt="Active">
-  <img src="https://img.shields.io/github/v/release/gorazenxu/obsidian-pisidian" alt="Release">
-  <img src="https://img.shields.io/github/license/gorazenxu/obsidian-pisidian" alt="License">
+  <img src="https://img.shields.io/github/v/release/gorazenxu/pisidian" alt="Release">
+  <img src="https://img.shields.io/github/license/gorazenxu/pisidian" alt="License">
 </p>
 
 ## Features
@@ -57,7 +57,7 @@ Pisidian is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.d
 ### Manual (BRAT / development)
 
 1. Enable BRAT plugin in Obsidian
-2. Add `gorazenxu/obsidian-pisidian`
+2. Add `gorazenxu/pisidian`
 3. Or clone this repo into `.obsidian/plugins/pisidian/` and run `npm install && npm run build`
 
 ## Quick Start
@@ -137,8 +137,8 @@ Pisidian launches Pi as a child process in **RPC mode** (`--mode rpc`) and commu
 ## Building from Source
 
 ```bash
-git clone https://github.com/gorazenxu/obsidian-pisidian.git
-cd obsidian-pisidian
+git clone https://github.com/gorazenxu/pisidian.git
+cd pisidian
 npm install
 npm run build     # production build
 npm run dev       # watch mode
