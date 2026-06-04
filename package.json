@@ -14,7 +14,7 @@
     "ai",
     "coding-agent"
   ],
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "devDependencies": {
     "@types/node": "^20.0.0",
     "builtin-modules": "^4.0.0",
