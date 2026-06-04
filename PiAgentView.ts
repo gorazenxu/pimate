@@ -239,6 +239,36 @@ export class PiAgentView extends ItemView {
     this.addCurrentFileContext();
   }
 
+  addExplorerSelectionContext(): void {
+    const isZh = this.plugin.settings.language === "zh";
+    const items = this.plugin.getExplorerSelectionForContext();
+    if (items.length === 0) {
+      new Notice(
+        isZh
+          ? "Pisidian：没有检测到文件管理器选中项。请先在左侧文件管理器中多选文件/文件夹。"
+          : "Pisidian: no file-explorer selection detected. Select files/folders in the file explorer first."
+      );
+      return;
+    }
+
+    let count = 0;
+    for (const item of items) {
+      if (item instanceof TFile) {
+        this.addFileContextItem(item);
+        count++;
+      } else if (item instanceof TFolder) {
+        this.addFolderContextItem(item, true);
+        count++;
+      }
+    }
+    new Notice(
+      isZh
+        ? `Pisidian：已附加 ${count} 个选中项到上下文`
+        : `Pisidian: attached ${count} selected item${count === 1 ? "" : "s"} to context`
+    );
+    this.inputEl?.focus();
+  }
+
   openCommandsAndSkills(): void {
     this.showCommandSelector();
   }
@@ -1869,9 +1899,15 @@ export class PiAgentView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle(isZh ? "附加当前笔记" : "Attach current note")
+        .setTitle(isZh ? "附加当前打开的笔记" : "Attach current open note")
         .setIcon("file-plus")
         .onClick(() => this.addCurrentFileContext())
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(isZh ? "附加文件管理器选中项" : "Attach file explorer selection")
+        .setIcon("list-plus")
+        .onClick(() => this.addExplorerSelectionContext())
     );
     menu.addItem((item) =>
       item

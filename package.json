@@ -1,6 +1,6 @@
 {
   "name": "pisidian",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Pisidian embeds Pi Coding Agent into Obsidian",
   "main": "main.js",
   "scripts": {

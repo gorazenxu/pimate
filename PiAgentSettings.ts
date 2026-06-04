@@ -376,8 +376,11 @@ export class PiAgentSettingTab extends PluginSettingTab {
       );
 
     // File-explorer multi-select is now handled via right-click context menu
-    // (right-click on file / folder → "Send to Pisidian" or "Add N items to Pisidian context").
-    // No hotkey, no internal API dependency.
+    // (right-click on file / folder → "Send to Pisidian" or "Add N items to Pisidian context"),
+    // plus the More menu → "附加文件管理器选中项" / "Attach file explorer selection".
+    // Multi-select reading uses Obsidian's internal selection/fileItems on a
+    // best-effort basis (no menu interception), so it is more robust than
+    // patching Obsidian's built-in multi-select context menu.
 
     // Pi executable path
     new Setting(containerEl)

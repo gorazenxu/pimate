@@ -9,6 +9,7 @@ import {
   TAbstractFile,
   Menu,
   addIcon,
+  ItemView,
 } from "obsidian";
 import {
   PiAgentView,
@@ -28,6 +29,93 @@ export default class PiAgentPlugin extends Plugin {
 
   constructor(app: App, manifest: PluginManifest) {
     super(app, manifest);
+  }
+
+  /**
+   * Cached file-explorer multi-selection. Refreshed on every
+   * `active-leaf-change` and `click` event. The right-click context menu
+   * reads this when the user invokes "Send to Pisidian".
+   */
+  private explorerSelection: TAbstractFile[] = [];
+
+  /**
+   * Try to read the file-explorer selection. The FileExplorer view exposes
+   * an internal `selection` Set, and the file items expose `.el` with a
+   * CSS class indicating selection. Both sources are undocumented but
+   * have been stable across many Obsidian releases.
+   */
+  private refreshExplorerSelection(): void {
+    const view = this.app.workspace.getLeavesOfType("file-explorer")[0]?.view as
+      | (ItemView & {
+          selection?: Set<TAbstractFile>;
+          fileItems?: Map<TAbstractFile, { el?: HTMLElement }> | Record<string, { el?: HTMLElement }>;
+        })
+      | undefined;
+    if (!view) {
+      this.explorerSelection = [];
+      return;
+    }
+
+    const out: TAbstractFile[] = [];
+    const seen = new Set<TAbstractFile>();
+    const addOne = (af: TAbstractFile | null | undefined) => {
+      if (af && !seen.has(af)) {
+        seen.add(af);
+        out.push(af);
+      }
+    };
+
+    // Source 1: internal selection Set.
+    const sel = view.selection;
+    if (sel && sel.size > 0) {
+      for (const af of sel) addOne(af);
+    }
+
+    // Source 2: walk fileItems and look for the `.is-selected` class.
+    // This catches both files and folders, and complements selection Set.
+    const fi = view.fileItems;
+    if (fi) {
+      const items: IterableIterator<[TAbstractFile, { el?: HTMLElement }]> | Array<[string, { el?: HTMLElement }]>
+        = fi instanceof Map
+          ? fi.entries()
+          : (Object.entries(fi) as Array<[string, { el?: HTMLElement }]>);
+      for (const [key, item] of items) {
+        const el = item?.el as HTMLElement | undefined;
+        if (el && el.classList && el.classList.contains("is-selected")) {
+          if (key && typeof key === "object") {
+            addOne(key);
+          } else {
+            addOne(this.app.vault.getAbstractFileByPath(String(key)));
+          }
+        }
+      }
+    }
+
+    if (out.length > 0) this.explorerSelection = out;
+  }
+
+  public getExplorerSelectionForContext(): TAbstractFile[] {
+    this.refreshExplorerSelection();
+    return [...this.explorerSelection];
+  }
+
+  /**
+   * Build the multi-selection at the moment of right-click. Combines the
+   * cached selection with the anchor (the right-clicked file/folder).
+   * Falls back to just the anchor if the cache is empty.
+   */
+  private getRightClickMultiSelection(anchor: TAbstractFile): TAbstractFile[] {
+    if (this.explorerSelection.length === 0) return [anchor];
+    const seen = new Set<TAbstractFile>();
+    const out: TAbstractFile[] = [];
+    for (const f of this.explorerSelection) {
+      if (!seen.has(f)) {
+        seen.add(f);
+        out.push(f);
+      }
+    }
+    if (!seen.has(anchor)) out.push(anchor);
+    return out;
   }
 
   /**
@@ -224,35 +312,83 @@ export default class PiAgentPlugin extends Plugin {
       },
     });
 
-    // Right-click multi-select support is handled at the file-menu /
-    // folder-menu events below — no hotkey, no focus tracking needed.
+    // Right-click multi-select support: track selection via active-leaf-change
+    // and document click events, then read the cache in the right-click menu.
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        this.refreshExplorerSelection();
+      })
+    );
+    this.registerDomEvent(document, "click", () => {
+      this.refreshExplorerSelection();
+    }, true);
 
-    // Right-click on file: add to Pisidian context
+    // Right-click on file: add to Pisidian context (multi-select aware).
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
         if (!(file instanceof TFile)) return; // skip folder-menu leakage etc.
+        // Refresh at right-click time so we have the freshest cache.
+        this.refreshExplorerSelection();
+        const multi = this.getRightClickMultiSelection(file);
+        const isMulti = multi.length > 1;
+        const title = isMulti
+          ? `Add ${multi.length} items to Pisidian context`
+          : "Send to Pisidian";
         menu.addItem((item) =>
           item
-            .setTitle("Send to Pisidian")
+            .setTitle(title)
             .setIcon("pisidian-logo")
             .onClick(async () => {
               const view = await this.activateView();
-              view?.addFileContextItem(file);
+              if (!view) return;
+              let count = 0;
+              for (const it of multi) {
+                if (it instanceof TFile) {
+                  view.addFileContextItem(it);
+                  count++;
+                } else if (it instanceof TFolder) {
+                  view.addFolderContextItem(it, true);
+                  count++;
+                }
+              }
+              new Notice(
+                `Pisidian: added ${count} item${count === 1 ? "" : "s"} to context`
+              );
             })
         );
       })
     );
 
     // Right-click on folder: add folder (recursive) to Pisidian context.
+    // Multi-select aware (works for both single and multi folder selection).
     // `folder-menu` is supported by Obsidian at runtime but not in the .d.ts.
     const folderMenuHandler = (menu: Menu, folder: TFolder) => {
+      this.refreshExplorerSelection();
+      const multi = this.getRightClickMultiSelection(folder);
+      const isMulti = multi.length > 1;
+      const title = isMulti
+        ? `Add ${multi.length} items to Pisidian context`
+        : "Add folder to Pisidian context";
       menu.addItem((item) =>
         item
-          .setTitle("Add folder to Pisidian context")
+          .setTitle(title)
           .setIcon("pisidian-logo")
           .onClick(async () => {
             const view = await this.activateView();
-            view?.addFolderContextItem(folder, true);
+            if (!view) return;
+            let count = 0;
+            for (const it of multi) {
+              if (it instanceof TFile) {
+                view.addFileContextItem(it);
+                count++;
+              } else if (it instanceof TFolder) {
+                view.addFolderContextItem(it, true);
+                count++;
+              }
+            }
+            new Notice(
+              `Pisidian: added ${count} item${count === 1 ? "" : "s"} to context`
+            );
           })
       );
     };
