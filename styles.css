@@ -198,6 +198,351 @@
   50% { opacity: 0; }
 }
 
+.pi-agent-option-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.pi-agent-option-chips-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.pi-agent-option-chip {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: 1px solid var(--interactive-accent);
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  font-family: inherit;
+}
+
+.pi-agent-option-chip:hover {
+  background: var(--interactive-accent-hover);
+  transform: translateY(-1px);
+}
+
+.pi-agent-option-chip:focus-visible {
+  outline: 2px solid var(--interactive-accent-hover);
+  outline-offset: 2px;
+}
+
+.pi-agent-option-chip.is-selected {
+  background: var(--background-modifier-accent);
+  color: var(--text-on-accent);
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+.pi-agent-option-submit,
+.pi-agent-option-clear {
+  margin-left: 4px;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.pi-agent-option-submit {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.pi-agent-option-submit:hover:not(.is-disabled) {
+  background: var(--interactive-accent-hover);
+}
+
+.pi-agent-option-submit.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pi-agent-option-clear {
+  background: var(--background-modifier-border);
+  color: var(--text-normal);
+}
+
+/* Usage Stats Modal */
+.pi-agent-usage-modal {
+  width: 880px;
+  max-width: calc(100vw - 32px);
+  height: 80vh;
+  max-height: 80vh;
+  display: flex !important;
+  flex-direction: column;
+  padding: 0 !important;
+}
+
+.pi-agent-usage-modal .modal-content {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pi-agent-usage-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  flex-shrink: 0;
+}
+
+.pi-agent-usage-title {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+  flex: 1;
+  min-width: 0;
+}
+
+.pi-agent-usage-title svg {
+  color: var(--interactive-accent);
+  flex-shrink: 0;
+}
+
+.pi-agent-usage-range-label {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+
+.pi-agent-usage-btn-icon {
+  background: none;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.pi-agent-usage-btn-icon:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-usage-rangebar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.pi-agent-usage-preset {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.12s;
+  font-family: inherit;
+}
+
+.pi-agent-usage-preset:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-usage-preset.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-usage-custom-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pi-agent-usage-custom-range input {
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  color-scheme: dark light;
+}
+
+.pi-agent-usage-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-usage-summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1px;
+  background: var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.pi-agent-usage-card {
+  background: var(--background-secondary);
+  padding: 10px 14px;
+}
+
+.pi-agent-usage-card-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+
+.pi-agent-usage-card-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-usage-card-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-usage-table {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.pi-agent-usage-table-el {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.pi-agent-usage-table-el thead th {
+  position: sticky;
+  top: 0;
+  background: var(--background-secondary);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
+  z-index: 1;
+}
+
+.pi-agent-usage-table-el thead th.is-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.pi-agent-usage-table-el thead th.is-sortable:hover {
+  color: var(--text-normal);
+}
+
+.pi-agent-usage-table-el tbody tr {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pi-agent-usage-table-el tbody tr:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pi-agent-usage-table-el tbody td {
+  padding: 8px 10px;
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-usage-model-name {
+  font-weight: 500;
+}
+
+.pi-agent-usage-model-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.pi-agent-usage-bar {
+  display: inline-block;
+  width: 70px;
+  height: 6px;
+  background: var(--background-modifier-border);
+  border-radius: 3px;
+  overflow: hidden;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.pi-agent-usage-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--interactive-accent), color-mix(in srgb, var(--interactive-accent) 60%, transparent));
+  border-radius: 3px;
+}
+
+.pi-agent-usage-pct {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-usage-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.pi-agent-usage-footer {
+  padding: 8px 16px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--background-secondary);
+  flex-shrink: 0;
+}
+
+.pi-agent-usage-foot-hint {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 10px;
+}
+
 .pi-agent-compaction-summary {
   margin: 8px 0;
   padding: 10px 12px;

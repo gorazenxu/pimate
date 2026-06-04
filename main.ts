@@ -4,6 +4,10 @@ import {
   PluginManifest,
   WorkspaceLeaf,
   Notice,
+  TFile,
+  TFolder,
+  TAbstractFile,
+  Menu,
   addIcon,
 } from "obsidian";
 import {
@@ -26,9 +30,19 @@ export default class PiAgentPlugin extends Plugin {
     super(app, manifest);
   }
 
+  /**
+   * Get the multi-selection at the moment of right-click.
+   * Multi-selection in Obsidian's file explorer works like this:
+   *   - Alt+click a file/folder: add to selection
+   *   - Right-click on a selected item: Obsidian's context menu fires
+   * For folders, Obsidian doesn't expose a public multi-selection API,
+   * so we fall back to just the right-clicked anchor. Users can right-click
+   * each folder separately if they want to add multiple.
+   */
+
   async onload(): Promise<void> {
     // 注册自定义的 Pisidian 芯片 logo 图标 (包含 CPU 芯片引脚与核心字母 π)
-    addIcon("pisidian-logo", `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/><path d="M8.5 9.5h7M11 9.5 Q 10.5 13, 8.5 15M13.5 9.5 L 13.5 13.5 Q 13.5 15, 15 15"/></svg>`);
+    addIcon("pisidian-logo", `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14v14H5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3M8.5 9.5h7M11 9.5Q10.5 13 8.5 15M13.5 9.5L13.5 13.5Q13.5 15 15 15"/></svg>`);
 
     await this.loadSettings();
 
@@ -40,6 +54,8 @@ export default class PiAgentPlugin extends Plugin {
 
     // Add ribbon icon to open Pisidian
     this.addRibbonIcon("pisidian-logo", "Open Pisidian", () => {
+      const lang = (this.settings?.language as string) === "en" ? "en" : "zh";
+      new Notice(lang === "zh" ? "正在启动 Pisidian..." : "Starting Pisidian...");
       this.activateView();
     });
 
@@ -207,6 +223,42 @@ export default class PiAgentPlugin extends Plugin {
         await view?.insertLastAssistantIntoActiveNote();
       },
     });
+
+    // Right-click multi-select support is handled at the file-menu /
+    // folder-menu events below — no hotkey, no focus tracking needed.
+
+    // Right-click on file: add to Pisidian context
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
+        if (!(file instanceof TFile)) return; // skip folder-menu leakage etc.
+        menu.addItem((item) =>
+          item
+            .setTitle("Send to Pisidian")
+            .setIcon("pisidian-logo")
+            .onClick(async () => {
+              const view = await this.activateView();
+              view?.addFileContextItem(file);
+            })
+        );
+      })
+    );
+
+    // Right-click on folder: add folder (recursive) to Pisidian context.
+    // `folder-menu` is supported by Obsidian at runtime but not in the .d.ts.
+    const folderMenuHandler = (menu: Menu, folder: TFolder) => {
+      menu.addItem((item) =>
+        item
+          .setTitle("Add folder to Pisidian context")
+          .setIcon("pisidian-logo")
+          .onClick(async () => {
+            const view = await this.activateView();
+            view?.addFolderContextItem(folder, true);
+          })
+      );
+    };
+    this.registerEvent(
+      (this.app.workspace.on as any)("folder-menu", folderMenuHandler)
+    );
 
     // Add settings tab
     this.addSettingTab(new PiAgentSettingTab(this.app, this));

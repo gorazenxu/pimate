@@ -1161,10 +1161,126 @@ export class PiAgentView extends ItemView {
 
       this.streamingTextEl = null;
       this.streamingCursorEl = null;
+
+      // Inline option chips: when the AI ends its message with a list of
+      // numbered/lettered options followed by a question, render them as
+      // clickable chips that fill the input. The user can also type freely.
+      const parsed = this.parseOptionsFromMessage(this.currentRawText);
+      if (parsed && parsed.options.length >= 2) {
+        this.renderOptionChips(this.currentAssistantMsg, parsed.options, parsed.isQuestion);
+      }
+
       this.scrollToBottom();
     } else {
       this.scrollToBottom();
     }
+  }
+
+  private parseOptionsFromMessage(
+    text: string
+  ): { options: string[]; isQuestion: boolean } | null {
+    if (!text) return null;
+    const lines = text.split("\n").map((l) => l.trim());
+    let current: string[] = [];
+    let best: string[] = [];
+    const optionRe = /^(?:\d+[.)]|[一二三四五六七八九十]+[、.)]|[a-zA-Z][.)]|[-*•])\s+(.+)$/;
+    for (const line of lines) {
+      if (line === "") {
+        if (current.length > best.length) best = current;
+        current = [];
+        continue;
+      }
+      const m = line.match(optionRe);
+      if (m) {
+        current.push(m[2].trim());
+      } else {
+        if (current.length > best.length) best = current;
+        current = [];
+      }
+    }
+    if (current.length > best.length) best = current;
+    if (best.length < 2) return null;
+    // Optional: verify the assistant also asked a question in the message
+    // somewhere — this is just a label hint, not a hard requirement.
+    const asksQuestion = lines.some(
+      (l) => /[?？]\s*$/.test(l) || /要.{0,6}[吗？]/.test(l) || /请选择|请告诉我/.test(l)
+    );
+    return { options: best.slice(0, 8), isQuestion: asksQuestion };
+  }
+
+  private renderOptionChips(
+    message: RenderedMessage,
+    options: string[],
+    isQuestion: boolean
+  ): void {
+    if (message.contentEl.querySelector(".pi-agent-option-chips")) return;
+    const isZh = this.plugin.settings.language === "zh";
+    const wrap = message.contentEl.createDiv("pi-agent-option-chips");
+    const label = wrap.createDiv("pi-agent-option-chips-label");
+    label.setText(
+      isQuestion
+        ? isZh
+          ? "多选（点击问题里的选项）："
+          : "Multi-select (options from the question):"
+        : isZh
+          ? "多选："
+          : "Multi-select:"
+    );
+
+    const selected = new Set<string>();
+    const chipEls: HTMLElement[] = [];
+
+    for (const opt of options) {
+      const chip = wrap.createEl("button", {
+        text: opt,
+        cls: "pi-agent-option-chip",
+        attr: { type: "button" },
+      });
+      chipEls.push(chip);
+      chip.onclick = () => {
+        if (selected.has(opt)) {
+          selected.delete(opt);
+          chip.removeClass("is-selected");
+        } else {
+          selected.add(opt);
+          chip.addClass("is-selected");
+        }
+        updateSubmit();
+      };
+    }
+
+    const submit = wrap.createEl("button", {
+      text: isZh ? "提交 (0)" : "Submit (0)",
+      cls: "pi-agent-option-submit is-disabled",
+      attr: { type: "button" },
+    });
+    submit.onclick = () => {
+      if (selected.size === 0) return;
+      const text = Array.from(selected).join("\n");
+      this.setInputText(text);
+      this.inputEl?.focus();
+      // Trigger send after the input is set.
+      this.sendMessage();
+    };
+
+    const clearBtn = wrap.createEl("button", {
+      text: isZh ? "清空" : "Clear",
+      cls: "pi-agent-option-clear",
+      attr: { type: "button" },
+    });
+    clearBtn.onclick = () => {
+      selected.clear();
+      chipEls.forEach((c) => c.removeClass("is-selected"));
+      updateSubmit();
+    };
+
+    const updateSubmit = () => {
+      const count = selected.size;
+      submit.setText(
+        isZh ? `提交 (${count})` : `Submit (${count})`
+      );
+      submit.toggleClass("is-disabled", count === 0);
+    };
   }
 
   private handleToolStart(event: RpcEvent): void {
@@ -1817,6 +1933,12 @@ export class PiAgentView extends ItemView {
         .setIcon("bar-chart-2")
         .onClick(() => this.showStats())
     );
+    menu.addItem((item) =>
+      item
+        .setTitle(isZh ? "Token 用量..." : "Token Usage…")
+        .setIcon("bar-chart-3")
+        .onClick(() => this.showUsageStats())
+    );
     menu.addSeparator();
     menu.addItem((item) =>
       item
@@ -2005,6 +2127,10 @@ export class PiAgentView extends ItemView {
     } catch (err) {
       new Notice(`Compaction failed: ${(err as Error).message}`);
     }
+  }
+
+  private showUsageStats(): void {
+    new UsageStatsModal(this.app, this.plugin.settings.language).open();
   }
 
   private async showStats(): Promise<void> {
@@ -2982,13 +3108,36 @@ export class PiAgentView extends ItemView {
     return ((result.data as any)?.text || "").trim();
   }
 
+  /**
+   * Files that Pisidian considers attachable to chat context.
+   * Includes markdown (for reading), PDFs (for vision-capable models),
+   * and common image formats (for vision models).
+   */
+  private getAttachableFiles(): TFile[] {
+    const exts = new Set([
+      "md", "markdown",
+      "pdf",
+      "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif",
+    ]);
+    return this.app.vault
+      .getFiles()
+      .filter((f) => exts.has(f.extension.toLowerCase()));
+  }
+
+  /** Returns a small emoji-style tag for the file type (used in @ dropdown). */
+  private getFileTypeIcon(extension: string): string {
+    const e = extension.toLowerCase();
+    if (e === "pdf") return "📄";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"].includes(e)) return "🖼";
+    return "📝"; // markdown
+  }
+
   private async addFileContext(): Promise<void> {
-    const files = this.app.vault.getMarkdownFiles();
+    const files = this.getAttachableFiles();
     if (files.length === 0) {
-      new Notice("No markdown files in this vault");
+      new Notice("No attachable files in this vault");
       return;
     }
-
     new FileSuggestModal(this.app, files, (file) => this.addFileContextItem(file)).open();
   }
 
@@ -3001,7 +3150,7 @@ export class PiAgentView extends ItemView {
     this.addFileContextItem(file);
   }
 
-  private addFileContextItem(file: TFile): void {
+  public addFileContextItem(file: TFile): void {
     this.addContextItem({
       id: `ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       type: "file",
@@ -3010,7 +3159,7 @@ export class PiAgentView extends ItemView {
     });
   }
 
-  private addFolderContextItem(folder: TFolder, isRecursive: boolean): void {
+  public addFolderContextItem(folder: TFolder, isRecursive: boolean): void {
     const path = folder.path || "/";
     this.addContextItem({
       id: `ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -3196,17 +3345,7 @@ export class PiAgentView extends ItemView {
     const selectionItems = this.contextItems.filter((item) => item.type === "selection");
     const fileText = fileItems.map((item) => `@${item.value}`).join(" ");
     const folderText = folderItems
-      .map((item) => {
-        const folderPath = item.value;
-        const list = this.listFolderFiles(folderPath, item.mimeType === "recursive");
-        if (list.length === 0) {
-          return `Folder @${folderPath} (empty)`;
-        }
-        return (
-          `Folder @${folderPath} (${list.length} files):\n` +
-          list.map((p) => `- ${p}`).join("\n")
-        );
-      })
+      .map((item) => `Folder @${item.value}`)
       .join("\n\n");
     const selectionText = selectionItems
       .map((item, index) => `Selection ${index + 1}:\n${item.value}`)
@@ -3433,6 +3572,7 @@ export class PiAgentView extends ItemView {
             this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary");
           } else if (msg.role === "assistant") {
             const rendered = this.addMessage("assistant", "");
+            this.currentAssistantMsg = rendered;
             if (Array.isArray(msg.content)) {
               for (const block of msg.content) {
                 if (block.type === "text" && block.text) {
@@ -3464,9 +3604,29 @@ export class PiAgentView extends ItemView {
                   header.onclick = () => {
                     tb.toggleClass("is-collapsed", !tb.hasClass("is-collapsed"));
                   };
+                } else if (block.type === "toolCall") {
+                  this.handleToolStart({
+                    type: "tool_execution_start",
+                    toolName: block.name,
+                    toolCallId: block.id,
+                    args: block.arguments
+                  });
                 }
               }
             }
+            this.currentAssistantMsg = null;
+          } else if (msg.role === "toolResult") {
+            this.handleToolEnd({
+              type: "tool_execution_end",
+              toolName: msg.toolName,
+              toolCallId: msg.toolCallId,
+              isError: msg.isError,
+              result: {
+                content: msg.content,
+                isError: msg.isError,
+                details: msg.details
+              }
+            });
           }
         }
         this.scrollToBottom(true, true);
@@ -3740,7 +3900,7 @@ export class PiAgentView extends ItemView {
     }
 
     const q = query.toLowerCase();
-    const files = this.app.vault.getMarkdownFiles();
+    const files = this.getAttachableFiles();
     const folders: TFolder[] = (this.app.vault as any).getAllFolders
       ? (this.app.vault as any).getAllFolders()
       : this.collectAllFolders();
@@ -3800,7 +3960,10 @@ export class PiAgentView extends ItemView {
       const itemEl = this.mentionDropdown!.createDiv({
         cls: `pi-agent-mention-item ${index === this.activeMentionIndex ? "is-active" : ""}`,
       });
-      const icon = entry.kind === "folder" ? "📁" : "📄";
+      const icon =
+        entry.kind === "folder"
+          ? "📁"
+          : this.getFileTypeIcon(entry.file.extension);
       const label =
         entry.kind === "folder"
           ? entry.folder.path || "/"
@@ -4675,5 +4838,622 @@ export class ThinkingLevelSuggestModal extends SuggestModal<ThinkingLevelOption>
 
   async onChooseSuggestion(option: ThinkingLevelOption): Promise<void> {
     await this.onChoose(option);
+  }
+}
+
+// ─── Usage Stats Modal (mirrors pi-web UsageStats) ────────────────────
+type UsageRangePreset =
+  | "today"
+  | "yesterday"
+  | "last7"
+  | "last30"
+  | "thisMonth"
+  | "all"
+  | "custom";
+
+interface UsageModelRow {
+  provider: string;
+  model: string;
+  messageCount: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheTotal: number;
+  totalTokens: number;
+  cost: number;
+  hitRate: number | null;
+  firstUsed: number | null;
+  lastUsed: number | null;
+}
+
+interface UsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheTotal: number;
+  totalTokens: number;
+  cost: number;
+  messageCount: number;
+}
+
+interface UsageResult {
+  from: number | null;
+  to: number | null;
+  sessionCount: number;
+  byModel: UsageModelRow[];
+  totals: UsageTotals;
+}
+
+type UsageSortKey =
+  | "messageCount"
+  | "totalTokens"
+  | "input"
+  | "output"
+  | "cacheRead"
+  | "cacheWrite"
+  | "cacheTotal"
+  | "hitRate"
+  | "cost";
+
+function startOfLocalDay(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function endOfLocalDay(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+function toLocalInputValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fromLocalInputValue(s: string): Date {
+  return new Date(s);
+}
+function fmtNum(n: number): string {
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + "B";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 10_000) return (n / 1000).toFixed(1) + "k";
+  if (n >= 1000) return (n / 1000).toFixed(2) + "k";
+  return String(n);
+}
+function fmtCost(n: number): string {
+  if (n === 0) return "$0";
+  if (n < 0.0001) return "<$0.0001";
+  if (n < 0.01) return "$" + n.toFixed(4);
+  if (n < 1) return "$" + n.toFixed(3);
+  return "$" + n.toFixed(2);
+}
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function computeHitRate(input: number, cacheRead: number): number | null {
+  const denom = input + cacheRead;
+  if (denom <= 0) return null;
+  return cacheRead / denom;
+}
+function hitRateColor(hr: number | null): string {
+  if (hr === null) return "var(--text-muted)";
+  if (hr >= 0.7) return "rgba(34, 197, 94, 0.95)";
+  if (hr >= 0.3) return "rgba(234, 179, 8, 0.95)";
+  return "rgba(239, 68, 68, 0.95)";
+}
+function hitRateLabel(hr: number | null): string {
+  if (hr === null) return "—";
+  return (hr * 100).toFixed(1) + "%";
+}
+
+function buildRange(
+  preset: UsageRangePreset,
+  customFrom: string,
+  customTo: string
+): { from: number | null; to: number | null; label: string } {
+  const now = new Date();
+  switch (preset) {
+    case "today":
+      return {
+        from: startOfLocalDay(now).getTime(),
+        to: endOfLocalDay(now).getTime(),
+        label: "今天 / Today",
+      };
+    case "yesterday": {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      return {
+        from: startOfLocalDay(y).getTime(),
+        to: endOfLocalDay(y).getTime(),
+        label: "昨天 / Yesterday",
+      };
+    }
+    case "last7": {
+      const s = new Date(now);
+      s.setDate(s.getDate() - 6);
+      return {
+        from: startOfLocalDay(s).getTime(),
+        to: endOfLocalDay(now).getTime(),
+        label: "最近 7 天 / Last 7 days",
+      };
+    }
+    case "last30": {
+      const s = new Date(now);
+      s.setDate(s.getDate() - 29);
+      return {
+        from: startOfLocalDay(s).getTime(),
+        to: endOfLocalDay(now).getTime(),
+        label: "最近 30 天 / Last 30 days",
+      };
+    }
+    case "thisMonth": {
+      const s = new Date(now.getFullYear(), now.getMonth(), 1);
+      return {
+        from: startOfLocalDay(s).getTime(),
+        to: endOfLocalDay(now).getTime(),
+        label: "本月 / This month",
+      };
+    }
+    case "all":
+      return { from: null, to: null, label: "全部 / All time" };
+    case "custom": {
+      const from = customFrom
+        ? fromLocalInputValue(customFrom).getTime()
+        : startOfLocalDay(now).getTime();
+      const to = customTo ? fromLocalInputValue(customTo).getTime() : now.getTime();
+      const f = new Date(from);
+      const t = new Date(to);
+      const fmt = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
+      return { from, to, label: `${fmt(f)} – ${fmt(t)}` };
+    }
+  }
+}
+
+function scanUsageRange(
+  sessionsBaseDir: string,
+  from: number | null,
+  to: number | null
+): UsageResult {
+  const fs = require("fs") as typeof import("fs");
+  const path = require("path") as typeof import("path");
+  const byModel = new Map<string, UsageModelRow>();
+  const totals: UsageTotals = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cacheTotal: 0,
+    totalTokens: 0,
+    cost: 0,
+    messageCount: 0,
+  };
+  let sessionCount = 0;
+  if (!fs.existsSync(sessionsBaseDir)) {
+    return { from, to, sessionCount, byModel: [], totals };
+  }
+  const workspaceDirs = fs
+    .readdirSync(sessionsBaseDir)
+    .filter((n) => n.startsWith("--") && n.endsWith("--"))
+    .map((n) => path.join(sessionsBaseDir, n));
+  for (const wsDir of workspaceDirs) {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(wsDir).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      const fullPath = path.join(wsDir, f);
+      let lines: string[] = [];
+      try {
+        const content = fs.readFileSync(fullPath, "utf8");
+        lines = content.split(/\r?\n/);
+      } catch {
+        continue;
+      }
+      let sessionTouched = false;
+      for (const line of lines) {
+        if (!line) continue;
+        let evt: any;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (evt?.type !== "message") continue;
+        const msg = evt.message;
+        if (!msg || msg.role !== "assistant") continue;
+        const ts = typeof evt.timestamp === "string" ? Date.parse(evt.timestamp) : 0;
+        if (ts && ((from != null && ts < from) || (to != null && ts > to))) {
+          continue;
+        }
+        const usage = msg.usage;
+        if (!usage) continue;
+        // provider / model 位于 evt.message 内部（不在事件顶层），
+        // 同时保留顶层 fallback 以兼容早期会话。
+        const provider =
+          (msg.provider as string) ||
+          (evt.provider as string) ||
+          "unknown";
+        const model =
+          (msg.model as string) ||
+          (evt.model as string) ||
+          "unknown";
+        const key = `${provider}::${model}`;
+        let row = byModel.get(key);
+        if (!row) {
+          row = {
+            provider,
+            model,
+            messageCount: 0,
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cacheTotal: 0,
+            totalTokens: 0,
+            cost: 0,
+            hitRate: null,
+            firstUsed: null,
+            lastUsed: null,
+          };
+          byModel.set(key, row);
+        }
+        const input = Number(usage.input) || 0;
+        const output = Number(usage.output) || 0;
+        const cacheRead = Number(usage.cacheRead) || 0;
+        const cacheWrite = Number(usage.cacheWrite) || 0;
+        const total = Number(usage.totalTokens) || input + output + cacheRead + cacheWrite;
+        const cost = Number(usage.cost?.total) || 0;
+        row.messageCount += 1;
+        row.input += input;
+        row.output += output;
+        row.cacheRead += cacheRead;
+        row.cacheWrite += cacheWrite;
+        row.cacheTotal += cacheRead + cacheWrite;
+        row.totalTokens += total;
+        row.cost += cost;
+        if (ts) {
+          if (row.firstUsed == null || ts < row.firstUsed) row.firstUsed = ts;
+          if (row.lastUsed == null || ts > row.lastUsed) row.lastUsed = ts;
+        }
+        totals.input += input;
+        totals.output += output;
+        totals.cacheRead += cacheRead;
+        totals.cacheWrite += cacheWrite;
+        totals.totalTokens += total;
+        totals.cost += cost;
+        totals.messageCount += 1;
+        sessionTouched = true;
+      }
+      if (sessionTouched) sessionCount += 1;
+    }
+  }
+  // Compute hit rates and cache totals.
+  for (const row of byModel.values()) {
+    row.hitRate = computeHitRate(row.input, row.cacheRead);
+  }
+  totals.cacheTotal = totals.cacheRead + totals.cacheWrite;
+  // Sort by total tokens desc.
+  const list = Array.from(byModel.values()).sort(
+    (a, b) => b.totalTokens - a.totalTokens
+  );
+  return { from, to, sessionCount, byModel: list, totals };
+}
+
+class UsageStatsModal extends Modal {
+  private preset: UsageRangePreset = "last7";
+  private customFrom: string = toLocalInputValue(
+    startOfLocalDay(new Date(new Date().setDate(new Date().getDate() - 6)))
+  );
+  private customTo: string = toLocalInputValue(new Date());
+  private data: UsageResult | null = null;
+  private loading = false;
+  private error: string | null = null;
+  private sortKey: UsageSortKey = "totalTokens";
+  private sortDir: "asc" | "desc" = "desc";
+  private bodyEl: HTMLElement | null = null;
+  private summaryEl: HTMLElement | null = null;
+  private tableEl: HTMLElement | null = null;
+  private statusEl: HTMLElement | null = null;
+  private rangeLabelEl: HTMLElement | null = null;
+  private reqId = 0;
+  private lang: "zh" | "en" = "zh";
+
+  constructor(app: App, lang: string) {
+    super(app);
+    this.lang = lang === "zh" ? "zh" : "en";
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("pi-agent-usage-modal");
+    this.render();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+
+  private render(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    const isZh = this.lang === "zh";
+    const range = buildRange(this.preset, this.customFrom, this.customTo);
+    // Header
+    const header = contentEl.createDiv("pi-agent-usage-header");
+    const titleWrap = header.createDiv("pi-agent-usage-title");
+    titleWrap.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
+    const titleText = titleWrap.createSpan({ text: isZh ? "Token 用量" : "Token Usage" });
+    titleText.style.marginLeft = "6px";
+    this.rangeLabelEl = titleWrap.createSpan({ text: " · " + range.label, cls: "pi-agent-usage-range-label" });
+    const refreshBtn = header.createEl("button", { cls: "pi-agent-usage-btn-icon", attr: { title: isZh ? "刷新" : "Refresh", "aria-label": "Refresh" } });
+    refreshBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>`;
+    refreshBtn.onclick = () => this.scan();
+    const closeBtn = header.createEl("button", { cls: "pi-agent-usage-btn-icon", attr: { title: isZh ? "关闭" : "Close", "aria-label": "Close" } });
+    closeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+    closeBtn.onclick = () => this.close();
+    // Range selector
+    const rangeBar = contentEl.createDiv("pi-agent-usage-rangebar");
+    const presets: { id: UsageRangePreset; label: string }[] = [
+      { id: "today", label: isZh ? "今天" : "Today" },
+      { id: "yesterday", label: isZh ? "昨天" : "Yesterday" },
+      { id: "last7", label: isZh ? "最近 7 天" : "Last 7d" },
+      { id: "last30", label: isZh ? "最近 30 天" : "Last 30d" },
+      { id: "thisMonth", label: isZh ? "本月" : "This month" },
+      { id: "all", label: isZh ? "全部" : "All time" },
+      { id: "custom", label: isZh ? "自定义…" : "Custom…" },
+    ];
+    for (const p of presets) {
+      const btn = rangeBar.createEl("button", {
+        text: p.label,
+        cls: "pi-agent-usage-preset" + (this.preset === p.id ? " is-active" : ""),
+      });
+      btn.onclick = () => {
+        this.preset = p.id;
+        this.render();
+        this.scan();
+      };
+    }
+    if (this.preset === "custom") {
+      const wrap = rangeBar.createDiv("pi-agent-usage-custom-range");
+      const fromInp = wrap.createEl("input", {
+        attr: { type: "datetime-local", value: this.customFrom },
+      });
+      const arrow = wrap.createSpan({ text: "→" });
+      const toInp = wrap.createEl("input", {
+        attr: { type: "datetime-local", value: this.customTo },
+      });
+      fromInp.onchange = () => {
+        this.customFrom = fromInp.value;
+        this.scan();
+      };
+      toInp.onchange = () => {
+        this.customTo = toInp.value;
+        this.scan();
+      };
+    }
+    this.statusEl = rangeBar.createDiv("pi-agent-usage-status");
+    // Summary
+    this.summaryEl = contentEl.createDiv("pi-agent-usage-summary");
+    // Table area
+    this.tableEl = contentEl.createDiv("pi-agent-usage-table");
+    this.tableEl.style.flex = "1";
+    this.tableEl.style.overflow = "auto";
+    this.tableEl.style.minHeight = "0";
+    // Footer
+    const footer = contentEl.createDiv("pi-agent-usage-footer");
+    footer.createSpan({
+      text: isZh ? "点击列标题排序 · 数据源：~/.pi/agent/sessions" : "Click a column to sort · Data source: ~/.pi/agent/sessions",
+    });
+    footer.createSpan({ text: "Esc", cls: "pi-agent-usage-foot-hint" });
+    this.scan();
+  }
+
+  private scan(): void {
+    const reqId = ++this.reqId;
+    this.loading = true;
+    this.error = null;
+    this.updateStatus();
+    setTimeout(() => {
+      if (reqId !== this.reqId) return;
+      try {
+        const os = require("os") as typeof import("os");
+        const home = os.homedir().replace(/\\/g, "/");
+        const sessionsBaseDir = `${home}/.pi/agent/sessions`;
+        const range = buildRange(this.preset, this.customFrom, this.customTo);
+        const result = scanUsageRange(sessionsBaseDir, range.from, range.to);
+        if (reqId !== this.reqId) return;
+        this.data = result;
+        this.loading = false;
+        this.updateRangeLabel();
+        this.renderSummary();
+        this.renderTable();
+        this.updateStatus();
+      } catch (err) {
+        if (reqId !== this.reqId) return;
+        this.error = (err as Error).message;
+        this.loading = false;
+        this.updateStatus();
+      }
+    }, 0);
+  }
+
+  private updateRangeLabel(): void {
+    if (!this.rangeLabelEl) return;
+    const range = buildRange(this.preset, this.customFrom, this.customTo);
+    this.rangeLabelEl.setText(" · " + range.label);
+  }
+
+  private updateStatus(): void {
+    if (!this.statusEl) return;
+    const isZh = this.lang === "zh";
+    if (this.error) {
+      this.statusEl.setText(`❌ ${this.error}`);
+      this.statusEl.style.color = "#ef4444";
+      return;
+    }
+    if (this.loading) {
+      this.statusEl.setText(isZh ? "扫描中…" : "Scanning…");
+      this.statusEl.style.color = "var(--text-muted)";
+      return;
+    }
+    if (this.data) {
+      this.statusEl.setText(
+        `${isZh ? "已扫描" : "scanned"} ${this.data.sessionCount} ${isZh ? "个会话" : "session" + (this.data.sessionCount === 1 ? "" : "s")}`
+      );
+      this.statusEl.style.color = "var(--text-muted)";
+    }
+  }
+
+  private renderSummary(): void {
+    if (!this.summaryEl) return;
+    this.summaryEl.empty();
+    if (!this.data) return;
+    const isZh = this.lang === "zh";
+    const t = this.data.totals;
+    const hr = computeHitRate(t.input, t.cacheRead);
+    const cards = [
+      { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
+      { label: isZh ? "输入" : "Input", value: fmtNum(t.input), sub: t.input.toLocaleString() },
+      { label: isZh ? "输出" : "Output", value: fmtNum(t.output), sub: t.output.toLocaleString() },
+      {
+        label: isZh ? "缓存 Σ" : "Cache Σ",
+        value: fmtNum(t.cacheTotal),
+        sub: hr === null ? "—" : `${isZh ? "命中率" : "hit"} ${(hr * 100).toFixed(1)}%`,
+        subColor: hitRateColor(hr),
+      },
+      {
+        label: isZh ? "费用" : "Cost",
+        value: fmtCost(t.cost),
+        sub: `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`,
+      },
+    ];
+    for (const c of cards) {
+      const card = this.summaryEl.createDiv("pi-agent-usage-card");
+      card.createDiv({ text: c.label, cls: "pi-agent-usage-card-label" });
+      card.createDiv({ text: c.value, cls: "pi-agent-usage-card-value" });
+      const sub = card.createDiv({ text: c.sub, cls: "pi-agent-usage-card-sub" });
+      if (c.subColor) sub.style.color = c.subColor;
+    }
+  }
+
+  private renderTable(): void {
+    if (!this.tableEl) return;
+    this.tableEl.empty();
+    const isZh = this.lang === "zh";
+    if (this.error) {
+      this.tableEl.createDiv({
+        text: `${isZh ? "错误" : "Error"}: ${this.error}`,
+        cls: "pi-agent-usage-empty",
+      }).style.color = "#ef4444";
+      return;
+    }
+    if (!this.data) {
+      this.tableEl.createDiv({
+        text: isZh ? "加载中…" : "Loading…",
+        cls: "pi-agent-usage-empty",
+      });
+      return;
+    }
+    if (this.data.byModel.length === 0) {
+      this.tableEl.createDiv({
+        text: isZh ? "此时间范围内没有用量数据" : "No usage data in this range.",
+        cls: "pi-agent-usage-empty",
+      });
+      return;
+    }
+    const sorted = [...this.data.byModel].sort((a, b) => {
+      const aNull = a[this.sortKey] === null || a[this.sortKey] === undefined;
+      const bNull = b[this.sortKey] === null || b[this.sortKey] === undefined;
+      if (aNull && bNull) return 0;
+      if (aNull) return 1;
+      if (bNull) return -1;
+      const av = a[this.sortKey] as number;
+      const bv = b[this.sortKey] as number;
+      return this.sortDir === "desc" ? bv - av : av - bv;
+    });
+    const maxTotal = Math.max(...sorted.map((m) => m.totalTokens));
+    const totalAll = this.data.totals.totalTokens || 0;
+    const table = this.tableEl.createEl("table", { cls: "pi-agent-usage-table-el" });
+    const thead = table.createEl("thead");
+    const trh = thead.createEl("tr");
+    const cols: { key: UsageSortKey | "model" | "provider" | "share" | "firstLast"; label: string; align: "left" | "right" }[] = [
+      { key: "model", label: isZh ? "模型" : "Model", align: "left" },
+      { key: "provider", label: isZh ? "提供方" : "Provider", align: "left" },
+      { key: "messageCount", label: isZh ? "消息" : "Msgs", align: "right" },
+      { key: "input", label: isZh ? "输入" : "Input", align: "right" },
+      { key: "output", label: isZh ? "输出" : "Output", align: "right" },
+      { key: "cacheRead", label: isZh ? "缓存读" : "Cache R", align: "right" },
+      { key: "cacheWrite", label: isZh ? "缓存写" : "Cache W", align: "right" },
+      { key: "totalTokens", label: isZh ? "总计" : "Total", align: "right" },
+      { key: "hitRate", label: isZh ? "命中率" : "Hit", align: "right" },
+      { key: "cost", label: isZh ? "费用" : "Cost", align: "right" },
+      { key: "share", label: isZh ? "占比" : "Share", align: "left" },
+    ];
+    const sortArrow = (k: string) => this.sortKey === k ? (this.sortDir === "desc" ? " ↓" : " ↑") : "";
+    for (const c of cols) {
+      const th = trh.createEl("th", {
+        text: c.label + (c.key === this.sortKey ? sortArrow(c.key) : ""),
+        attr: { title: c.label },
+      });
+      th.style.textAlign = c.align;
+      if (c.key !== "share") {
+        th.addClass("is-sortable");
+        th.onclick = () => {
+          if (this.sortKey === c.key) {
+            this.sortDir = this.sortDir === "desc" ? "asc" : "desc";
+          } else {
+            this.sortKey = c.key as UsageSortKey;
+            this.sortDir = c.key === "hitRate" ? "asc" : "desc";
+          }
+          this.renderTable();
+        };
+      }
+    }
+    const tbody = table.createEl("tbody");
+    for (const m of sorted) {
+      const tr = tbody.createEl("tr");
+      // Model
+      const tdModel = tr.createEl("td");
+      tdModel.style.textAlign = "left";
+      const modelName = tdModel.createDiv({ cls: "pi-agent-usage-model-name", text: m.model });
+      const modelTime = tdModel.createDiv({ cls: "pi-agent-usage-model-time", text: `${fmtDate(m.firstUsed ? new Date(m.firstUsed).toISOString() : null)} → ${fmtDate(m.lastUsed ? new Date(m.lastUsed).toISOString() : null)}` });
+      // Provider
+      const tdProv = tr.createEl("td", { text: m.provider });
+      tdProv.style.textAlign = "left";
+      tdProv.style.color = "var(--text-muted)";
+      // Numeric cells
+      const cells: Array<[string, "right" | "left", string?]> = [
+        [m.messageCount.toLocaleString(), "right"],
+        [fmtNum(m.input), "right"],
+        [fmtNum(m.output), "right"],
+        [fmtNum(m.cacheRead), "right"],
+        [fmtNum(m.cacheWrite), "right"],
+        [fmtNum(m.totalTokens), "right"],
+        [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
+        [fmtCost(m.cost), "right"],
+      ];
+      for (const [val, align, color] of cells) {
+        const td = tr.createEl("td", { text: val });
+        td.style.textAlign = align;
+        td.style.fontVariantNumeric = "tabular-nums";
+        if (color) td.style.color = color;
+      }
+      // Share bar
+      const tdShare = tr.createEl("td");
+      tdShare.style.textAlign = "left";
+      tdShare.style.minWidth = "120px";
+      const pct = totalAll > 0 ? (m.totalTokens / totalAll) * 100 : 0;
+      const barW = maxTotal > 0 ? (m.totalTokens / maxTotal) * 100 : 0;
+      const barWrap = tdShare.createDiv({ cls: "pi-agent-usage-bar" });
+      const bar = barWrap.createDiv({ cls: "pi-agent-usage-bar-fill" });
+      bar.style.width = `${barW}%`;
+      const pctText = tdShare.createSpan({ text: `${pct.toFixed(1)}%`, cls: "pi-agent-usage-pct" });
+    }
   }
 }

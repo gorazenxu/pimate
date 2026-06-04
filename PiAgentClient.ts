@@ -1,6 +1,70 @@
 import { ChildProcess, spawn, type SpawnOptions } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { EventEmitter } from "events";
+import * as path from "path";
+import * as fs from "fs";
+
+// ─── Windows pi resolution ──────────────────────────────────────────────────
+// On Windows, `pi` is a .cmd shim that calls `node cli.js`.
+// We can't spawn `.cmd` without `shell: true` (Node limitation), and using
+// `shell: true` spawns cmd.exe which makes pi a grandchild that survives
+// Obsidian quit (orphan process problem).
+//
+// Solution: locate the actual `node` + `cli.js` pair and spawn node directly.
+// This way `node.exe` (and pi inside it) is a direct child of Electron and
+// Windows cleans it up when Obsidian dies.
+function resolveWindowsSpawn(
+  userPiPath: string
+): { cmd: string; scriptArgs: string[] } | null {
+  if (process.platform !== "win32") return null;
+  // If the user gave a full path or .exe, just use it as-is.
+  if (/[\\/]/.test(userPiPath) || /\.exe$/i.test(userPiPath)) return null;
+
+  const pathDirs = (process.env.PATH || "").split(path.delimiter);
+  for (const dir of pathDirs) {
+    if (!dir) continue;
+    const shim = path.join(dir, userPiPath + ".cmd");
+    if (!fs.existsSync(shim)) continue;
+    const shimDir = path.dirname(shim);
+    // npm shim 位于 `<install>/node_modules/.bin/`，真实包在
+    // `<install>/node_modules/@earendil-works/pi-coding-agent/`。
+    // 两种布局都试一下：
+    const installRoot = path.basename(shimDir).toLowerCase() === ".bin"
+      ? path.dirname(shimDir)
+      : shimDir;
+    const candidates = [
+      path.join(
+        installRoot,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js"
+      ),
+      path.join(
+        shimDir,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js"
+      ),
+    ];
+    for (const cliJs of candidates) {
+      if (!fs.existsSync(cliJs)) continue;
+      // 优先用 shim 同目录的 node.exe（npm 会装一个），否则用 PATH 里的 node。
+      const localNode = path.join(shimDir, "node.exe");
+      const localNode2 = path.join(installRoot, "node.exe");
+      const nodeCmd = fs.existsSync(localNode)
+        ? localNode
+        : fs.existsSync(localNode2)
+          ? localNode2
+          : "node";
+      return { cmd: nodeCmd, scriptArgs: [cliJs] };
+    }
+  }
+  return null;
+}
 
 // ─── RPC Types ─────────────────────────────────────────────────────────────
 
@@ -178,16 +242,20 @@ export class PiAgentClient extends EventEmitter {
           windowsHide: true,
         };
 
-        const child =
-          process.platform === "win32"
-            ? spawn(
-                `chcp 65001 >nul && ${[
-                  quoteWindowsExecutable(this.options.piPath),
-                  ...args.map(quoteWindowsShellArg),
-                ].join(" ")}`,
-                { ...spawnOptions, shell: true } as SpawnOptions
-              )
-            : spawn(this.options.piPath, args, spawnOptions);
+        // 直接 spawn，不再走 cmd.exe shell。
+        // 在 Windows 上，`pi` 是 .cmd shim，没 shell 跑不了——所以先
+        // 解析 shim 找到真正的 `node` + `cli.js`，直接 spawn node。
+        // 这样 pi 是 Electron 的亲生进程，Obsidian 退出时 Windows 会清理。
+        // 中文路径无影响：Node 在 Windows 上对 spawn 的 argv 走 UTF-16/UTF-8
+        // 安全传递，pi 自己用 Node 也是 UTF-8。
+        let executable = this.options.piPath;
+        let execArgs = args;
+        const resolved = resolveWindowsSpawn(this.options.piPath);
+        if (resolved) {
+          executable = resolved.cmd;
+          execArgs = [...resolved.scriptArgs, ...args];
+        }
+        const child = spawn(executable, execArgs, spawnOptions);
 
         this.process = child;
 

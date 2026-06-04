@@ -41,6 +41,8 @@ export interface PiAgentSettings {
   maxTabs: number;
   streamingRenderMode: "auto" | "pretty" | "fast";
   sessionTitles: Record<string, string>;
+  // (Hotkey for file-explorer selection was removed: it relied on internal
+  // Obsidian APIs. Multi-select is now triggered via right-click only.)
 }
 
 export const DEFAULT_SETTINGS: PiAgentSettings = {
@@ -61,6 +63,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   maxTabs: 3,
   streamingRenderMode: "auto",
   sessionTitles: {},
+  // (addExplorerSelectionHotkey removed — right-click now handles multi-select)
 };
 
 export interface DiscoveredSkill {
@@ -371,6 +374,10 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.display(); // 即时刷新设置页面
           })
       );
+
+    // File-explorer multi-select is now handled via right-click context menu
+    // (right-click on file / folder → "Send to Pisidian" or "Add N items to Pisidian context").
+    // No hotkey, no internal API dependency.
 
     // Pi executable path
     new Setting(containerEl)
