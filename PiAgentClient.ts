@@ -596,7 +596,7 @@ export class PiAgentClient extends EventEmitter {
       command: "oauth_login",
       success: false,
       error:
-        "oauth_login is not a Pi RPC command. Use the device-code login flow from the Pisidian settings tab instead.",
+        "oauth_login is not a Pi RPC command. Use the device-code login flow from the Pimate settings tab instead.",
     };
   }
 

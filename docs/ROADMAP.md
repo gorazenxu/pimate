@@ -1,4 +1,4 @@
-# Pisidian 功能补齐清单（按优先级）
+# Pimate 功能补齐清单（按优先级）
 
 目标：复刻 Claudian 的核心 Obsidian 代理体验，但后端保持 Pi RPC，不做 Claude/Codex/OpenCode 多 runtime、MCP Server 管理、Subagents。
 

@@ -34,7 +34,7 @@ export default class PiAgentPlugin extends Plugin {
   /**
    * Cached file-explorer multi-selection. Refreshed on every
    * `active-leaf-change` and `click` event. The right-click context menu
-   * reads this when the user invokes "Send to Pisidian".
+   * reads this when the user invokes "Send to Pimate".
    */
   private explorerSelection: TAbstractFile[] = [];
 
@@ -129,8 +129,8 @@ export default class PiAgentPlugin extends Plugin {
    */
 
   async onload(): Promise<void> {
-    // 注册自定义的 Pisidian 芯片 logo 图标 (包含 CPU 芯片引脚与核心字母 π)
-    addIcon("pisidian-logo", `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14v14H5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3M8.5 9.5h7M11 9.5Q10.5 13 8.5 15M13.5 9.5L13.5 13.5Q13.5 15 15 15"/></svg>`);
+    // 注册自定义的 Pimate 芯片 logo 图标 (包含 CPU 芯片引脚与核心字母 π)
+    addIcon("pimate-logo", `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14v14H5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3M8.5 9.5h7M11 9.5Q10.5 13 8.5 15M13.5 9.5L13.5 13.5Q13.5 15 15 15"/></svg>`);
 
     await this.loadSettings();
 
@@ -140,25 +140,25 @@ export default class PiAgentPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new PiAgentView(leaf, this)
     );
 
-    // Add ribbon icon to open Pisidian
-    this.addRibbonIcon("pisidian-logo", "Open Pisidian", () => {
+    // Add ribbon icon to open Pimate
+    this.addRibbonIcon("pimate-logo", "Open Pimate", () => {
       const lang = (this.settings?.language as string) === "en" ? "en" : "zh";
-      new Notice(lang === "zh" ? "正在启动 Pisidian..." : "Starting Pisidian...");
+      new Notice(lang === "zh" ? "正在启动 Pimate..." : "Starting Pimate...");
       this.activateView();
     });
 
     // Add command to open pi agent
     this.addCommand({
-      id: "open-pisidian",
-      name: "Open Pisidian Chat",
+      id: "open-pimate",
+      name: "Open Pimate Chat",
       callback: () => {
         this.activateView();
       },
     });
 
     this.addCommand({
-      id: "new-pisidian-session",
-      name: "New Pisidian session",
+      id: "new-pimate-session",
+      name: "New Pimate session",
       callback: async () => {
         const view = await this.activateView();
         await view?.newChatSession();
@@ -166,8 +166,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "close-active-pisidian-session",
-      name: "Close active Pisidian session tab",
+      id: "close-active-pimate-session",
+      name: "Close active Pimate session tab",
       callback: async () => {
         const view = await this.activateView();
         await view?.closeActiveSessionTab();
@@ -175,8 +175,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "focus-pisidian-composer",
-      name: "Focus Pisidian composer",
+      id: "focus-pimate-composer",
+      name: "Focus Pimate composer",
       callback: async () => {
         const view = await this.activateView();
         view?.focusComposer();
@@ -184,8 +184,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "commands-skills-pisidian",
-      name: "Open Pisidian commands and skills",
+      id: "commands-skills-pimate",
+      name: "Open Pimate commands and skills",
       callback: async () => {
         const view = await this.activateView();
         view?.openCommandsAndSkills();
@@ -193,8 +193,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "pisidian-previous-message",
-      name: "Pisidian: jump to previous message",
+      id: "pimate-previous-message",
+      name: "Pimate: jump to previous message",
       callback: async () => {
         const view = await this.activateView();
         view?.scrollToPreviousMessage();
@@ -202,8 +202,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "pisidian-next-message",
-      name: "Pisidian: jump to next message",
+      id: "pimate-next-message",
+      name: "Pimate: jump to next message",
       callback: async () => {
         const view = await this.activateView();
         view?.scrollToNextMessage();
@@ -211,8 +211,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "pisidian-toggle-last-tool",
-      name: "Pisidian: toggle last tool output",
+      id: "pimate-toggle-last-tool",
+      name: "Pimate: toggle last tool output",
       callback: async () => {
         const view = await this.activateView();
         view?.toggleLastToolBlock();
@@ -220,8 +220,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "pisidian-jump-last-diff",
-      name: "Pisidian: jump to last diff",
+      id: "pimate-jump-last-diff",
+      name: "Pimate: jump to last diff",
       callback: async () => {
         const view = await this.activateView();
         view?.scrollToLastDiff();
@@ -229,8 +229,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "resume-pisidian-session",
-      name: "Resume previous Pisidian session",
+      id: "resume-pimate-session",
+      name: "Resume previous Pimate session",
       callback: async () => {
         const view = await this.activateView();
         await view?.resumePreviousSession();
@@ -238,8 +238,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "fork-pisidian-session",
-      name: "Fork Pisidian session from previous prompt",
+      id: "fork-pimate-session",
+      name: "Fork Pimate session from previous prompt",
       callback: async () => {
         const view = await this.activateView();
         await view?.forkFromPreviousPrompt();
@@ -247,8 +247,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "clone-pisidian-branch",
-      name: "Clone current Pisidian branch",
+      id: "clone-pimate-branch",
+      name: "Clone current Pimate branch",
       callback: async () => {
         const view = await this.activateView();
         await view?.cloneCurrentSessionBranch();
@@ -257,8 +257,8 @@ export default class PiAgentPlugin extends Plugin {
 
     // Add command to send selected text to pi
     this.addCommand({
-      id: "send-selection-to-pisidian",
-      name: "Send selection to Pisidian",
+      id: "send-selection-to-pimate",
+      name: "Send selection to Pimate",
       editorCallback: async (editor) => {
         const selection = editor.getSelection();
         if (!selection) {
@@ -271,8 +271,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "inline-edit-with-pisidian",
-      name: "Inline edit selection with Pisidian",
+      id: "inline-edit-with-pimate",
+      name: "Inline edit selection with Pimate",
       editorCallback: async (editor) => {
         const selection = editor.getSelection();
         if (!selection) {
@@ -290,8 +290,8 @@ export default class PiAgentPlugin extends Plugin {
 
     // Add command to send current file as context
     this.addCommand({
-      id: "send-file-to-pisidian",
-      name: "Send current file to Pisidian",
+      id: "send-file-to-pimate",
+      name: "Send current file to Pimate",
       callback: async () => {
         const file = this.app.workspace.getActiveFile();
         if (!file) {
@@ -304,8 +304,8 @@ export default class PiAgentPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "insert-last-pisidian-response",
-      name: "Insert last Pisidian response into current note",
+      id: "insert-last-pimate-response",
+      name: "Insert last Pimate response into current note",
       callback: async () => {
         const view = await this.activateView();
         await view?.insertLastAssistantIntoActiveNote();
@@ -323,7 +323,7 @@ export default class PiAgentPlugin extends Plugin {
       this.refreshExplorerSelection();
     }, true);
 
-    // Right-click on file: add to Pisidian context (multi-select aware).
+    // Right-click on file: add to Pimate context (multi-select aware).
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
         if (!(file instanceof TFile)) return; // skip folder-menu leakage etc.
@@ -332,12 +332,12 @@ export default class PiAgentPlugin extends Plugin {
         const multi = this.getRightClickMultiSelection(file);
         const isMulti = multi.length > 1;
         const title = isMulti
-          ? `Add ${multi.length} items to Pisidian context`
-          : "Send to Pisidian";
+          ? `Add ${multi.length} items to Pimate context`
+          : "Send to Pimate";
         menu.addItem((item) =>
           item
             .setTitle(title)
-            .setIcon("pisidian-logo")
+            .setIcon("pimate-logo")
             .onClick(async () => {
               const view = await this.activateView();
               if (!view) return;
@@ -352,14 +352,14 @@ export default class PiAgentPlugin extends Plugin {
                 }
               }
               new Notice(
-                `Pisidian: added ${count} item${count === 1 ? "" : "s"} to context`
+                `Pimate: added ${count} item${count === 1 ? "" : "s"} to context`
               );
             })
         );
       })
     );
 
-    // Right-click on folder: add folder (recursive) to Pisidian context.
+    // Right-click on folder: add folder (recursive) to Pimate context.
     // Multi-select aware (works for both single and multi folder selection).
     // `folder-menu` is supported by Obsidian at runtime but not in the .d.ts.
     const folderMenuHandler = (menu: Menu, folder: TFolder) => {
@@ -367,12 +367,12 @@ export default class PiAgentPlugin extends Plugin {
       const multi = this.getRightClickMultiSelection(folder);
       const isMulti = multi.length > 1;
       const title = isMulti
-        ? `Add ${multi.length} items to Pisidian context`
-        : "Add folder to Pisidian context";
+        ? `Add ${multi.length} items to Pimate context`
+        : "Add folder to Pimate context";
       menu.addItem((item) =>
         item
           .setTitle(title)
-          .setIcon("pisidian-logo")
+          .setIcon("pimate-logo")
           .onClick(async () => {
             const view = await this.activateView();
             if (!view) return;
@@ -387,7 +387,7 @@ export default class PiAgentPlugin extends Plugin {
               }
             }
             new Notice(
-              `Pisidian: added ${count} item${count === 1 ? "" : "s"} to context`
+              `Pimate: added ${count} item${count === 1 ? "" : "s"} to context`
             );
           })
       );
@@ -399,13 +399,13 @@ export default class PiAgentPlugin extends Plugin {
     // Add settings tab
     this.addSettingTab(new PiAgentSettingTab(this.app, this));
 
-    console.log("Pisidian plugin loaded");
+    console.log("Pimate plugin loaded");
   }
 
   async onunload(): Promise<void> {
     // Detach all pi agent views
     this.app.workspace.detachLeavesOfType(PI_AGENT_VIEW_TYPE);
-    console.log("Pisidian plugin unloaded");
+    console.log("Pimate plugin unloaded");
   }
 
   /**
@@ -476,12 +476,12 @@ export default class PiAgentPlugin extends Plugin {
           this.settings.provider = provider.id;
           this.settings.modelId = provider.defaultModel;
           this.saveSettings();
-          console.log(`[Pisidian] 自动检测到已配置凭据的厂商，默认模型设为 ${provider.id}/${provider.defaultModel}`);
+          console.log(`[Pimate] 自动检测到已配置凭据的厂商，默认模型设为 ${provider.id}/${provider.defaultModel}`);
           break;
         }
       }
     } catch (e) {
-      console.error("[Pisidian] 自动检测已配置模型失败:", e);
+      console.error("[Pimate] 自动检测已配置模型失败:", e);
     }
   }
 

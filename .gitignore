@@ -1,3 +1,5 @@
 node_modules/
 *.js.map
 .DS_Store
+pnpm-lock.yaml
+pnpm-workspace.yaml

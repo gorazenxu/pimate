@@ -1,7 +1,7 @@
 {
-  "name": "pisidian",
-  "version": "1.0.9",
-  "description": "Pisidian embeds Pi Coding Agent into Obsidian",
+  "name": "pimate",
+  "version": "1.0.10",
+  "description": "Pimate embeds Pi Coding Agent into Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
@@ -10,7 +10,7 @@
   },
   "keywords": [
     "obsidian-plugin",
-    "pisidian",
+    "pimate",
     "ai",
     "coding-agent"
   ],

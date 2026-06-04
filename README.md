@@ -1,11 +1,11 @@
-# Pisidian — Pi Coding Agent for Obsidian
+# Pimate — Pi Coding Agent for Obsidian
 
-> **Pisidian** embeds [Pi Coding Agent](https://pi.dev) into Obsidian as an AI collaborator for your vault. Chat directly with AI, read and edit vault files, execute commands — all without leaving Obsidian.
+> **Pimate** embeds [Pi Coding Agent](https://pi.dev) into Obsidian as an AI collaborator for your vault. Chat directly with AI, read and edit vault files, execute commands — all without leaving Obsidian.
 
 <p align="center">
   <img src="https://img.shields.io/badge/status-active-brightgreen" alt="Active">
-  <img src="https://img.shields.io/github/v/release/gorazenxu/pisidian" alt="Release">
-  <img src="https://img.shields.io/github/license/gorazenxu/pisidian" alt="License">
+  <img src="https://img.shields.io/github/v/release/gorazenxu/pimate" alt="Release">
+  <img src="https://img.shields.io/github/license/gorazenxu/pimate" alt="License">
 </p>
 
 ## Features
@@ -25,7 +25,7 @@
 
 ## Prerequisites
 
-Pisidian is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.dev) process in the background.
+Pimate is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.dev) process in the background.
 
 1. **Install Node.js 18+** (if not already installed)
 2. **Install Pi globally:**
@@ -51,18 +51,18 @@ Pisidian is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.d
 ### From Obsidian Community Plugins (once approved)
 
 1. Open Obsidian → Settings → Community plugins
-2. Search for **Pisidian**
+2. Search for **Pimate**
 3. Click Install, then Enable
 
 ### Manual (BRAT / development)
 
 1. Enable BRAT plugin in Obsidian
-2. Add `gorazenxu/pisidian`
-3. Or clone this repo into `.obsidian/plugins/pisidian/` and run `npm install && npm run build`
+2. Add `gorazenxu/pimate`
+3. Or clone this repo into `.obsidian/plugins/pimate/` and run `npm install && npm run build`
 
 ## Quick Start
 
-1. Click the **π icon** in the left ribbon, or run **Open Pisidian Chat** from the command palette
+1. Click the **π icon** in the left ribbon, or run **Open Pimate Chat** from the command palette
 2. Wait for the status bar to show **"Ready"**
 3. Type your question and press `Enter`
 4. Watch the response stream in real time
@@ -70,8 +70,8 @@ Pisidian is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.d
 ### Tips
 
 - **Attach files**: Type `@` in the input box to search and attach vault files or folders
-- **Current note**: Click `📎` → Attach current note (or `Send current file to Pisidian` command)
-- **Selected text**: Highlight text in a note, right-click → **Send selection to Pisidian**
+- **Current note**: Click `📎` → Attach current note (or `Send current file to Pimate` command)
+- **Selected text**: Highlight text in a note, right-click → **Send selection to Pimate**
 - **Quick actions**: Click `⋯` in the header for the action menu
 - **Switch model**: Click the model name in the footer bar
 - **History panel**: Click the `🕘` icon to browse past conversations
@@ -95,7 +95,7 @@ Pisidian is a **hybrid plugin** that runs a local [Pi Coding Agent](https://pi.d
 
 ## Configuration
 
-Settings are available in Obsidian → Settings → Pisidian:
+Settings are available in Obsidian → Settings → Pimate:
 
 | Setting | Description |
 |---------|-------------|
@@ -119,7 +119,7 @@ Obsidian Plugin (TypeScript)
   └── styles.css           — Claudian-inspired chat styles
 ```
 
-Pisidian launches Pi as a child process in **RPC mode** (`--mode rpc`) and communicates via JSONL messages over stdin/stdout. Pi's full toolset (read, write, edit, bash, grep, find, ls) is available to the model through this interface.
+Pimate launches Pi as a child process in **RPC mode** (`--mode rpc`) and communicates via JSONL messages over stdin/stdout. Pi's full toolset (read, write, edit, bash, grep, find, ls) is available to the model through this interface.
 
 ## Keyboard Shortcuts
 
@@ -137,8 +137,8 @@ Pisidian launches Pi as a child process in **RPC mode** (`--mode rpc`) and commu
 ## Building from Source
 
 ```bash
-git clone https://github.com/gorazenxu/pisidian.git
-cd pisidian
+git clone https://github.com/gorazenxu/pimate.git
+cd pimate
 npm install
 npm run build     # production build
 npm run dev       # watch mode

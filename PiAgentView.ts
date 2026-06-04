@@ -25,7 +25,7 @@ import {
   type MessageContent,
 } from "./PiAgentClient";
 
-export const PI_AGENT_VIEW_TYPE = "pisidian-chat-view";
+export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
 
 // ─── Message Rendering Types ────────────────────────────────────────────
 
@@ -245,8 +245,8 @@ export class PiAgentView extends ItemView {
     if (items.length === 0) {
       new Notice(
         isZh
-          ? "Pisidian：没有检测到文件管理器选中项。请先在左侧文件管理器中多选文件/文件夹。"
-          : "Pisidian: no file-explorer selection detected. Select files/folders in the file explorer first."
+          ? "Pimate：没有检测到文件管理器选中项。请先在左侧文件管理器中多选文件/文件夹。"
+          : "Pimate: no file-explorer selection detected. Select files/folders in the file explorer first."
       );
       return;
     }
@@ -263,8 +263,8 @@ export class PiAgentView extends ItemView {
     }
     new Notice(
       isZh
-        ? `Pisidian：已附加 ${count} 个选中项到上下文`
-        : `Pisidian: attached ${count} selected item${count === 1 ? "" : "s"} to context`
+        ? `Pimate：已附加 ${count} 个选中项到上下文`
+        : `Pimate: attached ${count} selected item${count === 1 ? "" : "s"} to context`
     );
     this.inputEl?.focus();
   }
@@ -290,11 +290,11 @@ export class PiAgentView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Pisidian";
+    return "Pimate";
   }
 
   getIcon(): string {
-    return "pisidian-logo";
+    return "pimate-logo";
   }
 
   async onOpen(): Promise<void> {
@@ -309,7 +309,7 @@ export class PiAgentView extends ItemView {
 
     const titleEl = header.createDiv("pi-agent-title");
     titleEl.createSpan({ text: "π", cls: "pi-agent-logo" });
-    titleEl.createSpan({ text: "Pisidian" });
+    titleEl.createSpan({ text: "Pimate" });
 
     // 右上角设置按钮 (按用户要求保留，放右上角合适的位置)
     const headerActions = header.createDiv("pi-agent-header-actions");
@@ -1513,7 +1513,7 @@ export class PiAgentView extends ItemView {
           `🔔 ${(event.message as string) || ""}`
         );
       } else if (method === "setWidget") {
-        console.log("[pisidian] setWidget event received:", event);
+        console.log("[pimate] setWidget event received:", event);
         const widgetKey = event.widgetKey as string;
         const widgetLines = event.widgetLines as string[] | undefined;
         this.updateWidget(widgetKey, widgetLines);
@@ -1686,7 +1686,7 @@ export class PiAgentView extends ItemView {
     if (!this.chatContainer || this.chatContainer.querySelector(".pi-agent-empty-state")) return;
     const empty = this.chatContainer.createDiv("pi-agent-empty-state");
     empty.createDiv({ text: "π", cls: "pi-agent-empty-logo" });
-    empty.createDiv({ text: "Pisidian", cls: "pi-agent-empty-title" });
+    empty.createDiv({ text: "Pimate", cls: "pi-agent-empty-title" });
     empty.createDiv({ text: "Ask Pi to read, write, explain, or refactor your vault.", cls: "pi-agent-empty-subtitle" });
     const prompts = empty.createDiv("pi-agent-empty-prompts");
     for (const prompt of [
@@ -1881,7 +1881,7 @@ export class PiAgentView extends ItemView {
         textEl.setText(text);
       }
     } catch (err) {
-      console.error("[pisidian] updateWidget error:", err);
+      console.error("[pimate] updateWidget error:", err);
     }
   }
 
@@ -2088,7 +2088,7 @@ export class PiAgentView extends ItemView {
     const systemPrompt = (this.plugin.settings.systemPrompt || "").trim();
     if (!systemPrompt || message.startsWith("!")) return message;
     return [
-      "System instruction for this Pisidian turn:",
+      "System instruction for this Pimate turn:",
       systemPrompt,
       "",
       "User request:",
@@ -2795,8 +2795,8 @@ export class PiAgentView extends ItemView {
     const confirmed = await new Promise<boolean>((resolve) => {
       new PiAgentConfirmModal(
         this.app,
-        "Delete Pisidian session?",
-        `Delete this session file?\n\n${session.path}\n\nThis cannot be undone from Pisidian.`,
+        "Delete Pimate session?",
+        `Delete this session file?\n\n${session.path}\n\nThis cannot be undone from Pimate.`,
         resolve
       ).open();
     });
@@ -2971,7 +2971,7 @@ export class PiAgentView extends ItemView {
         new PiAgentConfirmModal(
           this.app,
           "Dangerous bash command",
-          `Pisidian is about to run:\n\n${command}\n\nThis looks destructive. Allow it?`,
+          `Pimate is about to run:\n\n${command}\n\nThis looks destructive. Allow it?`,
           resolve
         ).open();
       });
@@ -3092,7 +3092,7 @@ export class PiAgentView extends ItemView {
       while (true) {
         const replacement = await this.generateInlineReplacement(selection, instruction, attempt);
         if (!replacement) {
-          new Notice("Pisidian returned an empty replacement");
+          new Notice("Pimate returned an empty replacement");
           return;
         }
         const review = await new Promise<InlineEditReviewResult>((resolve) => {
@@ -3113,7 +3113,7 @@ export class PiAgentView extends ItemView {
           continue;
         }
         applyReplacement((review.replacement || replacement).trim());
-        new Notice("Selection edited by Pisidian");
+        new Notice("Selection edited by Pimate");
         return;
       }
     } catch (err) {
@@ -3145,7 +3145,7 @@ export class PiAgentView extends ItemView {
   }
 
   /**
-   * Files that Pisidian considers attachable to chat context.
+   * Files that Pimate considers attachable to chat context.
    * Includes markdown (for reading), PDFs (for vision-capable models),
    * and common image formats (for vision models).
    */
@@ -3566,11 +3566,11 @@ export class PiAgentView extends ItemView {
       const result = await this.client.getLastAssistantText();
       const text = (result.data as any)?.text as string | null | undefined;
       if (!result.success || !text) {
-        new Notice("No Pisidian response to insert");
+        new Notice("No Pimate response to insert");
         return;
       }
       editor.replaceSelection(text);
-      new Notice("Inserted last Pisidian response");
+      new Notice("Inserted last Pimate response");
     } catch (err) {
       new Notice(`Insert failed: ${(err as Error).message}`);
     }
@@ -4393,7 +4393,7 @@ class ResumeActionModal extends Modal {
     private readonly done: (action: "open" | "delete" | "cancel") => void | Promise<void>
   ) {
     super(app);
-    this.titleEl.setText("Pisidian session");
+    this.titleEl.setText("Pimate session");
   }
 
   onOpen(): void {
@@ -4543,7 +4543,7 @@ class PiAgentConfirmModal extends Modal {
     private readonly done: (confirmed: boolean) => void
   ) {
     super(app);
-    this.titleEl.setText(title || "Pisidian confirmation");
+    this.titleEl.setText(title || "Pimate confirmation");
   }
 
   onOpen(): void {
@@ -4608,7 +4608,7 @@ class PiAgentInlineEditModal extends Modal {
 
   constructor(app: App, done: (value: string | null) => void) {
     super(app);
-    this.titleEl.setText("Inline edit with Pisidian");
+    this.titleEl.setText("Inline edit with Pimate");
     this.done = done;
   }
 
@@ -4618,7 +4618,7 @@ class PiAgentInlineEditModal extends Modal {
     contentEl.addClass("pi-agent-editor-modal");
 
     contentEl.createDiv({
-      text: "Describe how Pisidian should rewrite the selected text.",
+      text: "Describe how Pimate should rewrite the selected text.",
       cls: "pi-agent-suggestion-note",
     });
 
@@ -4665,7 +4665,7 @@ class PiAgentInlineEditReviewModal extends Modal {
     done: (result: InlineEditReviewResult) => void
   ) {
     super(app);
-    this.titleEl.setText("Review Pisidian inline edit");
+    this.titleEl.setText("Review Pimate inline edit");
     this.done = done;
   }
 

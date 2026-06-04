@@ -357,7 +357,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     const isZh = this.plugin.settings.language === "zh";
 
-    containerEl.createEl("h2", { text: isZh ? "Pisidian 设置" : "Pisidian Settings" });
+    containerEl.createEl("h2", { text: isZh ? "Pimate 设置" : "Pimate Settings" });
 
     // Language selector
     new Setting(containerEl)
@@ -376,7 +376,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
       );
 
     // File-explorer multi-select is now handled via right-click context menu
-    // (right-click on file / folder → "Send to Pisidian" or "Add N items to Pisidian context"),
+    // (right-click on file / folder → "Send to Pimate" or "Add N items to Pimate context"),
     // plus the More menu → "附加文件管理器选中项" / "Attach file explorer selection".
     // Multi-select reading uses Obsidian's internal selection/fileItems on a
     // best-effort basis (no menu interception), so it is more robust than
@@ -485,7 +485,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.display();
 
             // 联动更新聊天视图
-            const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+            const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
@@ -516,7 +516,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
 
             // 联动更新聊天视图
-            const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+            const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
@@ -549,7 +549,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
 
             // 联动更新聊天视图
-            const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+            const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
@@ -629,7 +629,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
                  this.display();
                  
                  // 联动更新聊天视图并物理重启子进程
-                 const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+                 const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
                  for (const leaf of leaves) {
                    const view = leaf.view as any;
                    if (view && view.client) {
@@ -666,7 +666,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
                 this.display();
                 
                 // 联动更新聊天视图
-                const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
                 for (const leaf of leaves) {
                   const view = leaf.view as any;
                   if (view && view.client) {
@@ -695,7 +695,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
                  this.display();
 
                  // 联动更新聊天视图
-                 const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+                 const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
                  for (const leaf of leaves) {
                    const view = leaf.view as any;
                    if (view && view.client) {
@@ -752,7 +752,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setDesc(
         isZh
           ? "每次普通对话前自动附加的固定要求，例如中文写作风格、语气、工作流规则。"
-          : "Optional instruction prepended to each normal Pisidian prompt."
+          : "Optional instruction prepended to each normal Pimate prompt."
       )
       .addTextArea((text) => {
         text
@@ -886,7 +886,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             if (!isNaN(num) && num > 0 && num <= 20) {
               this.plugin.settings.maxTabs = num;
               await this.plugin.saveSettings();
-              const leaves = this.app.workspace.getLeavesOfType("pisidian-chat-view");
+              const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
               if (leaves.length > 0) {
                 const view = leaves[0].view as any;
                 if (view && typeof view.setupStaticTabs === "function") {
@@ -1016,7 +1016,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
   //  3. When the modal receives the device code info, it shows the code +
   //     "Open browser" + "Copy code" actions.
   //  4. On success, persist the credentials are written to ~/.pi/agent/auth.json
-  //     and Pisidian auto-restarts the chat client's child process so the new
+  //     and Pimate auto-restarts the chat client's child process so the new
   //     token is picked up immediately.
 
   private async startOpenAICodexDeviceCodeLogin(): Promise<void> {
@@ -1086,7 +1086,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await view.client.restart();
           } catch (err) {
             console.error(
-              "[pisidian] failed to restart client after OAuth login",
+              "[pimate] failed to restart client after OAuth login",
               err
             );
           }
@@ -1239,7 +1239,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         if (signal.aborted) throw new Error("Login cancelled");
         // Network blip — treat as pending and back off slightly
         pollResult = { status: "pending" };
-        console.warn("[pisidian] device code poll network error", err);
+        console.warn("[pimate] device code poll network error", err);
       }
 
       if (pollResult.status === "complete") {
@@ -1389,7 +1389,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
         this.copyBtn.setText("Copied ✓");
         window.setTimeout(() => this.copyBtn.setText("Copy code"), 1500);
       } catch (err) {
-        console.error("[pisidian] clipboard write failed", err);
+        console.error("[pimate] clipboard write failed", err);
       }
     };
 
@@ -1492,7 +1492,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
         opened = true;
       }
     } catch (err) {
-      console.warn("[pisidian] electron shell.openExternal failed, fallback", err);
+      console.warn("[pimate] electron shell.openExternal failed, fallback", err);
     }
     if (!opened) {
       try {
@@ -1502,7 +1502,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
         a.rel = "noopener noreferrer";
         a.click();
       } catch (err) {
-        console.error("[pisidian] fallback anchor click failed", err);
+        console.error("[pimate] fallback anchor click failed", err);
       }
     }
   }
