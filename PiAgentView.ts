@@ -120,8 +120,6 @@ export class PiAgentView extends ItemView {
   private footerContextEl: HTMLElement | null = null;
   private footerContextFillEl: SVGCircleElement | null = null;
   private footerContextPercentEl: HTMLElement | null = null;
-  private yoloToggleEl: HTMLElement | null = null;
-  private yoloLabelEl: HTMLElement | null = null;
   private renderedMessages: RenderedMessage[] = [];
   private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
   private tabs: ChatTab[] = [];
@@ -644,30 +642,6 @@ export class PiAgentView extends ItemView {
 
     const footerRight = footer.createDiv("pi-agent-input-footer-right");
 
-    // 4. YOLO Switch Toggle (Compat with Claudian)
-    const permissionToggle = footerRight.createDiv("pi-agent-permission-toggle");
-    const yoloLabelEl = permissionToggle.createSpan("pi-agent-permission-label");
-    yoloLabelEl.setText("YOLO");
-    this.yoloLabelEl = yoloLabelEl;
-
-    const yoloToggleEl = permissionToggle.createDiv({
-      cls: `pi-agent-toggle-switch ${!this.plugin.settings.safeMode ? "active" : ""}`,
-      attr: { title: isZh ? "切换 YOLO 自动运行模式" : "Toggle YOLO auto-run mode" },
-    });
-    this.yoloToggleEl = yoloToggleEl;
-
-    yoloToggleEl.onclick = async () => {
-      const currentSafe = this.plugin.settings.safeMode;
-      this.plugin.settings.safeMode = !currentSafe;
-      await this.plugin.saveSettings();
-      yoloToggleEl.toggleClass("active", currentSafe);
-      new Notice(
-        currentSafe
-          ? (isZh ? "YOLO 自动执行模式已开启" : "YOLO auto-run mode enabled")
-          : (isZh ? "安全确认模式已开启" : "Safe confirmation mode enabled")
-      );
-    };
-
     this.abortBtn = footerRight.createEl("button", {
       text: "×",
       cls: "pi-agent-footer-btn pi-agent-abort-btn",
@@ -903,7 +877,6 @@ export class PiAgentView extends ItemView {
       apiKey: settings.apiKey,
       cwd: vaultBasePath,
       noSession: false,
-      tools: settings.safeMode ? ["read", "grep", "find", "ls"] : undefined,
     });
   }
 
@@ -2998,10 +2971,6 @@ export class PiAgentView extends ItemView {
 
   private async runBashMode(message: string): Promise<void> {
     if (!this.client) return;
-    if (this.plugin.settings.safeMode) {
-      this.addSystemMessage("Bash mode is blocked while Safe mode is enabled");
-      return;
-    }
 
     const command = message.replace(/^!+/, "").trim();
     if (!command) return;
@@ -3505,27 +3474,6 @@ export class PiAgentView extends ItemView {
       }));
   }
 
-  private async toggleSafeMode(): Promise<void> {
-    this.plugin.settings.safeMode = !this.plugin.settings.safeMode;
-    await this.plugin.saveSettings();
-    this.updateSafeToggle();
-    this.addSystemMessage(
-      this.plugin.settings.safeMode
-        ? "Safe mode enabled: read-only tools only"
-        : "Full mode enabled: bash/write/edit tools available"
-    );
-    const tab = this.activeTab;
-    if (tab?.client) {
-      await tab.client.destroy();
-      tab.client = null;
-    }
-    if (tab) {
-      await this.ensureTabClient(tab);
-      this.client = tab.client;
-      await this.refreshStateDisplay();
-    }
-  }
-
   private async refreshStateDisplay(): Promise<void> {
     if (!this.client) return;
     try {
@@ -3540,8 +3488,7 @@ export class PiAgentView extends ItemView {
       }
 
       await this.refreshContextUsageDisplay();
-      this.updateSafeToggle();
-      
+
       // 预热可用模型列表缓存，确保点击弹出时能“秒开”且不阻塞用户
       this.client.getAvailableModels().then(res => {
         if (res.success && res.data) {
@@ -3625,12 +3572,6 @@ export class PiAgentView extends ItemView {
       .slice(0, 18);
     this.footerModelLabel.setText(shortName || provider);
     this.footerModelLabel.setAttribute("title", `${provider}/${modelId}`);
-  }
-
-  private updateSafeToggle(): void {
-    if (!this.yoloToggleEl) return;
-    const isYolo = !this.plugin.settings.safeMode;
-    this.yoloToggleEl.toggleClass("active", isYolo);
   }
 
   async insertLastAssistantIntoActiveNote(): Promise<void> {

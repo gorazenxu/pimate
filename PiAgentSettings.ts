@@ -32,7 +32,6 @@ export interface PiAgentSettings {
   autoScroll: boolean;
   showThinking: boolean;
   maxHistoryDisplay: number;
-  safeMode: boolean;
   sessionTabs: PersistedSessionTab[];
   activeSessionFile: string;
   systemPrompt: string;
@@ -54,7 +53,6 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   autoScroll: true,
   showThinking: false,
   maxHistoryDisplay: 100,
-  safeMode: false,
   sessionTabs: [],
   activeSessionFile: "",
   systemPrompt: "",

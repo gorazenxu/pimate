@@ -83,12 +83,12 @@
   flex-direction: column;
   gap: 4px;
   z-index: 5;
-  opacity: 0;
-  pointer-events: none;
+  opacity: 0.55;
+  pointer-events: auto;
   transition: opacity 0.15s ease;
 }
 
-.pi-agent-chat:hover .pi-agent-message-nav { opacity: 0.85; pointer-events: auto; }
+.pi-agent-chat:hover .pi-agent-message-nav { opacity: 1; }
 
 .pi-agent-message-nav-btn {
   width: 26px;
@@ -111,10 +111,10 @@
   color: var(--text-normal);
 }
 
-.pi-agent-message-nav-btn.is-first::before { content: "⤒"; }
-.pi-agent-message-nav-btn.is-prev::before  { content: "‹"; transform: rotate(90deg); }
-.pi-agent-message-nav-btn.is-next::before  { content: "›"; transform: rotate(90deg); }
-.pi-agent-message-nav-btn.is-last::before  { content: "⤓"; }
+.pi-agent-message-nav-btn.is-first::before { content: "⇈"; }
+.pi-agent-message-nav-btn.is-prev::before  { content: "↑"; }
+.pi-agent-message-nav-btn.is-next::before  { content: "↓"; }
+.pi-agent-message-nav-btn.is-last::before  { content: "⇊"; }
 
 .pi-agent-empty-state {
   margin: auto;
@@ -1306,56 +1306,6 @@
 
 .pi-agent-thinking-current:hover {
   background: var(--background-modifier-hover);
-}
-/* =========================================================================
-   YOLO Switch Toggle (Compat with Claudian)
-   ========================================================================= */
-.pi-agent-permission-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.pi-agent-permission-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  min-width: 28px;
-}
-
-.pi-agent-toggle-switch {
-  width: 32px;
-  height: 18px;
-  border-radius: 9px;
-  background: var(--background-modifier-border);
-  cursor: pointer;
-  position: relative;
-  transition: background 0.2s ease;
-  flex-shrink: 0;
-}
-
-.pi-agent-toggle-switch::after {
-  content: '';
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  top: 2px;
-  left: 2px;
-  transition: transform 0.2s ease, background 0.2s ease;
-}
-
-.pi-agent-toggle-switch:hover {
-  background: var(--background-modifier-hover);
-}
-
-.pi-agent-toggle-switch.active {
-  background: var(--pi-brand);
-}
-
-.pi-agent-toggle-switch.active::after {
-  transform: translateX(14px);
-  background: #ffffff;
 }
 
 .pi-agent-footer-folder-btn {
