@@ -72,49 +72,65 @@
   background: var(--background-modifier-border-hover);
 }
 
-/* Floating message navigation (4 buttons stacked on the right of the chat).
-   Mirrors Claudian: ⤒ ⌃ ⌄ ⤓. */
+/* Message-nav: vertical stack of 4 buttons, positioned absolutely
+   inside the input-area on the right side, between the input box
+   and the footer row. */
+/* Message-nav: vertical stack of 4 buttons, placed to the right of the
+   textarea inside a flex row. No overlap with the footer. */
+.pi-agent-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-agent-input-row .pi-agent-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .pi-agent-message-nav {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
   display: flex;
   flex-direction: column;
   gap: 4px;
-  z-index: 5;
-  opacity: 0.55;
+  opacity: 0.9;
   pointer-events: auto;
   transition: opacity 0.15s ease;
+  flex-shrink: 0;
+  padding-right: 4px;
 }
 
-.pi-agent-chat:hover .pi-agent-message-nav { opacity: 1; }
-
 .pi-agent-message-nav-btn {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--background-secondary);
+  background: transparent;
   border: 1px solid var(--background-modifier-border);
   border-radius: 50%;
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
   user-select: none;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.pi-agent-message-nav-btn svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2;
 }
 
 .pi-agent-message-nav-btn:hover {
   background: var(--background-modifier-hover);
   color: var(--text-normal);
+  border-color: var(--pi-brand);
 }
 
-.pi-agent-message-nav-btn.is-first::before { content: "⇈"; }
-.pi-agent-message-nav-btn.is-prev::before  { content: "↑"; }
-.pi-agent-message-nav-btn.is-next::before  { content: "↓"; }
-.pi-agent-message-nav-btn.is-last::before  { content: "⇊"; }
+.pi-agent-message-nav-btn:active {
+  background: var(--background-modifier-active);
+}
 
 .pi-agent-empty-state {
   margin: auto;

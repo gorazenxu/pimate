@@ -334,20 +334,6 @@ export class PiAgentView extends ItemView {
     this.chatContainer = container.createDiv("pi-agent-chat");
     this.renderEmptyState();
 
-    // Floating message-nav (4 buttons stacked on the right of the chat).
-    const navEl = this.chatContainer.createDiv("pi-agent-message-nav");
-    const mkNavBtn = (cls: string, title: string, handler: () => void) => {
-      const btn = navEl.createDiv(`pi-agent-message-nav-btn ${cls}`);
-      btn.setAttribute("title", title);
-      btn.onclick = handler;
-      return btn;
-    };
-    mkNavBtn("is-first", "Jump to first message", () => this.focusEdgeMessage("first"));
-    mkNavBtn("is-prev", "Previous message (Alt+↑)", () => this.focusAdjacentMessage(-1));
-    mkNavBtn("is-next", "Next message (Alt+↓)", () => this.focusAdjacentMessage(1));
-    mkNavBtn("is-last", "Jump to last message", () => this.focusEdgeMessage("last"));
-    this.messageNavEl = navEl;
-
     this.historyPanelEl = container.createDiv("pi-agent-history-panel");
     this.historyPanelEl.style.display = "none";
 
@@ -464,13 +450,31 @@ export class PiAgentView extends ItemView {
     this.contextRowEl = inputArea.createDiv("pi-agent-context-row");
     this.imagePreviewEl = inputArea.createDiv("pi-agent-image-preview");
 
-    this.inputEl = inputArea.createEl("textarea", {
+    // Wrap textarea + message-nav in a flex row so the nav sits to the
+    // right of the textarea without overlapping the footer.
+    const inputRow = inputArea.createDiv("pi-agent-input-row");
+
+    this.inputEl = inputRow.createEl("textarea", {
       cls: "pi-agent-input",
       attr: {
         placeholder: "How can I help you today?",
         rows: "4",
       },
     });
+
+    const navEl = inputRow.createDiv("pi-agent-message-nav");
+    const mkNavBtn = (cls: string, icon: string, title: string, handler: () => void) => {
+      const btn = navEl.createDiv(`pi-agent-message-nav-btn ${cls}`);
+      setIcon(btn, icon);
+      btn.setAttribute("title", title);
+      btn.onclick = handler;
+      return btn;
+    };
+    mkNavBtn("is-first", "chevrons-up",       "Jump to first user message",     () => this.focusEdgeMessage("first"));
+    mkNavBtn("is-prev",  "chevron-up",        "Previous user message (Alt+↑)",  () => this.focusAdjacentMessage(-1));
+    mkNavBtn("is-next",  "chevron-down",      "Next user message (Alt+↓)",      () => this.focusAdjacentMessage(1));
+    mkNavBtn("is-last",  "chevrons-down",     "Jump to last user message",      () => this.focusEdgeMessage("last"));
+    this.messageNavEl = navEl;
 
     this.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
       // 1. Mention autocomplete key intercepts
@@ -771,8 +775,10 @@ export class PiAgentView extends ItemView {
     this.updateWidget("tasks", undefined);
     await this.ensureTabClient(tab);
     this.client = tab.client;
-    await this.refreshStateDisplay();
-    await this.loadAvailableCommands();
+    // Parallelize non-blocking post-start calls so the UI feels snappy.
+    // Each call sets a different part of the UI and they don't depend on each other.
+    void this.refreshStateDisplay();
+    void this.loadAvailableCommands();
     await this.loadMessages();
     this.updateButtons();
     await this.persistSessionTabs();
@@ -982,6 +988,7 @@ export class PiAgentView extends ItemView {
               ?.map((c) => c.text || c.thinking || "")
               .join("") || "";
       const rendered = this.addMessage("user", content);
+      this.updateMessageNavVisibility();
       // Attach any images that were sent with this message to the bubble.
       if (this.pendingUserImages.length > 0) {
         this.renderUserMessageImages(rendered, this.pendingUserImages);
@@ -1741,10 +1748,29 @@ export class PiAgentView extends ItemView {
       this.chatContainer?.querySelectorAll(".pi-agent-message-user") || []
     ) as HTMLElement[];
     if (messages.length === 0) return;
-    const center = (this.chatContainer?.scrollTop || 0) + (this.chatContainer?.clientHeight || 0) / 2;
-    let index = messages.findIndex((message) => message.offsetTop + message.offsetHeight / 2 > center);
-    if (index === -1) index = messages.length - 1;
-    const nextIndex = Math.max(0, Math.min(messages.length - 1, index + direction));
+
+    // Use viewport-relative position to find current message reliably.
+    // This is more stable than scroll-center calculation.
+    const containerRect = this.chatContainer?.getBoundingClientRect();
+    if (!containerRect) return;
+    const viewportCenterY = containerRect.top + containerRect.height / 2;
+
+    // Find the message whose vertical center is closest to viewport center.
+    let currentIndex = 0;
+    let minDist = Infinity;
+    messages.forEach((msg, i) => {
+      const msgRect = msg.getBoundingClientRect();
+      const msgCenter = msgRect.top + msgRect.height / 2;
+      const dist = Math.abs(msgCenter - viewportCenterY);
+      if (dist < minDist) {
+        minDist = dist;
+        currentIndex = i;
+      }
+    });
+
+    // Navigate: clamp to valid range.
+    const nextIndex = Math.max(0, Math.min(messages.length - 1, currentIndex + direction));
+    if (nextIndex === currentIndex) return; // At boundary, nothing to do.
     messages[nextIndex]?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
@@ -1756,6 +1782,19 @@ export class PiAgentView extends ItemView {
     if (messages.length === 0) return;
     const target = edge === "first" ? messages[0] : messages[messages.length - 1];
     target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  /**
+   * Show/hide the prev/next nav buttons based on how many user messages exist.
+   * Hide both when there's < 2 user messages (only one target, prev/next are no-ops).
+   */
+  private updateMessageNavVisibility(): void {
+    if (!this.messageNavEl) return;
+    const count = this.chatContainer?.querySelectorAll(".pi-agent-message-user").length || 0;
+    const prevBtn = this.messageNavEl.querySelector(".is-prev") as HTMLElement | null;
+    const nextBtn = this.messageNavEl.querySelector(".is-next") as HTMLElement | null;
+    if (prevBtn) prevBtn.style.display = count >= 2 ? "" : "none";
+    if (nextBtn) nextBtn.style.display = count >= 2 ? "" : "none";
   }
 
   private setStatus(

@@ -293,9 +293,9 @@ export class PiAgentClient extends EventEmitter {
         });
 
         // Consider ready after a short delay (pi initializes)
-        // 优化：将 500ms 缩短为 50ms。操作系统管道本身有 Buffer 缓存，
-        // 即使进程尚在启动，写入 stdin 的指令也会缓冲，无需硬等 500ms。
-        setTimeout(() => settle(), 50);
+        // 150ms 给 pi 足够时间完成工具加载和模型绑定，避免下一个 RPC
+        // 命令与初始化指令重载。Node 管道 buffer 会保留前面写入的指令。
+        setTimeout(() => settle(), 150);
       } catch (err) {
         reject(err);
       }
