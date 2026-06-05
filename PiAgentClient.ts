@@ -160,11 +160,6 @@ function quoteWindowsShellArg(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
-function quoteWindowsExecutable(value: string): string {
-  // Quoting a bare npm shim name like "pi" can break cmd/npm shim resolution.
-  // Quote only real paths or values with shell-sensitive characters.
-  return /^[A-Za-z0-9_.-]+$/.test(value) ? value : quoteWindowsShellArg(value);
-}
 
 export class PiAgentClient extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -176,7 +171,7 @@ export class PiAgentClient extends EventEmitter {
     {
       resolve: (value: RpcResponse) => void;
       reject: (error: Error) => void;
-      timeout: ReturnType<typeof setTimeout>;
+      timeout: number;
     }
   >();
   private options: PiAgentClientOptions;
@@ -264,7 +259,7 @@ export class PiAgentClient extends EventEmitter {
         const settle = (err?: Error) => {
           if (settled) return;
           settled = true;
-          if (err) reject(err);
+          if (err) reject(err instanceof Error ? err : new Error(String(err)));
           else resolve();
         };
 
@@ -295,9 +290,9 @@ export class PiAgentClient extends EventEmitter {
         // Consider ready after a short delay (pi initializes)
         // 150ms 给 pi 足够时间完成工具加载和模型绑定，避免下一个 RPC
         // 命令与初始化指令重载。Node 管道 buffer 会保留前面写入的指令。
-        setTimeout(() => settle(), 150);
+        window.setTimeout(() => settle(), 150);
       } catch (err) {
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
@@ -332,7 +327,7 @@ export class PiAgentClient extends EventEmitter {
           const pending = this.pendingRequests.get(response.id || "");
           if (pending) {
             this.pendingRequests.delete(response.id || "");
-            clearTimeout(pending.timeout);
+            window.clearTimeout(pending.timeout);
             pending.resolve(response);
           }
         } else {
@@ -359,7 +354,7 @@ export class PiAgentClient extends EventEmitter {
     command.id = id;
 
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const timeout = window.setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`Command ${command.type} timed out`));
@@ -373,8 +368,8 @@ export class PiAgentClient extends EventEmitter {
         this.process!.stdin!.write(payload);
       } catch (err) {
         this.pendingRequests.delete(id);
-        clearTimeout(timeout);
-        reject(err);
+        window.clearTimeout(timeout);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
@@ -539,13 +534,13 @@ export class PiAgentClient extends EventEmitter {
 
   private waitForAgentEnd(timeoutMs = 120_000): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const timeout = window.setTimeout(() => {
         this.off("event", onEvent);
         reject(new Error("Timed out waiting for assistant response"));
       }, timeoutMs);
       const onEvent = (event: RpcEvent) => {
         if (event.type === "agent_end") {
-          clearTimeout(timeout);
+          window.clearTimeout(timeout);
           this.off("event", onEvent);
           resolve();
         }
@@ -625,7 +620,7 @@ export class PiAgentClient extends EventEmitter {
 
     // Reject all pending requests
     for (const [, pending] of this.pendingRequests) {
-      clearTimeout(pending.timeout);
+      window.clearTimeout(pending.timeout);
       pending.reject(new Error("Client destroyed"));
     }
     this.pendingRequests.clear();
@@ -637,7 +632,7 @@ export class PiAgentClient extends EventEmitter {
       if (!p.killed) {
         p.kill("SIGTERM");
         // Give it a moment to exit gracefully
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
         if (!p.killed) {
           p.kill("SIGKILL");
         }

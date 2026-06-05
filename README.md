@@ -146,13 +146,17 @@ npm run dev       # watch mode
 
 ## Security & Permissions
 
-Pimate requires two elevated permissions:
+Pimate uses a few sensitive capabilities so it can act as a local coding/writing agent:
 
-- **Vault file access (`fs`)** — needed to read your notes, write AI edits, and search vault content. All file operations are scoped to your vault directory only.
+- **Direct file-system access (`fs`)** — used to read local Pi configuration/session files, inspect skill folders, and read files you attach as context. Pimate is desktop-only and runs locally.
 
-- **Command execution (`child_process`)** — Pimate spawns the `pi` CLI process to handle AI requests. The Pi agent uses shell tools (`bash`, `grep`, `find`) to navigate and modify your vault files as directed by the AI. No commands are executed without your explicit instruction through the chat interface.
+- **Command execution (`child_process`)** — used to spawn the `pi` CLI in RPC mode and to run explicit skill-management commands from the settings page. The Pi agent may use shell tools such as `bash`, `grep`, and `find` when you ask it to work on files.
 
-Pi runs entirely **locally** — your API keys and vault content never leave your machine.
+- **Vault enumeration** — used to find Markdown files/folders for context pickers, history/session helpers, and folder attachment features.
+
+- **Clipboard access** — used only for explicit copy actions, such as copying generated commands, diffs, authentication codes, or modal content.
+
+Because Pimate embeds a local agent, review commands and edits before approving them. Your API keys and vault content are handled locally by the plugin/Pi CLI except for requests you intentionally send to your selected AI provider.
 
 ## License
 

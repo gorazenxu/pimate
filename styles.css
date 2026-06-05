@@ -2447,3 +2447,54 @@ summary.pi-agent-history-group-title:hover {
   background: var(--background-primary);
 }
 
+
+/* Obsidian market lint: use classes instead of inline styles. */
+.pi-agent-hidden {
+  display: none !important;
+}
+
+.pi-agent-input-api-key {
+  width: 240px;
+}
+
+.pi-agent-textarea-full-width {
+  width: 100%;
+}
+
+.pi-agent-textarea-min-height {
+  min-height: 120px;
+}
+
+.pi-agent-title-text-spaced {
+  margin-left: 6px;
+}
+
+.pi-agent-usage-table-scroll {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.pi-agent-text-error {
+  color: #ef4444;
+}
+
+.pi-agent-text-muted {
+  color: var(--text-muted);
+}
+
+.pi-agent-text-left {
+  text-align: left;
+}
+
+.pi-agent-tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-agent-share-cell {
+  min-width: 120px;
+}
+
+.pi-agent-input-modal-input {
+  width: 100%;
+}

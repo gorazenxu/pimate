@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice, Modal } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice, Modal, requestUrl } from "obsidian";
 import type PiAgentPlugin from "./main";
 import { PI_AGENT_VIEW_TYPE } from "./PiAgentView";
 import * as fs from "fs";
@@ -14,7 +14,6 @@ const OPENAI_CODEX_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/devi
 const OPENAI_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_VERIFICATION_URI = "https://auth.openai.com/codex/device";
 const OPENAI_CODEX_DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback";
-const OPENAI_CODEX_SCOPE = "openid profile email offline_access";
 const OPENAI_CODEX_TIMEOUT_SECONDS = 15 * 60;
 
 export interface PersistedSessionTab {
@@ -306,9 +305,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
     const limit = 30;
     const url = `https://skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const res = await requestUrl(url);
+      if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+      const data = res.json;
       return (data.skills ?? []).map((s: any) => {
         const name = s.name?.trim();
         const source = s.source?.trim();
@@ -355,7 +354,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     const isZh = this.plugin.settings.language === "zh";
 
-    containerEl.createEl("h2", { text: isZh ? "Pimate 设置" : "Pimate Settings" });
+    new Setting(containerEl)
+      .setName(isZh ? "Pimate 设置" : "Pimate Settings")
+      .setHeading();
 
     // Language selector
     new Setting(containerEl)
@@ -398,7 +399,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: isZh ? "默认模型配置 (Default Model Configuration)" : "Default Model Configuration" });
+    new Setting(containerEl)
+      .setName(isZh ? "默认模型配置 (Default Model Configuration)" : "Default Model Configuration")
+      .setHeading();
 
     // 预设模型映射表，当选择 provider 时可以关联更新 modelId 的 placeholder 和推荐的默认值
     const providerDefaults: Record<string, { model: string; desc: string; placeholder: string }> = {
@@ -564,7 +567,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
 
 
-    containerEl.createEl("h3", { text: isZh ? "大模型凭证配置 (LLM Credentials)" : "LLM Credentials" });
+    new Setting(containerEl)
+      .setName(isZh ? "大模型凭证配置 (LLM Credentials)" : "LLM Credentials")
+      .setHeading();
 
     // 读取 auth.json 的当前内容
     const authPath = this.getAuthJsonPath();
@@ -619,7 +624,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           // OAuth 只提供断开连接按钮
           setting.addButton(btn => {
             btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setWarning()
+               .setDestructive()
                .onClick(async () => {
                  delete authData[id];
                  fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
@@ -654,7 +659,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
                 });
             
             text.inputEl.type = "password";
-            text.inputEl.style.width = "240px";
+            text.inputEl.addClass("pi-agent-input-api-key");
             
             // 监听失去焦点和按下回车，在此时才真正保存并刷新列表显示
             const saveValue = async () => {
@@ -685,7 +690,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
           setting.addButton(btn => {
             btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setWarning()
+               .setDestructive()
                .onClick(async () => {
                  delete authData[id];
                  fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
@@ -732,7 +737,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
                this.temporaryProviders.push(selectedAddId);
                this.display();
                // 找到刚才添加的那个 input 元素并 focus！
-               setTimeout(() => {
+               window.setTimeout(() => {
                  const inputs = containerEl.querySelectorAll("input[type='password']");
                  if (inputs.length > 0) {
                    const lastInput = inputs[inputs.length - 1] as HTMLInputElement;
@@ -743,7 +748,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
         });
     }
 
-    containerEl.createEl("h3", { text: isZh ? "提示词默认设置" : "Prompt Defaults" });
+    new Setting(containerEl)
+      .setName(isZh ? "提示词默认设置" : "Prompt Defaults")
+      .setHeading();
 
     new Setting(containerEl)
       .setName(isZh ? "系统提示词" : "System prompt")
@@ -765,7 +772,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         text.inputEl.rows = 5;
-        text.inputEl.style.width = "100%";
+        text.inputEl.addClass("pi-agent-textarea-full-width");
       });
 
     new Setting(containerEl)
@@ -791,11 +798,13 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         text.inputEl.rows = 5;
-        text.inputEl.style.width = "100%";
+        text.inputEl.addClass("pi-agent-textarea-full-width");
       });
 
     // UI Options
-    containerEl.createEl("h3", { text: isZh ? "显示选项" : "Display Options" });
+    new Setting(containerEl)
+      .setName(isZh ? "显示选项" : "Display Options")
+      .setHeading();
 
 
 
@@ -896,7 +905,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
       );
 
     // ─── 技能管理 (Skills Management) ───────────────────────────────────
-    containerEl.createEl("h3", { text: isZh ? "技能管理 (Skills Management)" : "Skills Management" });
+    new Setting(containerEl)
+      .setName(isZh ? "技能管理 (Skills Management)" : "Skills Management")
+      .setHeading();
 
     const skills = this.scanSkills();
     const projectSkills = skills.filter(s => s.scope === "project");
@@ -909,14 +920,18 @@ export class PiAgentSettingTab extends PluginSettingTab {
       });
     } else {
       if (projectSkills.length > 0) {
-        containerEl.createEl("h4", { text: isZh ? "项目本地技能 (Project Skills)" : "Project Skills" });
+        new Setting(containerEl)
+          .setName(isZh ? "项目本地技能 (Project Skills)" : "Project Skills")
+          .setHeading();
         for (const skill of projectSkills) {
           this.createSkillSetting(containerEl, skill, isZh);
         }
       }
 
       if (globalSkills.length > 0) {
-        containerEl.createEl("h4", { text: isZh ? "全局安装技能 (Global Skills)" : "Global Skills" });
+        new Setting(containerEl)
+          .setName(isZh ? "全局安装技能 (Global Skills)" : "Global Skills")
+          .setHeading();
         for (const skill of globalSkills) {
           this.createSkillSetting(containerEl, skill, isZh);
         }
@@ -1109,24 +1124,25 @@ export class PiAgentSettingTab extends PluginSettingTab {
     userCode: string;
     intervalSeconds: number;
   }> {
-    const response = await fetch(OPENAI_CODEX_DEVICE_USER_CODE_URL, {
+    if (signal.aborted) throw new Error("Login cancelled");
+    const response = await requestUrl({
+      url: OPENAI_CODEX_DEVICE_USER_CODE_URL,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: OPENAI_CODEX_CLIENT_ID }),
-      signal,
+      throw: false,
     });
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       if (response.status === 404) {
         throw new Error(
           "OpenAI Codex device code login is not enabled. Please try again later."
         );
       }
-      const text = await response.text().catch(() => "");
       throw new Error(
-        `OpenAI Codex device code request failed: ${response.status} ${text}`
+        `OpenAI Codex device code request failed: ${response.status} ${response.text}`
       );
     }
-    const json = (await response.json()) as Record<string, unknown>;
+    const json = response.json as Record<string, unknown>;
     const deviceAuthId = json.device_auth_id as string | undefined;
     const userCode = json.user_code as string | undefined;
     const rawInterval = json.interval;
@@ -1179,18 +1195,19 @@ export class PiAgentSettingTab extends PluginSettingTab {
       };
 
       try {
-        const response = await fetch(OPENAI_CODEX_DEVICE_TOKEN_URL, {
+        const response = await requestUrl({
+          url: OPENAI_CODEX_DEVICE_TOKEN_URL,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             device_auth_id: device.deviceAuthId,
             user_code: device.userCode,
           }),
-          signal,
+          throw: false,
         });
 
-        if (response.ok) {
-          const json = (await response.json()) as Record<string, unknown>;
+        if (response.status >= 200 && response.status < 300) {
+          const json = response.json as Record<string, unknown>;
           const authorizationCode = json.authorization_code as
             | string
             | undefined;
@@ -1210,7 +1227,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           // Auth server says: still pending (no body needed)
           pollResult = { status: "pending" };
         } else {
-          const responseBody = await response.text().catch(() => "");
+          const responseBody = response.text || "";
           let errorCode: string | undefined;
           try {
             const parsed = JSON.parse(responseBody);
@@ -1269,7 +1286,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
     codeVerifier: string,
     signal: AbortSignal
   ): Promise<{ access: string; refresh: string; expires: number }> {
-    const response = await fetch(OPENAI_CODEX_TOKEN_URL, {
+    if (signal.aborted) throw new Error("Login cancelled");
+    const response = await requestUrl({
+      url: OPENAI_CODEX_TOKEN_URL,
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -1278,16 +1297,15 @@ export class PiAgentSettingTab extends PluginSettingTab {
         code: authorizationCode,
         code_verifier: codeVerifier,
         redirect_uri: OPENAI_CODEX_DEVICE_REDIRECT_URI,
-      }),
-      signal,
+      }).toString(),
+      throw: false,
     });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
+    if (response.status < 200 || response.status >= 300) {
       throw new Error(
-        `OpenAI Codex token exchange failed: ${response.status} ${text}`
+        `OpenAI Codex token exchange failed: ${response.status} ${response.text}`
       );
     }
-    const json = (await response.json()) as Record<string, unknown>;
+    const json = response.json as Record<string, unknown>;
     const access = json.access_token as string | undefined;
     const refresh = json.refresh_token as string | undefined;
     const expiresIn = json.expires_in as number | undefined;
@@ -1311,7 +1329,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         reject(new Error("Login cancelled"));
         return;
       }
-      const t = window.setTimeout(() => {
+      const t = window.window.setTimeout(() => {
         signal.removeEventListener("abort", onAbort);
         resolve();
       }, ms);
@@ -1351,7 +1369,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
 
     this.codeEl = contentEl.createDiv({ cls: "pi-agent-device-code-code" });
     this.codeEl.setText("— — — —");
-    this.codeEl.style.display = "none";
+    this.codeEl.addClass("pi-agent-hidden");
 
     this.linkEl = contentEl.createEl("a", {
       cls: "pi-agent-device-code-link",
@@ -1359,10 +1377,10 @@ class OpenAICodexDeviceCodeModal extends Modal {
     });
     this.linkEl.setAttribute("target", "_blank");
     this.linkEl.setAttribute("rel", "noopener noreferrer");
-    this.linkEl.style.display = "none";
+    this.linkEl.addClass("pi-agent-hidden");
 
     this.instructionsEl = contentEl.createDiv({ cls: "pi-agent-device-code-instructions" });
-    this.instructionsEl.style.display = "none";
+    this.instructionsEl.addClass("pi-agent-hidden");
 
     const buttonRow = contentEl.createDiv({ cls: "pi-agent-device-code-buttons" });
 
@@ -1370,7 +1388,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
       text: "Open verification page",
       cls: "mod-cta",
     });
-    this.openBtn.style.display = "none";
+    this.openBtn.addClass("pi-agent-hidden");
     this.openBtn.onclick = async () => {
       if (!this.linkEl.getAttribute("href")) return;
       const url = this.linkEl.getAttribute("href") || "";
@@ -1378,7 +1396,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
     };
 
     this.copyBtn = buttonRow.createEl("button", { text: "Copy code" });
-    this.copyBtn.style.display = "none";
+    this.copyBtn.addClass("pi-agent-hidden");
     this.copyBtn.onclick = async () => {
       const code = this.codeEl.textContent || "";
       if (!code || code === "— — — —") return;
@@ -1412,14 +1430,14 @@ class OpenAICodexDeviceCodeModal extends Modal {
       "Open the verification page in your browser and enter the code below:"
     );
     this.codeEl.setText(info.userCode);
-    this.codeEl.style.display = "";
+    this.codeEl.removeClass("pi-agent-hidden");
 
     this.linkEl.setText(info.verificationUri);
     this.linkEl.setAttribute("href", info.verificationUri);
-    this.linkEl.style.display = "";
+    this.linkEl.removeClass("pi-agent-hidden");
 
-    this.openBtn.style.display = "";
-    this.copyBtn.style.display = "";
+    this.openBtn.removeClass("pi-agent-hidden");
+    this.copyBtn.removeClass("pi-agent-hidden");
 
     const minutes = info.expiresInSeconds
       ? Math.round(info.expiresInSeconds / 60)
@@ -1429,7 +1447,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
         ? `Code expires in about ${minutes} minute${minutes === 1 ? "" : "s"}.`
         : "Code expires after a few minutes — finish quickly."
     );
-    this.instructionsEl.style.display = "";
+    this.instructionsEl.removeClass("pi-agent-hidden");
   }
 
   setBrowserAuthUrl(url: string, instructions?: string): void {
@@ -1439,8 +1457,8 @@ class OpenAICodexDeviceCodeModal extends Modal {
     );
     this.linkEl.setText(url);
     this.linkEl.setAttribute("href", url);
-    this.linkEl.style.display = "";
-    this.openBtn.style.display = "";
+    this.linkEl.removeClass("pi-agent-hidden");
+    this.openBtn.removeClass("pi-agent-hidden");
   }
 
   setProgress(message: string): void {
@@ -1453,16 +1471,16 @@ class OpenAICodexDeviceCodeModal extends Modal {
   closeWithSuccess(): void {
     this.state = "success";
     this.statusEl.setText("✓ Connected. Loading credentials…");
-    this.openBtn.style.display = "none";
-    this.copyBtn.style.display = "none";
+    this.openBtn.addClass("pi-agent-hidden");
+    this.copyBtn.addClass("pi-agent-hidden");
     this.cancelBtn.setText("Close");
   }
 
   closeWithError(message: string): void {
     this.state = "error";
     this.statusEl.setText(`✗ ${message || "Login failed"}`);
-    this.openBtn.style.display = "none";
-    this.copyBtn.style.display = "none";
+    this.openBtn.addClass("pi-agent-hidden");
+    this.copyBtn.addClass("pi-agent-hidden");
     this.cancelBtn.setText("Close");
   }
 
@@ -1473,8 +1491,8 @@ class OpenAICodexDeviceCodeModal extends Modal {
     }
     this.state = "cancelled";
     this.statusEl.setText("Cancelling…");
-    this.openBtn.style.display = "none";
-    this.copyBtn.style.display = "none";
+    this.openBtn.addClass("pi-agent-hidden");
+    this.copyBtn.addClass("pi-agent-hidden");
     this.cancelBtn.setText("Close");
     this.onCancelSignal?.();
     this.close();
@@ -1494,7 +1512,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
     }
     if (!opened) {
       try {
-        const a = document.createElement("a");
+        const a = activeDocument.createElement("a");
         a.href = url;
         a.target = "_blank";
         a.rel = "noopener noreferrer";

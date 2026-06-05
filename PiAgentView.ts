@@ -9,7 +9,6 @@ import {
   SuggestModal,
   TFile,
   TFolder,
-  TAbstractFile,
   MarkdownView,
   Menu,
   setIcon,
@@ -21,7 +20,6 @@ import {
   PiAgentClient,
   type RpcEvent,
   type AssistantMessageEvent,
-  type ToolCall,
   type MessageContent,
 } from "./PiAgentClient";
 
@@ -188,9 +186,9 @@ export class PiAgentView extends ItemView {
 
   private resizeInputEl(): void {
     if (!this.inputEl) return;
-    this.inputEl.style.height = "auto";
+    this.inputEl.setCssProps({ height: "auto" });
     // 限制最大高度为 240px，防止高度占满整个聊天视口
-    this.inputEl.style.height = `${Math.min(this.inputEl.scrollHeight, 240)}px`;
+    this.inputEl.setCssProps({ height: `${Math.min(this.inputEl.scrollHeight, 240)}px` });
   }
 
   focusComposer(): void {
@@ -335,10 +333,10 @@ export class PiAgentView extends ItemView {
     this.renderEmptyState();
 
     this.historyPanelEl = container.createDiv("pi-agent-history-panel");
-    this.historyPanelEl.style.display = "none";
+    this.historyPanelEl.addClass("pi-agent-hidden");
 
     this.widgetEl = container.createDiv("pi-agent-widget");
-    this.widgetEl.style.display = "none";
+    this.widgetEl.addClass("pi-agent-hidden");
 
     // Toolbar above input wrapper
     const composerTools = container.createDiv("pi-agent-composer-tools");
@@ -651,7 +649,7 @@ export class PiAgentView extends ItemView {
       cls: "pi-agent-footer-btn pi-agent-abort-btn",
       attr: { title: "Abort" },
     });
-    this.abortBtn.style.display = "none";
+    this.abortBtn.addClass("pi-agent-hidden");
     this.abortBtn.onclick = () => this.abortAgent();
 
     // ─── Start real Pi session tabs ───────────────────────────────────
@@ -1428,12 +1426,12 @@ export class PiAgentView extends ItemView {
       const stats = this.getDiffStats(details);
       if (stats) {
         const closeEl = toolBlock.querySelector(".pi-agent-tool-close");
-        const statEl = document.createElement("span");
+        const statEl = activeDocument.createElement("span");
         statEl.className = "pi-agent-tool-diff";
-        const addedEl = document.createElement("span");
+        const addedEl = activeDocument.createElement("span");
         addedEl.className = "pi-agent-tool-add";
         addedEl.textContent = `+${stats.added}`;
-        const removedEl = document.createElement("span");
+        const removedEl = activeDocument.createElement("span");
         removedEl.className = "pi-agent-tool-remove";
         removedEl.textContent = `−${stats.removed}`;
         statEl.append(addedEl, removedEl);
@@ -1485,25 +1483,17 @@ export class PiAgentView extends ItemView {
     } else if (method === "select") {
       const title = event.title as string;
       const options = event.options as string[];
-      // Simple prompt-based selection
-      const choice = window.prompt(
-        `${title}\nOptions: ${options.join(", ")}`,
-        options[0]
-      );
-      if (choice && options.includes(choice)) {
-        this.client?.sendUIResponse(id, { value: choice });
-      } else {
-        this.client?.sendUIResponse(id, { cancelled: true });
-      }
+      new PiAgentSelectModal(this.app, title, options, (value) => {
+        if (value) this.client?.sendUIResponse(id, { value });
+        else this.client?.sendUIResponse(id, { cancelled: true });
+      }).open();
     } else if (method === "input") {
       const title = event.title as string;
       const placeholder = event.placeholder as string;
-      const value = window.prompt(title, placeholder || "");
-      if (value !== null) {
-        this.client?.sendUIResponse(id, { value });
-      } else {
-        this.client?.sendUIResponse(id, { cancelled: true });
-      }
+      new PiAgentInputModal(this.app, title, placeholder || "", (value) => {
+        if (value !== null) this.client?.sendUIResponse(id, { value });
+        else this.client?.sendUIResponse(id, { cancelled: true });
+      }).open();
     } else if (method === "editor") {
       // Open in a new note for editing
       const title = event.title as string;
@@ -1722,7 +1712,7 @@ export class PiAgentView extends ItemView {
       this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
     }
     // Compensation delays for dynamic reflow
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (this.chatContainer) {
         if (!force) {
           const scrollOffset = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight;
@@ -1731,7 +1721,7 @@ export class PiAgentView extends ItemView {
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
       }
     }, 50);
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (this.chatContainer) {
         if (!force) {
           const scrollOffset = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight;
@@ -1793,8 +1783,8 @@ export class PiAgentView extends ItemView {
     const count = this.chatContainer?.querySelectorAll(".pi-agent-message-user").length || 0;
     const prevBtn = this.messageNavEl.querySelector(".is-prev") as HTMLElement | null;
     const nextBtn = this.messageNavEl.querySelector(".is-next") as HTMLElement | null;
-    if (prevBtn) prevBtn.style.display = count >= 2 ? "" : "none";
-    if (nextBtn) nextBtn.style.display = count >= 2 ? "" : "none";
+    if (prevBtn) prevBtn.toggleClass("pi-agent-hidden", count < 2);
+    if (nextBtn) nextBtn.toggleClass("pi-agent-hidden", count < 2);
   }
 
   private setStatus(
@@ -1855,7 +1845,7 @@ export class PiAgentView extends ItemView {
     }
 
     if (uniqueFiles.size > 0) {
-      const chipsContainer = document.createElement("div");
+      const chipsContainer = activeDocument.createElement("div");
       chipsContainer.className = "pi-agent-detected-files";
       chipsContainer.createSpan({ text: "Detected files: ", cls: "pi-agent-detected-label" });
       uniqueFiles.forEach((file) => {
@@ -1878,12 +1868,12 @@ export class PiAgentView extends ItemView {
     try {
       if (!lines || lines.length === 0) {
         this.widgetEl.empty();
-        this.widgetEl.style.display = "none";
+        this.widgetEl.addClass("pi-agent-hidden");
         return;
       }
 
       this.widgetEl.empty();
-      this.widgetEl.style.display = "block";
+      this.widgetEl.removeClass("pi-agent-hidden");
       this.widgetEl.className = `pi-agent-widget pi-agent-widget-${widgetKey}`;
 
       const titleLine = lines[0];
@@ -1893,7 +1883,7 @@ export class PiAgentView extends ItemView {
       const icon = header.createSpan("pi-agent-widget-icon");
       try {
         setIcon(icon, "list-todo");
-      } catch (e) {
+      } catch {
         icon.setText("📋");
       }
 
@@ -2116,7 +2106,7 @@ export class PiAgentView extends ItemView {
 
     // Clear input
     this.inputEl.value = "";
-    this.inputEl.style.height = "auto";
+    this.inputEl.setCssProps({ height: "auto" });
     this.updateInputModeState();
     this.clearContextItems();
 
@@ -2389,8 +2379,8 @@ export class PiAgentView extends ItemView {
           this.closeModelPopup();
         }
       };
-      window.setTimeout(() => {
-        document.addEventListener("pointerdown", this.modelOutsideClickHandler!);
+      window.window.setTimeout(() => {
+        activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
       }, 0);
     }
 
@@ -2424,7 +2414,7 @@ export class PiAgentView extends ItemView {
       this.modelPopupEl = null;
     }
     if (this.modelOutsideClickHandler) {
-      document.removeEventListener("pointerdown", this.modelOutsideClickHandler);
+      activeDocument.removeEventListener("pointerdown", this.modelOutsideClickHandler);
       this.modelOutsideClickHandler = null;
     }
   }
@@ -2460,7 +2450,7 @@ export class PiAgentView extends ItemView {
         });
 
         const iconEl = itemEl.createDiv("pi-agent-model-popup-item-icon");
-        iconEl.innerHTML = this.getProviderIconSvg(model.provider, model.id);
+        setIcon(iconEl, this.getProviderIconName(model.provider, model.id));
 
         const shortName = model.name || this.getModelShortName(model.id);
         itemEl.createSpan({ text: shortName, cls: "pi-agent-model-popup-item-name" });
@@ -2483,8 +2473,8 @@ export class PiAgentView extends ItemView {
         this.closeModelPopup();
       }
     };
-    window.setTimeout(() => {
-      document.addEventListener("pointerdown", this.modelOutsideClickHandler!);
+    window.window.setTimeout(() => {
+      activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
     }, 0);
   }
 
@@ -2504,7 +2494,7 @@ export class PiAgentView extends ItemView {
       this.effortPopupEl = null;
     }
     if (this.effortOutsideClickHandler) {
-      document.removeEventListener("pointerdown", this.effortOutsideClickHandler);
+      activeDocument.removeEventListener("pointerdown", this.effortOutsideClickHandler);
       this.effortOutsideClickHandler = null;
     }
   }
@@ -2566,8 +2556,8 @@ export class PiAgentView extends ItemView {
         this.closeEffortPopup();
       }
     };
-    window.setTimeout(() => {
-      document.addEventListener("pointerdown", this.effortOutsideClickHandler!);
+    window.window.setTimeout(() => {
+      activeDocument.addEventListener("pointerdown", this.effortOutsideClickHandler!);
     }, 0);
   }
 
@@ -2582,14 +2572,14 @@ export class PiAgentView extends ItemView {
     }
 
     if (this.isHistoryOpen) {
-      if (this.chatContainer) this.chatContainer.style.display = "none";
+      if (this.chatContainer) this.chatContainer.addClass("pi-agent-hidden");
       if (this.historyPanelEl) {
-        this.historyPanelEl.style.display = "flex";
+        this.historyPanelEl.removeClass("pi-agent-hidden");
         await this.renderHistoryPanel();
       }
     } else {
-      if (this.chatContainer) this.chatContainer.style.display = "flex";
-      if (this.historyPanelEl) this.historyPanelEl.style.display = "none";
+      if (this.chatContainer) this.chatContainer.removeClass("pi-agent-hidden");
+      if (this.historyPanelEl) this.historyPanelEl.addClass("pi-agent-hidden");
     }
   }
 
@@ -2753,8 +2743,8 @@ export class PiAgentView extends ItemView {
           itemEl.onclick = async () => {
             await this.openResumeSession(session);
             this.isHistoryOpen = false;
-            if (this.chatContainer) this.chatContainer.style.display = "flex";
-            this.historyPanelEl!.style.display = "none";
+            if (this.chatContainer) this.chatContainer.removeClass("pi-agent-hidden");
+            this.historyPanelEl!.addClass("pi-agent-hidden");
             const historyBtn = this.containerEl.querySelector(".pi-agent-mini-action.is-active");
             historyBtn?.removeClass("is-active");
           };
@@ -3412,7 +3402,7 @@ export class PiAgentView extends ItemView {
           } else {
             const fileExplorer = this.app.workspace.getLeavesOfType("file-explorer")[0];
             if (fileExplorer) {
-              this.app.workspace.revealLeaf(fileExplorer);
+              this.app.workspace.setActiveLeaf(fileExplorer);
             }
           }
         } else {
@@ -3561,17 +3551,17 @@ export class PiAgentView extends ItemView {
   private updateContextMeter(percent: number | null, title: string): void {
     if (!this.footerContextEl || !this.footerContextFillEl || !this.footerContextPercentEl) return;
     const circumference = 2 * Math.PI * 8;
-    this.footerContextFillEl.style.strokeDasharray = `${circumference}`;
+    this.footerContextFillEl.setAttribute("stroke-dasharray", `${circumference}`);
     if (percent == null || Number.isNaN(percent)) {
       this.footerContextPercentEl.setText("");
-      this.footerContextFillEl.style.strokeDashoffset = `${circumference}`;
+      this.footerContextFillEl.setAttribute("stroke-dashoffset", `${circumference}`);
       this.footerContextEl.removeClass("warning");
       this.footerContextEl.removeClass("danger");
       this.footerContextEl.setAttribute("title", title);
       return;
     }
     const clamped = Math.max(0, Math.min(100, percent));
-    this.footerContextFillEl.style.strokeDashoffset = `${circumference * (1 - clamped / 100)}`;
+    this.footerContextFillEl.setAttribute("stroke-dashoffset", `${circumference * (1 - clamped / 100)}`);
     this.footerContextPercentEl.setText(`${Math.round(clamped)}%`);
     this.footerContextEl.toggleClass("warning", clamped >= 70 && clamped < 85);
     this.footerContextEl.toggleClass("danger", clamped >= 85);
@@ -3734,7 +3724,7 @@ export class PiAgentView extends ItemView {
         }
         this.scrollToBottom(true, true);
       }
-    } catch (err) {
+    } catch {
       // It's okay if there are no messages
       console.log("[pi-agent] No existing messages to load");
     }
@@ -3743,9 +3733,9 @@ export class PiAgentView extends ItemView {
   private updateButtons(): void {
     if (this.abortBtn) {
       if (this.isStreaming) {
-        this.abortBtn.style.display = "";
+        this.abortBtn.removeClass("pi-agent-hidden");
       } else {
-        this.abortBtn.style.display = "none";
+        this.abortBtn.addClass("pi-agent-hidden");
       }
     }
     this.containerEl.toggleClass("is-generating", this.isStreaming);
@@ -3904,7 +3894,7 @@ export class PiAgentView extends ItemView {
       this.renderMarkdownWithCursor(rawText, targetEl);
       this.lastRenderTime = now;
     } else {
-      this.renderTimeout = window.setTimeout(() => {
+      this.renderTimeout = window.window.setTimeout(() => {
         this.renderMarkdownWithCursor(rawText, targetEl);
         this.lastRenderTime = Date.now();
       }, delay - (now - this.lastRenderTime));
@@ -4327,6 +4317,18 @@ export class PiAgentView extends ItemView {
     return modelId.split("/").pop() || modelId;
   }
 
+  private getProviderIconName(provider: string, modelId: string): string {
+    const p = provider.toLowerCase();
+    const m = modelId.toLowerCase();
+    if (p.includes("xiaomi") || p.includes("小米") || m.includes("xiaomi") || m.includes("milm")) return "circle";
+    if (p.includes("openai") || p.includes("gpt") || m.includes("gpt")) return "bot";
+    if (p.includes("anthropic") || p.includes("claude") || m.includes("claude")) return "sparkles";
+    if (p.includes("deepseek") || m.includes("deepseek")) return "fish";
+    if (p.includes("minimax") || m.includes("minimax")) return "waves";
+    if (p.includes("google") || p.includes("gemini") || m.includes("gemini")) return "gem";
+    return "sparkles";
+  }
+
   private getProviderIconSvg(provider: string, modelId: string): string {
     const p = provider.toLowerCase();
     const m = modelId.toLowerCase();
@@ -4600,6 +4602,91 @@ class FileSuggestModal extends SuggestModal<TFile> {
   }
 }
 
+class PiAgentSelectModal extends SuggestModal<string> {
+  private answered = false;
+
+  constructor(
+    app: App,
+    private readonly modalTitle: string,
+    private readonly options: string[],
+    private readonly done: (value: string | null) => void
+  ) {
+    super(app);
+    this.setPlaceholder(modalTitle || "Select an option");
+  }
+
+  getSuggestions(query: string): string[] {
+    const q = query.toLowerCase();
+    return this.options.filter((option) => option.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(value: string, el: HTMLElement): void {
+    el.setText(value);
+  }
+
+  onChooseSuggestion(value: string): void {
+    this.answered = true;
+    this.done(value);
+  }
+
+  onClose(): void {
+    super.onClose();
+    if (!this.answered) this.done(null);
+  }
+}
+
+class PiAgentInputModal extends Modal {
+  private answered = false;
+  private inputEl!: HTMLInputElement;
+
+  constructor(
+    app: App,
+    title: string,
+    private readonly placeholder: string,
+    private readonly done: (value: string | null) => void
+  ) {
+    super(app);
+    this.titleEl.setText(title || "Pimate input");
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("pi-agent-editor-modal");
+    this.inputEl = contentEl.createEl("input", {
+      cls: "pi-agent-input-modal-input",
+      attr: { type: "text", placeholder: this.placeholder },
+    });
+    this.inputEl.value = this.placeholder || "";
+    this.inputEl.focus();
+    this.inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.submit();
+      if (e.key === "Escape") this.cancel();
+    });
+
+    const buttons = contentEl.createDiv("pi-agent-editor-modal-buttons");
+    buttons.createEl("button", { text: "Cancel" }).onclick = () => this.cancel();
+    buttons.createEl("button", { text: "OK", cls: "mod-cta" }).onclick = () => this.submit();
+  }
+
+  private submit(): void {
+    this.answered = true;
+    this.done(this.inputEl.value);
+    this.close();
+  }
+
+  private cancel(): void {
+    this.answered = true;
+    this.done(null);
+    this.close();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.answered) this.done(null);
+  }
+}
+
 class PiAgentConfirmModal extends Modal {
   private answered = false;
 
@@ -4693,7 +4780,7 @@ class PiAgentInlineEditModal extends Modal {
       cls: "pi-agent-editor-modal-textarea",
       attr: { placeholder: "Make it clearer, shorter, more direct..." },
     });
-    textarea.style.minHeight = "120px";
+    textarea.addClass("pi-agent-textarea-min-height");
     textarea.focus();
 
     const buttons = contentEl.createDiv("pi-agent-editor-modal-buttons");
@@ -4736,16 +4823,17 @@ class PiAgentInlineEditReviewModal extends Modal {
     this.done = done;
   }
 
-  private escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
+  private renderSimpleDiff(container: HTMLElement, original: string, replacement: string): void {
+    container.empty();
+    const lines = this.computeSimpleDiff(original, replacement);
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx];
+      container.createSpan({ text: line.text, cls: line.cls });
+      if (idx < lines.length - 1) container.appendText("\n");
+    }
   }
 
-  private computeSimpleDiff(original: string, replacement: string): string {
+  private computeSimpleDiff(original: string, replacement: string): Array<{ text: string; cls?: string }> {
     const origLines = original.split("\n");
     const replLines = replacement.split("\n");
 
@@ -4765,23 +4853,23 @@ class PiAgentInlineEditReviewModal extends Modal {
 
     let i = origLines.length;
     let j = replLines.length;
-    const result: string[] = [];
+    const result: Array<{ text: string; cls?: string }> = [];
 
     while (i > 0 || j > 0) {
       if (i > 0 && j > 0 && origLines[i - 1] === replLines[j - 1]) {
-        result.unshift(this.escapeHtml(origLines[i - 1]));
+        result.unshift({ text: origLines[i - 1] });
         i--;
         j--;
       } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-        result.unshift(`<ins class="pi-diff-ins">+ ${this.escapeHtml(replLines[j - 1])}</ins>`);
+        result.unshift({ text: `+ ${replLines[j - 1]}`, cls: "pi-diff-ins" });
         j--;
       } else {
-        result.unshift(`<del class="pi-diff-del">- ${this.escapeHtml(origLines[i - 1])}</del>`);
+        result.unshift({ text: `- ${origLines[i - 1]}`, cls: "pi-diff-del" });
         i--;
       }
     }
 
-    return result.join("\n");
+    return result;
   }
 
   onOpen(): void {
@@ -4797,7 +4885,7 @@ class PiAgentInlineEditReviewModal extends Modal {
     const diffContainer = contentEl.createEl("pre", {
       cls: "pi-agent-diff-view-pre",
     });
-    diffContainer.innerHTML = this.computeSimpleDiff(this.original, this.replacement);
+    this.renderSimpleDiff(diffContainer, this.original, this.replacement);
 
     contentEl.createDiv({
       text: "Edit Replacement (可选：微调修改文)",
@@ -4807,12 +4895,12 @@ class PiAgentInlineEditReviewModal extends Modal {
       cls: "pi-agent-editor-modal-textarea",
     });
     replacementBox.value = this.replacement;
-    replacementBox.style.minHeight = "120px";
+    replacementBox.addClass("pi-agent-textarea-min-height");
     replacementBox.focus();
 
     // Live update diff view when editing replacement text
     replacementBox.addEventListener("input", () => {
-      diffContainer.innerHTML = this.computeSimpleDiff(this.original, replacementBox.value);
+      this.renderSimpleDiff(diffContainer, this.original, replacementBox.value);
     });
 
     const buttons = contentEl.createDiv("pi-agent-editor-modal-buttons");
@@ -5030,11 +5118,6 @@ function fmtCost(n: number): string {
   if (n < 0.01) return "$" + n.toFixed(4);
   if (n < 1) return "$" + n.toFixed(3);
   return "$" + n.toFixed(2);
-}
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 function fmtDateCompact(iso: string | null): string {
   if (!iso) return "—";
@@ -5297,15 +5380,16 @@ class UsageStatsModal extends Modal {
     // Header
     const header = contentEl.createDiv("pi-agent-usage-header");
     const titleWrap = header.createDiv("pi-agent-usage-title");
-    titleWrap.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`;
+    const titleIcon = titleWrap.createSpan();
+    setIcon(titleIcon, "bar-chart-3");
     const titleText = titleWrap.createSpan({ text: isZh ? "Token 用量" : "Token Usage" });
-    titleText.style.marginLeft = "6px";
+    titleText.addClass("pi-agent-title-text-spaced");
     this.rangeLabelEl = titleWrap.createSpan({ text: " · " + range.label, cls: "pi-agent-usage-range-label" });
     const refreshBtn = header.createEl("button", { cls: "pi-agent-usage-btn-icon", attr: { title: isZh ? "刷新" : "Refresh", "aria-label": "Refresh" } });
-    refreshBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>`;
+    setIcon(refreshBtn, "refresh-cw");
     refreshBtn.onclick = () => this.scan();
     const closeBtn = header.createEl("button", { cls: "pi-agent-usage-btn-icon", attr: { title: isZh ? "关闭" : "Close", "aria-label": "Close" } });
-    closeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+    setIcon(closeBtn, "x");
     closeBtn.onclick = () => this.close();
     // Range selector
     const rangeBar = contentEl.createDiv("pi-agent-usage-rangebar");
@@ -5334,7 +5418,7 @@ class UsageStatsModal extends Modal {
       const fromInp = wrap.createEl("input", {
         attr: { type: "datetime-local", value: this.customFrom },
       });
-      const arrow = wrap.createSpan({ text: "→" });
+      wrap.createSpan({ text: "→" });
       const toInp = wrap.createEl("input", {
         attr: { type: "datetime-local", value: this.customTo },
       });
@@ -5352,9 +5436,9 @@ class UsageStatsModal extends Modal {
     this.summaryEl = contentEl.createDiv("pi-agent-usage-summary");
     // Table area
     this.tableEl = contentEl.createDiv("pi-agent-usage-table");
-    this.tableEl.style.flex = "1";
-    this.tableEl.style.overflow = "auto";
-    this.tableEl.style.minHeight = "0";
+    this.tableEl.addClass("pi-agent-usage-table-scroll");
+
+
     // Footer
     const footer = contentEl.createDiv("pi-agent-usage-footer");
     footer.createSpan({
@@ -5369,7 +5453,7 @@ class UsageStatsModal extends Modal {
     this.loading = true;
     this.error = null;
     this.updateStatus();
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (reqId !== this.reqId) return;
       try {
         const os = require("os") as typeof import("os");
@@ -5404,19 +5488,21 @@ class UsageStatsModal extends Modal {
     const isZh = this.lang === "zh";
     if (this.error) {
       this.statusEl.setText(`❌ ${this.error}`);
-      this.statusEl.style.color = "#ef4444";
+      this.statusEl.addClass("pi-agent-text-error");
       return;
     }
     if (this.loading) {
       this.statusEl.setText(isZh ? "扫描中…" : "Scanning…");
-      this.statusEl.style.color = "var(--text-muted)";
+      this.statusEl.removeClass("pi-agent-text-error");
+      this.statusEl.addClass("pi-agent-text-muted");
       return;
     }
     if (this.data) {
       this.statusEl.setText(
         `${isZh ? "已扫描" : "scanned"} ${this.data.sessionCount} ${isZh ? "个会话" : "session" + (this.data.sessionCount === 1 ? "" : "s")}`
       );
-      this.statusEl.style.color = "var(--text-muted)";
+      this.statusEl.removeClass("pi-agent-text-error");
+      this.statusEl.addClass("pi-agent-text-muted");
     }
   }
 
@@ -5448,7 +5534,7 @@ class UsageStatsModal extends Modal {
       card.createDiv({ text: c.label, cls: "pi-agent-usage-card-label" });
       card.createDiv({ text: c.value, cls: "pi-agent-usage-card-value" });
       const sub = card.createDiv({ text: c.sub, cls: "pi-agent-usage-card-sub" });
-      if (c.subColor) sub.style.color = c.subColor;
+      if (c.subColor) sub.setCssProps({ color: c.subColor });
     }
   }
 
@@ -5460,7 +5546,7 @@ class UsageStatsModal extends Modal {
       this.tableEl.createDiv({
         text: `${isZh ? "错误" : "Error"}: ${this.error}`,
         cls: "pi-agent-usage-empty",
-      }).style.color = "#ef4444";
+      }).addClass("pi-agent-text-error");
       return;
     }
     if (!this.data) {
@@ -5511,7 +5597,7 @@ class UsageStatsModal extends Modal {
         text: c.label + (c.key === this.sortKey ? sortArrow(c.key) : ""),
         attr: { title: c.label },
       });
-      th.style.textAlign = c.align;
+      th.setCssProps({ textAlign: c.align });
       if (c.key !== "share") {
         th.addClass("is-sortable");
         th.onclick = () => {
@@ -5530,13 +5616,13 @@ class UsageStatsModal extends Modal {
       const tr = tbody.createEl("tr");
       // Model
       const tdModel = tr.createEl("td");
-      tdModel.style.textAlign = "left";
-      const modelName = tdModel.createDiv({ cls: "pi-agent-usage-model-name", text: m.model });
-      const modelTime = tdModel.createDiv({ cls: "pi-agent-usage-model-time", text: `${fmtDateCompact(m.firstUsed ? new Date(m.firstUsed).toISOString() : null)} → ${fmtDateCompact(m.lastUsed ? new Date(m.lastUsed).toISOString() : null)}` });
+      tdModel.addClass("pi-agent-text-left");
+      tdModel.createDiv({ cls: "pi-agent-usage-model-name", text: m.model });
+      tdModel.createDiv({ cls: "pi-agent-usage-model-time", text: `${fmtDateCompact(m.firstUsed ? new Date(m.firstUsed).toISOString() : null)} → ${fmtDateCompact(m.lastUsed ? new Date(m.lastUsed).toISOString() : null)}` });
       // Provider
       const tdProv = tr.createEl("td", { text: m.provider });
-      tdProv.style.textAlign = "left";
-      tdProv.style.color = "var(--text-muted)";
+      tdProv.addClass("pi-agent-text-left");
+      tdProv.addClass("pi-agent-text-muted");
       // Numeric cells
       const cells: Array<[string, "right" | "left", string?]> = [
         [m.messageCount.toLocaleString(), "right"],
@@ -5550,20 +5636,20 @@ class UsageStatsModal extends Modal {
       ];
       for (const [val, align, color] of cells) {
         const td = tr.createEl("td", { text: val });
-        td.style.textAlign = align;
-        td.style.fontVariantNumeric = "tabular-nums";
-        if (color) td.style.color = color;
+        td.setCssProps({ textAlign: align });
+        td.addClass("pi-agent-tabular-nums");
+        if (color) td.setCssProps({ color });
       }
       // Share bar
       const tdShare = tr.createEl("td");
-      tdShare.style.textAlign = "left";
-      tdShare.style.minWidth = "120px";
+      tdShare.addClass("pi-agent-text-left");
+      tdShare.addClass("pi-agent-share-cell");
       const pct = totalAll > 0 ? (m.totalTokens / totalAll) * 100 : 0;
       const barW = maxTotal > 0 ? (m.totalTokens / maxTotal) * 100 : 0;
       const barWrap = tdShare.createDiv({ cls: "pi-agent-usage-bar" });
       const bar = barWrap.createDiv({ cls: "pi-agent-usage-bar-fill" });
-      bar.style.width = `${barW}%`;
-      const pctText = tdShare.createSpan({ text: `${pct.toFixed(1)}%`, cls: "pi-agent-usage-pct" });
+      bar.setCssProps({ width: `${barW}%` });
+      tdShare.createSpan({ text: `${pct.toFixed(1)}%`, cls: "pi-agent-usage-pct" });
     }
   }
 }

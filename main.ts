@@ -144,122 +144,122 @@ export default class PiAgentPlugin extends Plugin {
     this.addRibbonIcon("pimate-logo", "Open Pimate", () => {
       const lang = (this.settings?.language as string) === "en" ? "en" : "zh";
       new Notice(lang === "zh" ? "正在启动 Pimate..." : "Starting Pimate...");
-      this.activateView();
+      void this.activateView();
     });
 
     // Add command to open pi agent
     this.addCommand({
-      id: "open-pimate",
-      name: "Open Pimate Chat",
+      id: "open-chat",
+      name: "Open chat",
       callback: () => {
-        this.activateView();
+        void this.activateView();
       },
     });
 
     this.addCommand({
-      id: "new-pimate-session",
-      name: "New Pimate session",
-      callback: async () => {
+      id: "new-session",
+      name: "New session",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.newChatSession();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "close-active-pimate-session",
-      name: "Close active Pimate session tab",
-      callback: async () => {
+      id: "close-active-session",
+      name: "Close active session tab",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.closeActiveSessionTab();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "focus-pimate-composer",
-      name: "Focus Pimate composer",
-      callback: async () => {
+      id: "focus-composer",
+      name: "Focus composer",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.focusComposer();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "commands-skills-pimate",
-      name: "Open Pimate commands and skills",
-      callback: async () => {
+      id: "open-actions-and-skills",
+      name: "Open actions and skills",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.openCommandsAndSkills();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "pimate-previous-message",
-      name: "Pimate: jump to previous message",
-      callback: async () => {
+      id: "previous-message",
+      name: "Jump to previous message",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.scrollToPreviousMessage();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "pimate-next-message",
-      name: "Pimate: jump to next message",
-      callback: async () => {
+      id: "next-message",
+      name: "Jump to next message",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.scrollToNextMessage();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "pimate-toggle-last-tool",
-      name: "Pimate: toggle last tool output",
-      callback: async () => {
+      id: "toggle-last-tool",
+      name: "Toggle last tool output",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.toggleLastToolBlock();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "pimate-jump-last-diff",
-      name: "Pimate: jump to last diff",
-      callback: async () => {
+      id: "jump-last-diff",
+      name: "Jump to last diff",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         view?.scrollToLastDiff();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "resume-pimate-session",
-      name: "Resume previous Pimate session",
-      callback: async () => {
+      id: "resume-session",
+      name: "Resume previous session",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.resumePreviousSession();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "fork-pimate-session",
-      name: "Fork Pimate session from previous prompt",
-      callback: async () => {
+      id: "fork-session",
+      name: "Fork session from previous prompt",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.forkFromPreviousPrompt();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "clone-pimate-branch",
-      name: "Clone current Pimate branch",
-      callback: async () => {
+      id: "clone-branch",
+      name: "Clone current branch",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.cloneCurrentSessionBranch();
-      },
+      }),
     });
 
     // Add command to send selected text to pi
     this.addCommand({
-      id: "send-selection-to-pimate",
-      name: "Send selection to Pimate",
-      editorCallback: async (editor) => {
+      id: "send-selection",
+      name: "Send selection",
+      editorCallback: (editor) => this.runAsync(async () => {
         const selection = editor.getSelection();
         if (!selection) {
           new Notice("No text selected");
@@ -267,13 +267,13 @@ export default class PiAgentPlugin extends Plugin {
         }
         const view = await this.activateView();
         view?.addSelectionContext(selection);
-      },
+      }),
     });
 
     this.addCommand({
-      id: "inline-edit-with-pimate",
-      name: "Inline edit selection with Pimate",
-      editorCallback: async (editor) => {
+      id: "inline-edit-selection",
+      name: "Inline edit selection",
+      editorCallback: (editor) => this.runAsync(async () => {
         const selection = editor.getSelection();
         if (!selection) {
           new Notice("No text selected");
@@ -285,14 +285,14 @@ export default class PiAgentPlugin extends Plugin {
         await view?.inlineEditSelection(selection, (replacement) => {
           editor.replaceRange(replacement, from, to);
         });
-      },
+      }),
     });
 
     // Add command to send current file as context
     this.addCommand({
-      id: "send-file-to-pimate",
-      name: "Send current file to Pimate",
-      callback: async () => {
+      id: "send-current-file",
+      name: "Send current file",
+      callback: () => this.runAsync(async () => {
         const file = this.app.workspace.getActiveFile();
         if (!file) {
           new Notice("No active file");
@@ -300,16 +300,16 @@ export default class PiAgentPlugin extends Plugin {
         }
         const view = await this.activateView();
         view?.addActiveFileContext();
-      },
+      }),
     });
 
     this.addCommand({
-      id: "insert-last-pimate-response",
-      name: "Insert last Pimate response into current note",
-      callback: async () => {
+      id: "insert-last-response",
+      name: "Insert last response into current note",
+      callback: () => this.runAsync(async () => {
         const view = await this.activateView();
         await view?.insertLastAssistantIntoActiveNote();
-      },
+      }),
     });
 
     // Right-click multi-select support: track selection via active-leaf-change
@@ -319,7 +319,7 @@ export default class PiAgentPlugin extends Plugin {
         this.refreshExplorerSelection();
       })
     );
-    this.registerDomEvent(document, "click", () => {
+    this.registerDomEvent(activeDocument, "click", () => {
       this.refreshExplorerSelection();
     }, true);
 
@@ -338,7 +338,7 @@ export default class PiAgentPlugin extends Plugin {
           item
             .setTitle(title)
             .setIcon("pimate-logo")
-            .onClick(async () => {
+            .onClick(() => this.runAsync(async () => {
               const view = await this.activateView();
               if (!view) return;
               let count = 0;
@@ -354,7 +354,7 @@ export default class PiAgentPlugin extends Plugin {
               new Notice(
                 `Pimate: added ${count} item${count === 1 ? "" : "s"} to context`
               );
-            })
+            }))
         );
       })
     );
@@ -373,7 +373,7 @@ export default class PiAgentPlugin extends Plugin {
         item
           .setTitle(title)
           .setIcon("pimate-logo")
-          .onClick(async () => {
+          .onClick(() => this.runAsync(async () => {
             const view = await this.activateView();
             if (!view) return;
             let count = 0;
@@ -389,7 +389,7 @@ export default class PiAgentPlugin extends Plugin {
             new Notice(
               `Pimate: added ${count} item${count === 1 ? "" : "s"} to context`
             );
-          })
+          }))
       );
     };
     this.registerEvent(
@@ -402,9 +402,14 @@ export default class PiAgentPlugin extends Plugin {
     console.log("Pimate plugin loaded");
   }
 
-  async onunload(): Promise<void> {
-    // Detach all pi agent views
-    this.app.workspace.detachLeavesOfType(PI_AGENT_VIEW_TYPE);
+  private runAsync(task: () => Promise<void>): void {
+    void task().catch((err: unknown) => {
+      console.error("[pimate] command failed", err);
+      new Notice(err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  onunload(): void {
     console.log("Pimate plugin unloaded");
   }
 
@@ -431,7 +436,7 @@ export default class PiAgentPlugin extends Plugin {
 
     // Reveal the leaf
     if (leaf) {
-      workspace.revealLeaf(leaf);
+      workspace.setActiveLeaf(leaf);
     }
 
     return leaf?.view as PiAgentView | null;

@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -26,14 +28,27 @@ jobs:
       - name: Build plugin
         run: npm run build
 
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            styles.css
+            manifest.json
+
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          cat > release-notes.md <<'EOF'
+          Pimate embeds Pi Coding Agent as an AI collaborator inside Obsidian. It can chat with your vault context, add notes/files as context, run Pi agent tasks, and help review/apply edits without leaving Obsidian.
+
+          This release includes the bundled Obsidian plugin files: main.js, manifest.json, and styles.css.
+          EOF
 
           gh release create "$tag" \
             --title "$tag" \
-            --generate-notes \
+            --notes-file release-notes.md \
             main.js manifest.json styles.css
 
