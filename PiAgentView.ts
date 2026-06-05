@@ -99,11 +99,13 @@ export class PiAgentView extends ItemView {
   plugin: PiAgentPlugin;
   client: PiAgentClient | null = null;
   private chatContainer: HTMLElement | null = null;
+  private messageNavEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
   private streamingTextEl: HTMLElement | null = null;
   private streamingCursorEl: HTMLElement | null = null;
   private sessionTabsEl: HTMLElement | null = null;
   private contextRowEl: HTMLElement | null = null;
+  private imagePreviewEl: HTMLElement | null = null;
   private widgetEl: HTMLElement | null = null;
   private sendBtn: HTMLButtonElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
@@ -121,6 +123,7 @@ export class PiAgentView extends ItemView {
   private yoloToggleEl: HTMLElement | null = null;
   private yoloLabelEl: HTMLElement | null = null;
   private renderedMessages: RenderedMessage[] = [];
+  private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
   private tabs: ChatTab[] = [];
   private activeTabId: string | null = null;
   private historyPanelEl: HTMLElement | null = null;
@@ -333,6 +336,20 @@ export class PiAgentView extends ItemView {
     this.chatContainer = container.createDiv("pi-agent-chat");
     this.renderEmptyState();
 
+    // Floating message-nav (4 buttons stacked on the right of the chat).
+    const navEl = this.chatContainer.createDiv("pi-agent-message-nav");
+    const mkNavBtn = (cls: string, title: string, handler: () => void) => {
+      const btn = navEl.createDiv(`pi-agent-message-nav-btn ${cls}`);
+      btn.setAttribute("title", title);
+      btn.onclick = handler;
+      return btn;
+    };
+    mkNavBtn("is-first", "Jump to first message", () => this.focusEdgeMessage("first"));
+    mkNavBtn("is-prev", "Previous message (Alt+↑)", () => this.focusAdjacentMessage(-1));
+    mkNavBtn("is-next", "Next message (Alt+↓)", () => this.focusAdjacentMessage(1));
+    mkNavBtn("is-last", "Jump to last message", () => this.focusEdgeMessage("last"));
+    this.messageNavEl = navEl;
+
     this.historyPanelEl = container.createDiv("pi-agent-history-panel");
     this.historyPanelEl.style.display = "none";
 
@@ -447,6 +464,7 @@ export class PiAgentView extends ItemView {
 
     const inputArea = container.createDiv("pi-agent-input-area");
     this.contextRowEl = inputArea.createDiv("pi-agent-context-row");
+    this.imagePreviewEl = inputArea.createDiv("pi-agent-image-preview");
 
     this.inputEl = inputArea.createEl("textarea", {
       cls: "pi-agent-input",
@@ -990,7 +1008,12 @@ export class PiAgentView extends ItemView {
           : message.content
               ?.map((c) => c.text || c.thinking || "")
               .join("") || "";
-      this.addMessage("user", content);
+      const rendered = this.addMessage("user", content);
+      // Attach any images that were sent with this message to the bubble.
+      if (this.pendingUserImages.length > 0) {
+        this.renderUserMessageImages(rendered, this.pendingUserImages);
+        this.pendingUserImages = [];
+      }
     } else if (message.role === "assistant") {
       this.currentAssistantMsg = this.addMessage("assistant", "");
       this.currentTextBlock = null;
@@ -1740,13 +1763,26 @@ export class PiAgentView extends ItemView {
   }
 
   private focusAdjacentMessage(direction: -1 | 1): void {
-    const messages = Array.from(this.chatContainer?.querySelectorAll(".pi-agent-message") || []) as HTMLElement[];
+    // Only navigate between USER messages, not assistant/system/tool messages.
+    const messages = Array.from(
+      this.chatContainer?.querySelectorAll(".pi-agent-message-user") || []
+    ) as HTMLElement[];
     if (messages.length === 0) return;
     const center = (this.chatContainer?.scrollTop || 0) + (this.chatContainer?.clientHeight || 0) / 2;
     let index = messages.findIndex((message) => message.offsetTop + message.offsetHeight / 2 > center);
     if (index === -1) index = messages.length - 1;
     const nextIndex = Math.max(0, Math.min(messages.length - 1, index + direction));
     messages[nextIndex]?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  /** Jump to the first or last USER message in the chat (used by the floating nav). */
+  private focusEdgeMessage(edge: "first" | "last"): void {
+    const messages = Array.from(
+      this.chatContainer?.querySelectorAll(".pi-agent-message-user") || []
+    ) as HTMLElement[];
+    if (messages.length === 0) return;
+    const target = edge === "first" ? messages[0] : messages[messages.length - 1];
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
   private setStatus(
@@ -2058,6 +2094,10 @@ export class PiAgentView extends ItemView {
     const message = this.applySystemPrompt(baseMessage);
 
     this.maybeTitleActiveTab(rawMessage || message);
+
+    // Stash images so the user-message bubble (rendered when Pi echoes via
+    // message_start) can show the attached images at the top, like Claudian.
+    this.pendingUserImages = images.map((i) => ({ data: i.data, mimeType: i.mimeType }));
 
     // Pi RPC emits the accepted user message via message_start.
     // Do not render optimistically here, otherwise the message appears twice.
@@ -3300,20 +3340,43 @@ export class PiAgentView extends ItemView {
   private renderContextItems(): void {
     if (!this.contextRowEl) return;
     this.contextRowEl.empty();
-    this.contextRowEl.toggleClass("has-content", this.contextItems.length > 0);
-    for (const item of this.contextItems) {
-      const chip = this.contextRowEl.createSpan({ cls: "pi-agent-file-chip" });
-      if (item.type === "image") {
-        chip.createEl("img", {
-          cls: "pi-agent-file-chip-thumb",
-          attr: { src: `data:${item.mimeType || "image/png"};base64,${item.value}` },
+    if (this.imagePreviewEl) this.imagePreviewEl.empty();
+
+    // Split: images go to a dedicated large-thumbnail preview row;
+    // files/folders/selections stay in the chip row.
+    const images = this.contextItems.filter((i) => i.type === "image");
+    const others = this.contextItems.filter((i) => i.type !== "image");
+
+    if (this.imagePreviewEl) {
+      this.imagePreviewEl.toggleClass("has-content", images.length > 0);
+      for (const item of images) {
+        const card = this.imagePreviewEl.createDiv("pi-agent-image-card");
+        const img = card.createEl("img", {
+          cls: "pi-agent-image-card-thumb",
+          attr: {
+            src: `data:${item.mimeType || "image/png"};base64,${item.value}`,
+            title: item.label,
+          },
         });
-      } else {
-        chip.createSpan({
-          text: item.type === "selection" ? "▤" : item.type === "folder" ? "▦" : "▣",
-          cls: "pi-agent-file-chip-icon",
-        });
+        img.onclick = (e) => {
+          e.stopPropagation();
+          new ContextPreviewModal(this.app, item).open();
+        };
+        const remove = card.createSpan({ text: "×", cls: "pi-agent-image-card-remove" });
+        remove.onclick = (e) => {
+          e.stopPropagation();
+          this.removeContextItem(item.id);
+        };
       }
+    }
+
+    this.contextRowEl.toggleClass("has-content", others.length > 0);
+    for (const item of others) {
+      const chip = this.contextRowEl.createSpan({ cls: "pi-agent-file-chip" });
+      chip.createSpan({
+        text: item.type === "selection" ? "▤" : item.type === "folder" ? "▦" : "▣",
+        cls: "pi-agent-file-chip-icon",
+      });
       chip.createSpan({ text: item.label, cls: "pi-agent-file-chip-name" });
       const remove = chip.createSpan({ text: "×", cls: "pi-agent-file-chip-remove" });
       remove.onclick = (event) => {
@@ -3347,6 +3410,30 @@ export class PiAgentView extends ItemView {
         } else {
           new ContextPreviewModal(this.app, item).open();
         }
+      };
+    }
+  }
+
+  /**
+   * Render image attachments at the top of a user message bubble.
+   * Mirrors Claudian's layout: image(s) above the text prompt, click to zoom.
+   */
+  private renderUserMessageImages(
+    msg: RenderedMessage,
+    images: Array<{ data: string; mimeType: string }>
+  ): void {
+    const attachments = msg.el.createDiv("pi-agent-message-attachments");
+    // Move the attachments block above the text content.
+    msg.el.insertBefore(attachments, msg.contentEl);
+    for (const img of images) {
+      const card = attachments.createDiv("pi-agent-message-image");
+      const el = card.createEl("img", {
+        attr: { src: `data:${img.mimeType || "image/png"};base64,${img.data}` },
+      });
+      el.onclick = (e) => {
+        e.stopPropagation();
+        const url = `data:${img.mimeType || "image/png"};base64,${img.data}`;
+        window.open(url, "_blank");
       };
     }
   }
@@ -4969,6 +5056,11 @@ function fmtDate(iso: string | null): string {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+function fmtDateCompact(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 function computeHitRate(input: number, cacheRead: number): number | null {
   const denom = input + cacheRead;
   if (denom <= 0) return null;
@@ -5205,14 +5297,16 @@ class UsageStatsModal extends Modal {
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, modalEl } = this;
     contentEl.empty();
-    contentEl.addClass("pi-agent-usage-modal");
+    modalEl.addClass("pi-agent-usage-modal");
+    contentEl.addClass("pi-agent-usage-content");
     this.render();
   }
 
   onClose(): void {
     this.contentEl.empty();
+    this.modalEl.removeClass("pi-agent-usage-modal");
   }
 
   private render(): void {
@@ -5458,7 +5552,7 @@ class UsageStatsModal extends Modal {
       const tdModel = tr.createEl("td");
       tdModel.style.textAlign = "left";
       const modelName = tdModel.createDiv({ cls: "pi-agent-usage-model-name", text: m.model });
-      const modelTime = tdModel.createDiv({ cls: "pi-agent-usage-model-time", text: `${fmtDate(m.firstUsed ? new Date(m.firstUsed).toISOString() : null)} → ${fmtDate(m.lastUsed ? new Date(m.lastUsed).toISOString() : null)}` });
+      const modelTime = tdModel.createDiv({ cls: "pi-agent-usage-model-time", text: `${fmtDateCompact(m.firstUsed ? new Date(m.firstUsed).toISOString() : null)} → ${fmtDateCompact(m.lastUsed ? new Date(m.lastUsed).toISOString() : null)}` });
       // Provider
       const tdProv = tr.createEl("td", { text: m.provider });
       tdProv.style.textAlign = "left";

@@ -144,6 +144,16 @@ npm run build     # production build
 npm run dev       # watch mode
 ```
 
+## Security & Permissions
+
+Pimate requires two elevated permissions:
+
+- **Vault file access (`fs`)** — needed to read your notes, write AI edits, and search vault content. All file operations are scoped to your vault directory only.
+
+- **Command execution (`child_process`)** — Pimate spawns the `pi` CLI process to handle AI requests. The Pi agent uses shell tools (`bash`, `grep`, `find`) to navigate and modify your vault files as directed by the AI. No commands are executed without your explicit instruction through the chat interface.
+
+Pi runs entirely **locally** — your API keys and vault content never leave your machine.
+
 ## License
 
 GNU General Public License v3.0
