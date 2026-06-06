@@ -195,6 +195,13 @@ export class PiAgentView extends ItemView {
     this.inputEl?.focus();
   }
 
+  private runAsync(task: () => Promise<void>): void {
+    void task().catch((err: unknown) => {
+      console.error("[pimate] async action failed", err);
+      new Notice(err instanceof Error ? err.message : String(err));
+    });
+  }
+
   async newChatSession(): Promise<void> {
     await this.newSession();
   }
@@ -350,7 +357,7 @@ export class PiAgentView extends ItemView {
     newTabBtn.onclick = () => {
       const maxTabs = this.plugin.settings.maxTabs || 3;
       if (this.tabs.length < maxTabs) {
-        this.createAndSwitchTab();
+        this.runAsync(() => this.createAndSwitchTab());
       } else {
         new Notice(isZh ? `已达到最大会话卡数量限制 (${maxTabs})` : `Maximum tab count reached (${maxTabs})`);
       }
@@ -364,7 +371,7 @@ export class PiAgentView extends ItemView {
       menu.addItem((item: any) => {
         item.setTitle(isZh ? "重置所有会话卡 (1, 2, 3)" : "Reset all session tabs")
             .setIcon("refresh-cw")
-            .onClick(async () => {
+            .onClick(() => this.runAsync(async () => {
               for (const t of this.tabs) {
                 await t.client?.destroy();
                 t.client = null;
@@ -388,7 +395,7 @@ export class PiAgentView extends ItemView {
               this.updateButtons();
               await this.persistSessionTabs();
               new Notice(isZh ? "所有会话卡均已重置" : "All session tabs reset");
-            });
+            }));
       });
       menu.showAtMouseEvent(e);
     });
@@ -396,7 +403,7 @@ export class PiAgentView extends ItemView {
     const forkBtn = composerActions.createDiv("pi-agent-mini-action");
     setIcon(forkBtn, "square-pen");
     forkBtn.setAttribute("title", isZh ? "新建/重置当前会话" : "New conversation");
-    forkBtn.onclick = () => this.newSession();
+    forkBtn.onclick = () => this.runAsync(() => this.newSession());
     // 分支按钮右键：分支或克隆
     forkBtn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -527,15 +534,15 @@ export class PiAgentView extends ItemView {
 
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        this.sendMessage();
+        this.runAsync(() => this.sendMessage());
       } else if (e.key === "/" && this.inputEl?.selectionStart === 0 && !this.inputEl.value) {
-        window.setTimeout(() => this.showCommandSelector(), 0);
+        window.setTimeout(() => this.runAsync(() => this.showCommandSelector()), 0);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        this.showCommandSelector();
+        this.runAsync(() => this.showCommandSelector());
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        this.newSession();
+        this.runAsync(() => this.newSession());
       } else if (e.altKey && e.key === "ArrowUp") {
         e.preventDefault();
         this.scrollToPreviousMessage();
@@ -2379,7 +2386,7 @@ export class PiAgentView extends ItemView {
           this.closeModelPopup();
         }
       };
-      window.window.setTimeout(() => {
+      window.setTimeout(() => {
         activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
       }, 0);
     }
@@ -2473,7 +2480,7 @@ export class PiAgentView extends ItemView {
         this.closeModelPopup();
       }
     };
-    window.window.setTimeout(() => {
+    window.setTimeout(() => {
       activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
     }, 0);
   }
@@ -2556,13 +2563,12 @@ export class PiAgentView extends ItemView {
         this.closeEffortPopup();
       }
     };
-    window.window.setTimeout(() => {
+    window.setTimeout(() => {
       activeDocument.addEventListener("pointerdown", this.effortOutsideClickHandler!);
     }, 0);
   }
 
   private async toggleHistoryPanel(): Promise<void> {
-    const isZh = this.plugin.settings.language === "zh";
     this.isHistoryOpen = !this.isHistoryOpen;
     
     const historyBtn = this.containerEl.querySelector(".pi-agent-mini-action:has(svg.svg-icon[class*='history'])") || 
@@ -2758,19 +2764,19 @@ export class PiAgentView extends ItemView {
               item
                 .setTitle(isZh ? "重命名" : "Rename")
                 .setIcon("pencil")
-                .onClick(async () => {
+                .onClick(() => this.runAsync(async () => {
                   await this.renameResumeSession(session);
                   await this.renderHistoryPanel();
-                });
+                }));
             });
             menu.addItem((item: any) => {
               item
                 .setTitle(isZh ? "删除此会话" : "Delete session")
                 .setIcon("trash-2")
-                .onClick(async () => {
+                .onClick(() => this.runAsync(async () => {
                   await this.deleteResumeSession(session);
                   await this.renderHistoryPanel();
-                });
+                }));
             });
             menu.showAtMouseEvent(e);
           });
@@ -3894,7 +3900,7 @@ export class PiAgentView extends ItemView {
       this.renderMarkdownWithCursor(rawText, targetEl);
       this.lastRenderTime = now;
     } else {
-      this.renderTimeout = window.window.setTimeout(() => {
+      this.renderTimeout = window.setTimeout(() => {
         this.renderMarkdownWithCursor(rawText, targetEl);
         this.lastRenderTime = Date.now();
       }, delay - (now - this.lastRenderTime));

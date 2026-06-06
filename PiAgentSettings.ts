@@ -327,12 +327,13 @@ export class PiAgentSettingTab extends PluginSettingTab {
         const cmd = isWin ? `chcp 65001 >nul && ${baseCmd}` : baseCmd;
         exec(cmd, { timeout: 15000 }, (err: any, stdout: string, stderr: string) => {
           const raw = stdout + stderr;
-          const clean = raw.replace(/\x1B\[[0-9;]*m/g, "");
+          const ansiEscape = String.fromCharCode(27);
+          const clean = raw.replace(new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g"), "");
           const results: any[] = [];
           const lines = clean.split("\n");
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
-            const pkgMatch = line.match(/^([\w.\-]+\/[\w.\-@:]+)\s+([\d.,]+[KMB]?\s+installs)$/);
+            const pkgMatch = line.match(/^([\w.-]+\/[\w.@:-]+)\s+([\d.,]+[KMB]?\s+installs)$/);
             if (pkgMatch) {
               const urlLine = lines[i + 1]?.trim().replace(/^└\s*/, "");
               results.push({
@@ -623,23 +624,28 @@ export class PiAgentSettingTab extends PluginSettingTab {
         if (isOauth) {
           // OAuth 只提供断开连接按钮
           setting.addButton(btn => {
-            btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setWarning()
-               .onClick(async () => {
-                 delete authData[id];
-                 fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-                 this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
-                 this.display();
-                 
-                 // 联动更新聊天视图并物理重启子进程
-                 const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-                 for (const leaf of leaves) {
-                   const view = leaf.view as any;
-                   if (view && view.client) {
-                     await view.client.restart();
-                   }
-                 }
-               });
+            btn.setButtonText(isZh ? "断开连接" : "Disconnect");
+            btn.buttonEl.addClass("mod-warning");
+            btn.onClick(() => {
+              void (async () => {
+                delete authData[id];
+                fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+                this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+                this.display();
+
+                // 联动更新聊天视图并物理重启子进程
+                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+                for (const leaf of leaves) {
+                  const view = leaf.view as any;
+                  if (view && view.client) {
+                    await view.client.restart();
+                  }
+                }
+              })().catch((err: unknown) => {
+                console.error("[pimate] disconnect provider failed", err);
+                new Notice(err instanceof Error ? err.message : String(err));
+              });
+            });
           });
         } else {
           // 普通 API Key 提供密文输入框和断开连接按钮
@@ -647,7 +653,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
             setting.addButton(btn => {
               btn.setButtonText(isZh ? "Device Code 登录" : "Device Code Login")
                  .setCta()
-                 .onClick(() => this.startOpenAICodexDeviceCodeLogin());
+                 .onClick(() => {
+                   void this.startOpenAICodexDeviceCodeLogin().catch((err: unknown) => {
+                     console.error("[pimate] device-code login failed", err);
+                     new Notice(err instanceof Error ? err.message : String(err));
+                   });
+                 });
             });
           }
 
@@ -679,33 +690,38 @@ export class PiAgentSettingTab extends PluginSettingTab {
               }
             };
             
-            text.inputEl.addEventListener("blur", saveValue);
+            text.inputEl.addEventListener("blur", () => void saveValue());
             text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                saveValue();
+                void saveValue();
               }
             });
           });
 
           setting.addButton(btn => {
-            btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setWarning()
-               .onClick(async () => {
-                 delete authData[id];
-                 fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-                 this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
-                 this.display();
+            btn.setButtonText(isZh ? "断开连接" : "Disconnect");
+            btn.buttonEl.addClass("mod-warning");
+            btn.onClick(() => {
+              void (async () => {
+                delete authData[id];
+                fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+                this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+                this.display();
 
-                 // 联动更新聊天视图
-                 const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-                 for (const leaf of leaves) {
-                   const view = leaf.view as any;
-                   if (view && view.client) {
-                     await view.client.restart();
-                   }
-                 }
-               });
+                // 联动更新聊天视图
+                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+                for (const leaf of leaves) {
+                  const view = leaf.view as any;
+                  if (view && view.client) {
+                    await view.client.restart();
+                  }
+                }
+              })().catch((err: unknown) => {
+                console.error("[pimate] disconnect provider failed", err);
+                new Notice(err instanceof Error ? err.message : String(err));
+              });
+            });
           });
         }
       }
@@ -962,7 +978,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .addButton(btn => {
         btn.setButtonText(isZh ? "安装" : "Install")
           .setCta()
-          .onClick(async () => {
+          .onClick(() => {
             if (!installPkgName) {
               new Notice(isZh ? "请输入技能包名！" : "Please enter package name!");
               return;
@@ -1329,7 +1345,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         reject(new Error("Login cancelled"));
         return;
       }
-      const t = window.window.setTimeout(() => {
+      const t = window.setTimeout(() => {
         signal.removeEventListener("abort", onAbort);
         resolve();
       }, ms);

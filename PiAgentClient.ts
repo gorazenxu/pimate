@@ -156,10 +156,6 @@ export interface PiAgentClientOptions {
   tools?: string[];
 }
 
-function quoteWindowsShellArg(value: string): string {
-  return `"${value.replace(/"/g, '\\"')}"`;
-}
-
 
 export class PiAgentClient extends EventEmitter {
   private process: ChildProcess | null = null;

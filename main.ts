@@ -480,7 +480,7 @@ export default class PiAgentPlugin extends Plugin {
         if (data[provider.id] && (data[provider.id].key || data[provider.id].type === "oauth")) {
           this.settings.provider = provider.id;
           this.settings.modelId = provider.defaultModel;
-          this.saveSettings();
+          void this.saveSettings();
           console.log(`[Pimate] 自动检测到已配置凭据的厂商，默认模型设为 ${provider.id}/${provider.defaultModel}`);
           break;
         }
