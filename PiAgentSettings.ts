@@ -624,7 +624,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           // OAuth 只提供断开连接按钮
           setting.addButton(btn => {
             btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setDestructive()
+               .setWarning()
                .onClick(async () => {
                  delete authData[id];
                  fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
@@ -690,7 +690,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
           setting.addButton(btn => {
             btn.setButtonText(isZh ? "断开连接" : "Disconnect")
-               .setDestructive()
+               .setWarning()
                .onClick(async () => {
                  delete authData[id];
                  fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
