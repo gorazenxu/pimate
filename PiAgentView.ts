@@ -13,8 +13,9 @@ import {
   Menu,
   setIcon,
 } from "obsidian";
-import { readdirSync, readFileSync, statSync, unlinkSync } from "fs";
-import { basename, dirname } from "path";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "fs";
+import { basename, dirname, join } from "path";
+import { homedir } from "os";
 import type PiAgentPlugin from "./main";
 import {
   PiAgentClient,
@@ -276,7 +277,7 @@ export class PiAgentView extends ItemView {
   }
 
   openCommandsAndSkills(): void {
-    this.showCommandSelector();
+    this.runAsync(() => this.showCommandSelector());
   }
 
   addSelectionContext(selection: string): void {
@@ -366,7 +367,6 @@ export class PiAgentView extends ItemView {
     newTabBtn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const Menu = (require("obsidian") as any).Menu;
       const menu = new Menu();
       menu.addItem((item: any) => {
         item.setTitle(isZh ? "重置所有会话卡 (1, 2, 3)" : "Reset all session tabs")
@@ -408,17 +408,16 @@ export class PiAgentView extends ItemView {
     forkBtn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const Menu = (require("obsidian") as any).Menu;
       const menu = new Menu();
       menu.addItem((item: any) => {
         item.setTitle(isZh ? "分支当前会话..." : "Fork current conversation...")
             .setIcon("git-fork")
-            .onClick(() => this.showForkSelector());
+            .onClick(() => this.runAsync(() => this.showForkSelector()));
       });
       menu.addItem((item: any) => {
         item.setTitle(isZh ? "克隆当前会话分支" : "Clone current branch")
             .setIcon("copy")
-            .onClick(() => this.cloneCurrentBranch());
+            .onClick(() => this.runAsync(() => this.cloneCurrentBranch()));
       });
       menu.showAtMouseEvent(e);
     });
@@ -426,23 +425,20 @@ export class PiAgentView extends ItemView {
     const historyBtn = composerActions.createDiv("pi-agent-mini-action");
     setIcon(historyBtn, "history");
     historyBtn.setAttribute("title", isZh ? "恢复会话/历史" : "History sessions");
-    historyBtn.onclick = () => this.toggleHistoryPanel();
+    historyBtn.onclick = () => this.runAsync(() => this.toggleHistoryPanel());
     // 历史按钮右键：在系统管理器中打开历史目录
     historyBtn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const Menu = (require("obsidian") as any).Menu;
       const menu = new Menu();
       menu.addItem((item: any) => {
         item.setTitle(isZh ? "打开历史会话保存目录" : "Open history sessions directory")
             .setIcon("folder")
             .onClick(() => {
               try {
-                const path = require("path");
-                const os = require("os");
-                const historyDir = path.join(os.homedir(), ".pi", "sessions");
-                const { shell } = require("electron");
-                shell.openPath(historyDir);
+                const historyDir = join(homedir(), ".pi", "sessions");
+                const electron = (window as unknown as { require?: (moduleName: string) => { shell?: { openPath: (target: string) => Promise<string> } } }).require?.("electron");
+                void electron?.shell?.openPath(historyDir);
               } catch (err) {
                 new Notice(isZh ? `无法打开目录: ${(err as Error).message}` : `Cannot open dir: ${(err as Error).message}`);
               }
@@ -562,7 +558,7 @@ export class PiAgentView extends ItemView {
     });
 
      this.inputEl.addEventListener("paste", (e: ClipboardEvent) => {
-      this.handlePaste(e);
+      this.runAsync(() => this.handlePaste(e));
     });
     this.inputEl.addEventListener("dragover", (e: DragEvent) => {
       e.preventDefault();
@@ -572,7 +568,7 @@ export class PiAgentView extends ItemView {
       this.inputEl?.removeClass("is-drag-over");
     });
     this.inputEl.addEventListener("drop", (e: DragEvent) => {
-      this.handleDrop(e);
+      this.runAsync(() => this.handleDrop(e));
     });
     this.inputEl.addEventListener("input", () => {
       this.updateInputModeState();
@@ -594,7 +590,7 @@ export class PiAgentView extends ItemView {
     // 点击模型按钮，在按钮正上方弹起局部的模型选择浮层
     footerModelBtn.onclick = (e) => {
       e.stopPropagation();
-      this.toggleModelPopup(footerModelBtn);
+      this.runAsync(() => this.toggleModelPopup(footerModelBtn));
     };
 
     // 2. Effort Selector Container (Compat with Claudian)
@@ -619,7 +615,7 @@ export class PiAgentView extends ItemView {
       attr: { title: isZh ? "选择文件上下文" : "Select file context" },
     });
     setIcon(folderBtn, "folder");
-    folderBtn.onclick = () => this.addFileContext();
+    folderBtn.onclick = () => this.runAsync(() => this.addFileContext());
 
     this.statusBar = footerLeft.createSpan({
       text: "Starting…",
@@ -726,13 +722,13 @@ export class PiAgentView extends ItemView {
         attr: { title: isZh ? `会话卡 ${index + 1}` : `Session ${index + 1}` },
       });
       tabEl.createSpan({ text: String(index + 1), cls: "pi-agent-session-tab-label" });
-      tabEl.onclick = () => this.switchToTab(tab.id);
+      tabEl.onclick = () => this.runAsync(() => this.switchToTab(tab.id));
       
       // 选项卡右键功能：直接关闭，无需二级菜单
       tabEl.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.closeTab(tab.id);
+        this.runAsync(() => this.closeTab(tab.id));
       });
     }
 
@@ -862,7 +858,7 @@ export class PiAgentView extends ItemView {
       }
       if (this.activeTabId === tab.id) {
         this.setStatus("Ready", "ok");
-        this.loadAvailableCommands();
+        void this.loadAvailableCommands();
       }
     } catch (err) {
       if (this.activeTabId === tab.id) {
@@ -919,7 +915,7 @@ export class PiAgentView extends ItemView {
         this.currentThinkingContent = null;
         this.updateButtons();
         this.setStatus("✅ Ready", "ok");
-        this.refreshStateDisplay();
+        void this.refreshStateDisplay();
         break;
 
       case "message_start":
@@ -1185,7 +1181,7 @@ export class PiAgentView extends ItemView {
             "markdown-rendered"
           );
           textBlock.empty();
-          MarkdownRenderer.render(
+          void MarkdownRenderer.render(
             this.app,
             raw,
             textBlock as HTMLElement,
@@ -1298,7 +1294,7 @@ export class PiAgentView extends ItemView {
       this.setInputText(text);
       this.inputEl?.focus();
       // Trigger send after the input is set.
-      this.sendMessage();
+      this.runAsync(() => this.sendMessage());
     };
 
     const clearBtn = wrap.createEl("button", {
@@ -1347,24 +1343,27 @@ export class PiAgentView extends ItemView {
         if (path) {
           argsEl.addClass("is-clickable");
           argsEl.setAttribute("title", `${path} (Click to open)`);
-          argsEl.onclick = async (event) => {
+          argsEl.onclick = (event) => {
             event.stopPropagation();
             const file = this.app.vault.getAbstractFileByPath(path);
-            if (file instanceof TFile) await this.app.workspace.getLeaf(false).openFile(file);
+            if (file instanceof TFile) {
+              void this.app.workspace.getLeaf(false).openFile(file).catch((err: unknown) => {
+                console.error("[pimate] open file failed", err);
+              });
+            }
           };
         } else if (toolName === "bash" && args.command) {
           argsEl.addClass("is-clickable");
           const fullCmd = args.command as string;
           const isZh = this.plugin.settings.language === "zh";
           argsEl.setAttribute("title", `${fullCmd} (Click to copy)`);
-          argsEl.onclick = async (event) => {
+          argsEl.onclick = (event) => {
             event.stopPropagation();
-            try {
-              await navigator.clipboard.writeText(fullCmd);
+            void navigator.clipboard.writeText(fullCmd).then(() => {
               new Notice(isZh ? "命令已复制到剪贴板" : "Command copied to clipboard");
-            } catch (err) {
+            }).catch((err: unknown) => {
               new Notice(`Failed to copy: ${err}`);
-            }
+            });
           };
         }
       }
@@ -1583,11 +1582,14 @@ export class PiAgentView extends ItemView {
         attr: { title: "Copy message" },
       });
       copyBtn.setText("📋");
-      copyBtn.onclick = async (e) => {
+      copyBtn.onclick = (e) => {
         e.stopPropagation();
         const rawContent = msgEl.getAttribute("data-raw-content") || msgEl.textContent || "";
-        await navigator.clipboard.writeText(rawContent);
-        new Notice("Copied to clipboard");
+        void navigator.clipboard.writeText(rawContent).then(() => {
+          new Notice("Copied to clipboard");
+        }).catch((err: unknown) => {
+          console.error("[pimate] copy message failed", err);
+        });
       };
 
       // 2. Insert to active editor (assistant only)
@@ -1677,7 +1679,7 @@ export class PiAgentView extends ItemView {
     );
     if (summary && summary.trim()) {
       const body = wrap.createDiv("pi-agent-compaction-body markdown-preview-view markdown-rendered");
-      MarkdownRenderer.render(this.app, summary, body, "", this);
+      void MarkdownRenderer.render(this.app, summary, body, "", this);
     }
     this.scrollToBottom(true, true);
   }
@@ -1861,9 +1863,11 @@ export class PiAgentView extends ItemView {
           cls: "pi-agent-file-chip is-clickable",
           attr: { title: `${file.path} (Click to open)` }
         });
-        chip.onclick = async (e) => {
+        chip.onclick = (e) => {
           e.stopPropagation();
-          await this.app.workspace.getLeaf(false).openFile(file);
+          void this.app.workspace.getLeaf(false).openFile(file).catch((err: unknown) => {
+            console.error("[pimate] open linked file failed", err);
+          });
         };
       });
       outputEl.insertBefore(chipsContainer, outputEl.firstChild);
@@ -1940,7 +1944,7 @@ export class PiAgentView extends ItemView {
       item
         .setTitle(isZh ? "指令 / 技能" : "Commands / Skills")
         .setIcon("terminal")
-        .onClick(() => this.showCommandSelector())
+        .onClick(() => this.runAsync(() => this.showCommandSelector()))
     );
     menu.addItem((item) =>
       item
@@ -2000,19 +2004,19 @@ export class PiAgentView extends ItemView {
       item
         .setTitle(isZh ? "压缩上下文" : "Compact context")
         .setIcon("archive")
-        .onClick(() => this.compactSession())
+        .onClick(() => this.runAsync(() => this.compactSession()))
     );
     menu.addItem((item) =>
       item
         .setTitle(isZh ? "导出 HTML" : "Export HTML")
         .setIcon("download")
-        .onClick(() => this.exportSessionHtml())
+        .onClick(() => this.runAsync(() => this.exportSessionHtml()))
     );
     menu.addItem((item) =>
       item
         .setTitle(isZh ? "会话统计" : "Session stats")
         .setIcon("bar-chart-2")
-        .onClick(() => this.showStats())
+        .onClick(() => this.runAsync(() => this.showStats()))
     );
     menu.addItem((item) =>
       item
@@ -2156,7 +2160,7 @@ export class PiAgentView extends ItemView {
     if (title) {
       tab.label = title;
       this.renderTabs();
-      this.persistSessionTabs();
+      void this.persistSessionTabs();
     }
   }
 
@@ -2462,15 +2466,17 @@ export class PiAgentView extends ItemView {
         const shortName = model.name || this.getModelShortName(model.id);
         itemEl.createSpan({ text: shortName, cls: "pi-agent-model-popup-item-name" });
 
-        itemEl.onclick = async (e) => {
+        itemEl.onclick = (e) => {
           e.stopPropagation();
-          this.plugin.settings.provider = model.provider;
-          this.plugin.settings.modelId = model.id;
-          await this.plugin.saveSettings();
-          await this.client?.setModel(model.provider, model.id);
-          this.updateModelDisplay(model.provider, model.id);
-          new Notice(isZh ? `模型已切换为 ${shortName}` : `Model set to ${shortName}`);
-          this.closeModelPopup();
+          this.runAsync(async () => {
+            this.plugin.settings.provider = model.provider;
+            this.plugin.settings.modelId = model.id;
+            await this.plugin.saveSettings();
+            await this.client?.setModel(model.provider, model.id);
+            this.updateModelDisplay(model.provider, model.id);
+            new Notice(isZh ? `模型已切换为 ${shortName}` : `Model set to ${shortName}`);
+            this.closeModelPopup();
+          });
         };
       }
     }
@@ -2543,10 +2549,11 @@ export class PiAgentView extends ItemView {
       // Right area: description
       itemEl.createSpan({ text: option.desc, cls: "pi-agent-effort-popup-item-desc" });
 
-      itemEl.onclick = async (e) => {
+      itemEl.onclick = (e) => {
         e.stopPropagation();
-        this.plugin.settings.thinkingLevel = option.id;
-        await this.plugin.saveSettings();
+        this.runAsync(async () => {
+          this.plugin.settings.thinkingLevel = option.id;
+          await this.plugin.saveSettings();
         if (this.client) {
           await this.client.setThinkingLevel(option.id);
         }
@@ -2554,7 +2561,8 @@ export class PiAgentView extends ItemView {
           this.footerEffortCurrent.setText(this.getThinkingLevelLabel(option.id));
         }
         new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
-        this.closeEffortPopup();
+          this.closeEffortPopup();
+        });
       };
     }
 
@@ -2618,10 +2626,8 @@ export class PiAgentView extends ItemView {
     isCurrent: boolean;
     sessions: ResumeSessionItem[];
   }> {
-    const os = require("os");
-    const home = os.homedir().replace(/\\/g, "/");
+    const home = homedir().replace(/\\/g, "/");
     const sessionsBaseDir = `${home}/.pi/agent/sessions`;
-    const { existsSync, readdirSync, statSync } = require("fs");
     
     if (!existsSync(sessionsBaseDir)) return [];
     
@@ -2746,19 +2752,20 @@ export class PiAgentView extends ItemView {
           const timeText = this.formatHistoryTime(session.mtime);
           contentEl.createDiv({ text: timeText, cls: "pi-agent-history-item-time" });
 
-          itemEl.onclick = async () => {
-            await this.openResumeSession(session);
-            this.isHistoryOpen = false;
+          itemEl.onclick = () => {
+            this.runAsync(async () => {
+              await this.openResumeSession(session);
+              this.isHistoryOpen = false;
             if (this.chatContainer) this.chatContainer.removeClass("pi-agent-hidden");
             this.historyPanelEl!.addClass("pi-agent-hidden");
             const historyBtn = this.containerEl.querySelector(".pi-agent-mini-action.is-active");
-            historyBtn?.removeClass("is-active");
+              historyBtn?.removeClass("is-active");
+            });
           };
 
           itemEl.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const Menu = (require("obsidian") as any).Menu;
             const menu = new Menu();
             menu.addItem((item: any) => {
               item
@@ -2883,10 +2890,8 @@ export class PiAgentView extends ItemView {
       const vaultPath = (this.app.vault.adapter as any).getBasePath?.() || "";
       if (vaultPath) {
         const encodedDirName = this.encodeWorkspacePath(vaultPath);
-        const os = require("os");
-        const home = os.homedir().replace(/\\/g, "/");
+        const home = homedir().replace(/\\/g, "/");
         const sessionsBaseDir = `${home}/.pi/agent/sessions`;
-        const { existsSync, readdirSync } = require("fs");
 
         // 1. 优先使用原本的 directory
         const directory = `${sessionsBaseDir}/${encodedDirName}`;
@@ -3387,8 +3392,9 @@ export class PiAgentView extends ItemView {
         event.stopPropagation();
         this.removeContextItem(item.id);
       };
-      chip.onclick = async () => {
-        if (item.type === "file") {
+      chip.onclick = () => {
+        this.runAsync(async () => {
+          if (item.type === "file") {
           const file = this.app.vault.getAbstractFileByPath(item.value);
           if (file instanceof TFile) await this.app.workspace.getLeaf(false).openFile(file);
         } else if (item.type === "folder") {
@@ -3412,8 +3418,9 @@ export class PiAgentView extends ItemView {
             }
           }
         } else {
-          new ContextPreviewModal(this.app, item).open();
-        }
+            new ContextPreviewModal(this.app, item).open();
+          }
+        });
       };
     }
   }
@@ -3678,7 +3685,7 @@ export class PiAgentView extends ItemView {
                   rendered.el.setAttribute("data-raw-content", block.text);
                   const textBlock =
                     rendered.contentEl.createDiv("pi-agent-text-block markdown-preview-view markdown-rendered");
-                  MarkdownRenderer.render(
+                  void MarkdownRenderer.render(
                     this.app,
                     block.text,
                     textBlock,
@@ -3814,10 +3821,13 @@ export class PiAgentView extends ItemView {
   private renderDiffOutput(container: HTMLElement, diffText: string): void {
     const actions = container.createDiv("pi-agent-diff-actions");
     const copy = actions.createEl("button", { text: "Copy diff" });
-    copy.onclick = async (event) => {
+    copy.onclick = (event) => {
       event.stopPropagation();
-      await navigator.clipboard.writeText(diffText);
-      new Notice("Diff copied");
+      void navigator.clipboard.writeText(diffText).then(() => {
+        new Notice("Diff copied");
+      }).catch((err: unknown) => {
+        console.error("[pimate] copy diff failed", err);
+      });
     };
 
     const pre = container.createEl("pre", { cls: "pi-agent-diff-pre" });
@@ -3949,7 +3959,7 @@ export class PiAgentView extends ItemView {
     const textWithCursor = rawText + cursor;
     const finalRenderText = inCodeblock ? textWithCursor + "\n```" : textWithCursor;
 
-    MarkdownRenderer.render(
+    void MarkdownRenderer.render(
       this.app,
       finalRenderText,
       targetEl,
@@ -4456,8 +4466,10 @@ class ResumeSessionSuggestModal extends SuggestModal<ResumeSessionItem> {
     });
   }
 
-  async onChooseSuggestion(session: ResumeSessionItem): Promise<void> {
-    await this.onChoose(session);
+  onChooseSuggestion(session: ResumeSessionItem): void {
+    void Promise.resolve(this.onChoose(session)).catch((err: unknown) => {
+      console.error("[pimate] resume session selection failed", err);
+    });
   }
 }
 
@@ -4486,15 +4498,15 @@ class ResumeActionModal extends Modal {
     const del = buttons.createEl("button", { text: "Delete" });
     const open = buttons.createEl("button", { text: "Open", cls: "mod-cta" });
     cancel.onclick = () => {
-      this.done("cancel");
+      void Promise.resolve(this.done("cancel")).catch((err: unknown) => console.error("[pimate] resume action failed", err));
       this.close();
     };
     del.onclick = () => {
-      this.done("delete");
+      void Promise.resolve(this.done("delete")).catch((err: unknown) => console.error("[pimate] resume action failed", err));
       this.close();
     };
     open.onclick = () => {
-      this.done("open");
+      void Promise.resolve(this.done("open")).catch((err: unknown) => console.error("[pimate] resume action failed", err));
       this.close();
     };
   }
@@ -4535,8 +4547,10 @@ class ForkMessageSuggestModal extends SuggestModal<ForkMessage> {
     });
   }
 
-  async onChooseSuggestion(message: ForkMessage): Promise<void> {
-    await this.onChoose(message);
+  onChooseSuggestion(message: ForkMessage): void {
+    void Promise.resolve(this.onChoose(message)).catch((err: unknown) => {
+      console.error("[pimate] fork message selection failed", err);
+    });
   }
 }
 
@@ -4574,8 +4588,10 @@ class ModelSuggestModal extends SuggestModal<PiModel> {
     });
   }
 
-  async onChooseSuggestion(model: PiModel): Promise<void> {
-    await this.onChoose(model);
+  onChooseSuggestion(model: PiModel): void {
+    void Promise.resolve(this.onChoose(model)).catch((err: unknown) => {
+      console.error("[pimate] model selection failed", err);
+    });
   }
 }
 
@@ -5033,8 +5049,10 @@ export class ThinkingLevelSuggestModal extends SuggestModal<ThinkingLevelOption>
     });
   }
 
-  async onChooseSuggestion(option: ThinkingLevelOption): Promise<void> {
-    await this.onChoose(option);
+  onChooseSuggestion(option: ThinkingLevelOption): void {
+    void Promise.resolve(this.onChoose(option)).catch((err: unknown) => {
+      console.error("[pimate] thinking level selection failed", err);
+    });
   }
 }
 
@@ -5214,8 +5232,6 @@ function scanUsageRange(
   from: number | null,
   to: number | null
 ): UsageResult {
-  const fs = require("fs") as typeof import("fs");
-  const path = require("path") as typeof import("path");
   const byModel = new Map<string, UsageModelRow>();
   const totals: UsageTotals = {
     input: 0,
@@ -5228,25 +5244,24 @@ function scanUsageRange(
     messageCount: 0,
   };
   let sessionCount = 0;
-  if (!fs.existsSync(sessionsBaseDir)) {
+  if (!existsSync(sessionsBaseDir)) {
     return { from, to, sessionCount, byModel: [], totals };
   }
-  const workspaceDirs = fs
-    .readdirSync(sessionsBaseDir)
-    .filter((n) => n.startsWith("--") && n.endsWith("--"))
-    .map((n) => path.join(sessionsBaseDir, n));
+  const workspaceDirs = readdirSync(sessionsBaseDir)
+    .filter((n: string) => n.startsWith("--") && n.endsWith("--"))
+    .map((n) => join(sessionsBaseDir, n));
   for (const wsDir of workspaceDirs) {
     let files: string[] = [];
     try {
-      files = fs.readdirSync(wsDir).filter((f) => f.endsWith(".jsonl"));
+      files = readdirSync(wsDir).filter((f) => f.endsWith(".jsonl"));
     } catch {
       continue;
     }
     for (const f of files) {
-      const fullPath = path.join(wsDir, f);
+      const fullPath = join(wsDir, f);
       let lines: string[] = [];
       try {
-        const content = fs.readFileSync(fullPath, "utf8");
+        const content = readFileSync(fullPath, "utf8");
         lines = content.split(/\r?\n/);
       } catch {
         continue;
@@ -5462,8 +5477,7 @@ class UsageStatsModal extends Modal {
     window.setTimeout(() => {
       if (reqId !== this.reqId) return;
       try {
-        const os = require("os") as typeof import("os");
-        const home = os.homedir().replace(/\\/g, "/");
+        const home = homedir().replace(/\\/g, "/");
         const sessionsBaseDir = `${home}/.pi/agent/sessions`;
         const range = buildRange(this.preset, this.customFrom, this.customTo);
         const result = scanUsageRange(sessionsBaseDir, range.from, range.to);

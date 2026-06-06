@@ -4,12 +4,12 @@
   --pi-brand: #D97757;
   --pi-brand-rgb: 217, 119, 87;
   --pi-error: #dc3545;
-  display: flex !important;
-  flex-direction: column !important;
-  height: 100% !important;
-  padding: 0 !important;
-  padding-bottom: 28px !important;   /* leave room for Obsidian status bar */
-  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  padding-bottom: 28px;   /* leave room for Obsidian status bar */
+  overflow: hidden;
   font-family: var(--font-text);
 }
 
@@ -365,9 +365,9 @@
   max-width: 95vw;
   height: 86vh;
   max-height: 86vh;
-  display: flex !important;
+  display: flex;
   flex-direction: column;
-  padding: 0 !important;
+  padding: 0;
 }
 
 .pi-agent-usage-modal .modal-content {
@@ -1216,27 +1216,27 @@
   min-height: 60px;
   resize: none;
   padding: 8px 10px 10px 10px;
-  border: none !important;
+  border: none;
   border-radius: 6px;
-  background: transparent !important;
+  background: transparent;
   color: var(--text-normal);
   font-family: inherit;
   font-size: 14px;
   line-height: 1.4;
-  box-shadow: none !important;
+  box-shadow: none;
   overflow-y: auto;
   unicode-bidi: plaintext;
 }
 .pi-agent-input:hover,
 .pi-agent-input:focus {
-  outline: none !important;
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  outline: none;
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
 .pi-agent-input::placeholder { color: var(--text-muted); }
 .pi-agent-input.is-drag-over {
-  background: rgba(var(--pi-brand-rgb), 0.08) !important;
+  background: rgba(var(--pi-brand-rgb), 0.08);
 }
 .pi-agent-input.is-bash-mode {
   color: var(--color-orange);
@@ -1643,8 +1643,8 @@
 
 .pi-diff-ins {
   display: block;
-  background-color: rgba(92, 184, 92, 0.15) !important;
-  color: var(--color-green) !important;
+  background-color: rgba(92, 184, 92, 0.15);
+  color: var(--color-green);
   text-decoration: none;
   padding: 1px 4px;
   border-radius: 2px;
@@ -1652,8 +1652,8 @@
 
 .pi-diff-del {
   display: block;
-  background-color: rgba(217, 83, 79, 0.15) !important;
-  color: var(--color-red) !important;
+  background-color: rgba(217, 83, 79, 0.15);
+  color: var(--color-red);
   text-decoration: line-through;
   padding: 1px 4px;
   border-radius: 2px;
@@ -1962,7 +1962,7 @@
 }
 
 .pi-agent-mini-action.is-active {
-  color: var(--pi-brand) !important;
+  color: var(--pi-brand);
   background: var(--background-modifier-hover);
 }
 
@@ -2381,7 +2381,7 @@
 
 /* 3. 工具运行中的左侧蓝色边框呼吸灯 */
 .pi-agent-tool-block:not(.is-success):not(.is-error) {
-  border-left: 2px solid var(--interactive-accent) !important;
+  border-left: 2px solid var(--interactive-accent);
   animation: pi-agent-tool-running 1.2s infinite ease-in-out;
 }
 @keyframes pi-agent-tool-running {
@@ -2450,7 +2450,7 @@ summary.pi-agent-history-group-title:hover {
 
 /* Obsidian market lint: use classes instead of inline styles. */
 .pi-agent-hidden {
-  display: none !important;
+  display: none;
 }
 
 .pi-agent-input-api-key {

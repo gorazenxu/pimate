@@ -1,7 +1,7 @@
 {
   "id": "pimate",
   "name": "Pimate",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "minAppVersion": "1.5.0",
   "description": "Embeds Pi Coding Agent as an AI collaborator for your vault. Chat, edit files, and run commands — all without leaving your editor.",
   "author": "Gorazen",

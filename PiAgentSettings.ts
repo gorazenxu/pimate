@@ -1405,24 +1405,25 @@ class OpenAICodexDeviceCodeModal extends Modal {
       cls: "mod-cta",
     });
     this.openBtn.addClass("pi-agent-hidden");
-    this.openBtn.onclick = async () => {
+    this.openBtn.onclick = () => {
       if (!this.linkEl.getAttribute("href")) return;
       const url = this.linkEl.getAttribute("href") || "";
-      await this.openExternal(url);
+      void this.openExternal(url).catch((err: unknown) => {
+        console.error("[pimate] open external failed", err);
+      });
     };
 
     this.copyBtn = buttonRow.createEl("button", { text: "Copy code" });
     this.copyBtn.addClass("pi-agent-hidden");
-    this.copyBtn.onclick = async () => {
+    this.copyBtn.onclick = () => {
       const code = this.codeEl.textContent || "";
       if (!code || code === "— — — —") return;
-      try {
-        await navigator.clipboard.writeText(code);
+      void navigator.clipboard.writeText(code).then(() => {
         this.copyBtn.setText("Copied ✓");
         window.setTimeout(() => this.copyBtn.setText("Copy code"), 1500);
-      } catch (err) {
+      }).catch((err: unknown) => {
         console.error("[pimate] clipboard write failed", err);
-      }
+      });
     };
 
     this.cancelBtn = buttonRow.createEl("button", { text: "Cancel" });
@@ -1517,7 +1518,7 @@ class OpenAICodexDeviceCodeModal extends Modal {
   private async openExternal(url: string): Promise<void> {
     let opened = false;
     try {
-      // electron.remote is deprecated; prefer require("electron") in main process
+      // electron.remote is deprecated; prefer Electron shell when available
       const electron = (window as any).require?.("electron");
       if (electron?.shell?.openExternal) {
         await electron.shell.openExternal(url);
