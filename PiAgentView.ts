@@ -106,7 +106,6 @@ export class PiAgentView extends ItemView {
   private contextRowEl: HTMLElement | null = null;
   private imagePreviewEl: HTMLElement | null = null;
   private widgetEl: HTMLElement | null = null;
-  private sendBtn: HTMLButtonElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
   private statusBar: HTMLElement | null = null;
   private footerModelLabel: HTMLElement | null = null;
@@ -121,6 +120,10 @@ export class PiAgentView extends ItemView {
   private footerContextPercentEl: HTMLElement | null = null;
   private renderedMessages: RenderedMessage[] = [];
   private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
+  // History paging (used for fast file-based load of large sessions).
+  private historyShownCount = 0;     // currently displayed
+  private historyTotalCount = 0;     // total messages in file
+  private historyBannerEl: HTMLElement | null = null;
   private tabs: ChatTab[] = [];
   private activeTabId: string | null = null;
   private historyPanelEl: HTMLElement | null = null;
@@ -451,8 +454,8 @@ export class PiAgentView extends ItemView {
     this.contextRowEl = inputArea.createDiv("pi-agent-context-row");
     this.imagePreviewEl = inputArea.createDiv("pi-agent-image-preview");
 
-    // Wrap textarea + message-nav in a flex row so the nav sits to the
-    // right of the textarea without overlapping the footer.
+    // Wrap textarea + right-side controls in a flex row. The right column
+    // contains the 4 message-nav buttons stacked vertically.
     const inputRow = inputArea.createDiv("pi-agent-input-row");
 
     this.inputEl = inputRow.createEl("textarea", {
@@ -463,7 +466,9 @@ export class PiAgentView extends ItemView {
       },
     });
 
-    const navEl = inputRow.createDiv("pi-agent-message-nav");
+    // Right-side controls: 4 message-nav buttons stacked.
+    const rightCol = inputRow.createDiv("pi-agent-input-right");
+    const navEl = rightCol.createDiv("pi-agent-message-nav");
     const mkNavBtn = (cls: string, icon: string, title: string, handler: () => void) => {
       const btn = navEl.createDiv(`pi-agent-message-nav-btn ${cls}`);
       setIcon(btn, icon);
@@ -528,7 +533,7 @@ export class PiAgentView extends ItemView {
         }
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         this.runAsync(() => this.sendMessage());
       } else if (e.key === "/" && this.inputEl?.selectionStart === 0 && !this.inputEl.value) {
@@ -772,6 +777,9 @@ export class PiAgentView extends ItemView {
     this.resetActiveRenderState();
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
+    this.historyShownCount = 0;
+    this.historyTotalCount = 0;
+    this.historyBannerEl = null;
     this.renderEmptyState();
     this.updateWidget("tasks", undefined);
     await this.ensureTabClient(tab);
@@ -989,7 +997,6 @@ export class PiAgentView extends ItemView {
               ?.map((c) => c.text || c.thinking || "")
               .join("") || "";
       const rendered = this.addMessage("user", content);
-      this.updateMessageNavVisibility();
       // Attach any images that were sent with this message to the bubble.
       if (this.pendingUserImages.length > 0) {
         this.renderUserMessageImages(rendered, this.pendingUserImages);
@@ -1254,11 +1261,11 @@ export class PiAgentView extends ItemView {
     label.setText(
       isQuestion
         ? isZh
-          ? "多选（点击问题里的选项）："
-          : "Multi-select (options from the question):"
+          ? "快捷选项（也可直接在下方输入框自行回复）："
+          : "Quick options (or just type your answer in the input below):"
         : isZh
-          ? "多选："
-          : "Multi-select:"
+          ? "快捷选项（也可直接在下方输入框自行回复）："
+          : "Quick options (or just type your answer in the input below):"
     );
 
     const selected = new Set<string>();
@@ -1295,6 +1302,16 @@ export class PiAgentView extends ItemView {
       this.inputEl?.focus();
       // Trigger send after the input is set.
       this.runAsync(() => this.sendMessage());
+    };
+
+    const customBtn = wrap.createEl("button", {
+      text: isZh ? "✎ 自行输入" : "✎ Type your own",
+      cls: "pi-agent-option-custom",
+      attr: { type: "button" },
+    });
+    customBtn.onclick = () => {
+      this.inputEl?.focus();
+      this.inputEl?.scrollIntoView({ block: "center", behavior: "smooth" });
     };
 
     const clearBtn = wrap.createEl("button", {
@@ -1787,15 +1804,6 @@ export class PiAgentView extends ItemView {
    * Show/hide the prev/next nav buttons based on how many user messages exist.
    * Hide both when there's < 2 user messages (only one target, prev/next are no-ops).
    */
-  private updateMessageNavVisibility(): void {
-    if (!this.messageNavEl) return;
-    const count = this.chatContainer?.querySelectorAll(".pi-agent-message-user").length || 0;
-    const prevBtn = this.messageNavEl.querySelector(".is-prev") as HTMLElement | null;
-    const nextBtn = this.messageNavEl.querySelector(".is-next") as HTMLElement | null;
-    if (prevBtn) prevBtn.toggleClass("pi-agent-hidden", count < 2);
-    if (nextBtn) nextBtn.toggleClass("pi-agent-hidden", count < 2);
-  }
-
   private setStatus(
     text: string,
     type: "ok" | "thinking" | "error" | "warning"
@@ -2203,8 +2211,15 @@ export class PiAgentView extends ItemView {
   private async compactSession(): Promise<void> {
     if (!this.client) return;
     const isZh = this.plugin.settings.language === "zh";
+    // 保险：60 秒后还在 thinking 就强制重置（防止事件丢失导致水印死转）
+    const safetyTimer = window.setTimeout(() => {
+      this.setStatus("⚠️ Compaction stuck (no event)", "warning");
+    }, 60_000);
     try {
       const result = await this.client.compact();
+      // 响应回来后强制重置状态，不管 compaction_end 事件是否被正确处理
+      window.clearTimeout(safetyTimer);
+      this.setStatus("✅ Ready", "ok");
       if (result.success) {
         this.compactedContextActive = true;
         const summary = (result.data as any)?.summary || "";
@@ -2214,6 +2229,8 @@ export class PiAgentView extends ItemView {
         new Notice(isZh ? "上下文压缩失败" : "Compaction failed");
       }
     } catch (err) {
+      window.clearTimeout(safetyTimer);
+      this.setStatus("✅ Ready", "ok");
       new Notice(`Compaction failed: ${(err as Error).message}`);
     }
   }
@@ -2962,6 +2979,45 @@ export class PiAgentView extends ItemView {
     return "";
   }
 
+  /**
+   * Read the last N message entries from a jsonl session file directly.
+   * Returns { messages, total } where total is the count of all message entries.
+   *
+   * This bypasses the Pi RPC roundtrip which would otherwise serialize the
+   * whole session.messages to JSON and pipe it back. For multi-MB sessions
+   * (3000+ messages) this is 10-50x faster than the RPC path.
+   */
+  private readLastMessagesFromFile(
+    filePath: string,
+    limit: number
+  ): { messages: any[]; total: number } {
+    try {
+      if (!existsSync(filePath)) return { messages: [], total: 0 };
+      // Read whole file once. 30MB on SSD = ~50-200ms; comparable to the
+      // RPC overhead we're avoiding. We do NOT go through MarkdownRenderer
+      // here, so this is cheap relative to the render step.
+      const text = readFileSync(filePath, "utf8");
+      const messageLines: any[] = [];
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          if (e?.type === "message" && e.message) {
+            messageLines.push(e.message);
+          }
+        } catch {
+          // skip malformed
+        }
+      }
+      const total = messageLines.length;
+      const messages = limit > 0 ? messageLines.slice(-limit) : messageLines;
+      return { messages, total };
+    } catch (err) {
+      console.warn("[pi-agent] readLastMessagesFromFile failed:", err);
+      return { messages: [], total: 0 };
+    }
+  }
+
   private async showForkSelector(): Promise<void> {
     if (!this.client) return;
     try {
@@ -3651,95 +3707,181 @@ export class PiAgentView extends ItemView {
       this.chatContainer.empty();
     }
     this.renderedMessages = [];
+    this.historyShownCount = 0;
+    this.historyTotalCount = 0;
+    this.historyBannerEl = null;
     this.renderEmptyState();
     await this.loadMessages();
   }
 
   private async loadMessages(): Promise<void> {
     if (!this.client) return;
-    try {
-      const result = await this.client.getMessages();
-      if (result.success && result.data) {
-        const messages = (result.data as any).messages || [];
-        for (const msg of messages) {
-          if (msg.role === "user") {
-            const content =
-              typeof msg.content === "string"
-                ? msg.content
-                : Array.isArray(msg.content)
-                ? msg.content
-                    .map((c: any) => c.text || "")
-                    .join("")
-                : "";
-            this.addMessage("user", content);
-          } else if (msg.role === "compactionSummary") {
-            this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore);
-          } else if (msg.role === "branchSummary") {
-            this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary");
-          } else if (msg.role === "assistant") {
-            const rendered = this.addMessage("assistant", "");
-            this.currentAssistantMsg = rendered;
-            if (Array.isArray(msg.content)) {
-              for (const block of msg.content) {
-                if (block.type === "text" && block.text) {
-                  rendered.el.setAttribute("data-raw-content", block.text);
-                  const textBlock =
-                    rendered.contentEl.createDiv("pi-agent-text-block markdown-preview-view markdown-rendered");
-                  void MarkdownRenderer.render(
-                    this.app,
-                    block.text,
-                    textBlock,
-                    "",
-                    this
-                  );
-                } else if (
-                  block.type === "thinking" &&
-                  this.plugin.settings.showThinking
-                ) {
-                  const tb = rendered.contentEl.createDiv(
-                    "pi-agent-thinking-block is-collapsed"
-                  );
-                  const header = tb.createDiv("pi-agent-thinking-header");
-                  const iconSpan = header.createSpan("pi-agent-thinking-icon");
-                  setIcon(iconSpan, "brain");
-                  const textSpan = header.createSpan("pi-agent-thinking-text");
-                  textSpan.setText(" Thought");
-                  tb.createDiv("pi-agent-thinking-content").textContent =
-                    block.thinking || "";
 
-                  header.onclick = () => {
-                    tb.toggleClass("is-collapsed", !tb.hasClass("is-collapsed"));
-                  };
-                } else if (block.type === "toolCall") {
-                  this.handleToolStart({
-                    type: "tool_execution_start",
-                    toolName: block.name,
-                    toolCallId: block.id,
-                    args: block.arguments
-                  });
-                }
-              }
-            }
-            this.currentAssistantMsg = null;
-          } else if (msg.role === "toolResult") {
-            this.handleToolEnd({
-              type: "tool_execution_end",
-              toolName: msg.toolName,
-              toolCallId: msg.toolCallId,
-              isError: msg.isError,
-              result: {
-                content: msg.content,
-                isError: msg.isError,
-                details: msg.details
-              }
+    // Decide source: prefer direct file read (fast, paginated) when we
+    // have a known sessionFile. Falls back to RPC for sessions that live
+    // only in memory (e.g. --no-session) or when the file is missing.
+    const tab = this.activeTab;
+    const filePath = tab?.sessionFile;
+    const limit = this.plugin.settings.maxHistoryDisplay;
+    let messages: any[] = [];
+    let total = 0;
+    let usedFile = false;
+
+    if (filePath) {
+      const fileResult = this.readLastMessagesFromFile(filePath, limit);
+      if (fileResult.total > 0) {
+        messages = fileResult.messages;
+        total = fileResult.total;
+        usedFile = true;
+      }
+    }
+    if (!usedFile) {
+      try {
+        const result = await this.client.getMessages();
+        if (result.success && result.data) {
+          messages = (result.data as any).messages || [];
+          total = messages.length;
+        }
+      } catch {
+        console.log("[pi-agent] No existing messages to load");
+        return;
+      }
+    }
+
+    this.historyShownCount = messages.length;
+    this.historyTotalCount = total;
+    for (const msg of messages) {
+      this.renderMessageFromHistory(msg);
+    }
+    this.renderHistoryBanner();
+    this.scrollToBottom(true, true);
+  }
+
+  /** Append more history (e.g. when user clicks "Load earlier"). */
+  private async loadMoreHistory(moreBy: number): Promise<void> {
+    const tab = this.activeTab;
+    if (!tab?.sessionFile) return;
+    const newLimit = this.historyShownCount + moreBy;
+    const fileResult = this.readLastMessagesFromFile(tab.sessionFile, newLimit);
+    if (fileResult.messages.length <= this.historyShownCount) {
+      new Notice("No more messages to load");
+      return;
+    }
+    const newOnes = fileResult.messages.slice(this.historyShownCount);
+    // Preserve scroll position roughly: remember old scrollHeight
+    const chat = this.chatContainer;
+    const oldScrollHeight = chat?.scrollHeight || 0;
+    for (const msg of newOnes) {
+      this.renderMessageFromHistory(msg);
+    }
+    this.historyShownCount = fileResult.messages.length;
+    this.historyTotalCount = fileResult.total;
+    this.renderHistoryBanner();
+    if (chat) {
+      // Keep the user's view stable after prepending.
+      const newScrollHeight = chat.scrollHeight;
+      chat.scrollTop = newScrollHeight - oldScrollHeight + (chat.scrollTop || 0);
+    }
+  }
+
+  /** Render the "Showing N of M" + "Load earlier" banner above the chat. */
+  private renderHistoryBanner(): void {
+    if (!this.chatContainer) return;
+    if (this.historyBannerEl) this.historyBannerEl.remove();
+    this.historyBannerEl = null;
+    if (this.historyTotalCount <= this.historyShownCount) return;
+
+    const banner = this.chatContainer.createDiv("pi-agent-history-banner");
+    const text = banner.createSpan("pi-agent-history-banner-text");
+    text.setText(
+      `Showing the latest ${this.historyShownCount} of ${this.historyTotalCount} messages`
+    );
+    const btn = banner.createEl("button", {
+      text: "Load 50 more",
+      cls: "pi-agent-history-banner-btn",
+    });
+    btn.onclick = () => {
+      btn.setText("Loading…");
+      btn.disabled = true;
+      void this.loadMoreHistory(50).finally(() => {
+        btn.setText("Load 50 more");
+        btn.disabled = false;
+      });
+    };
+    const allBtn = banner.createEl("button", {
+      text: "Load all",
+      cls: "pi-agent-history-banner-btn pi-agent-history-banner-btn-secondary",
+    });
+    allBtn.onclick = () => {
+      allBtn.setText("Loading…");
+      allBtn.disabled = true;
+      void this.loadMoreHistory(this.historyTotalCount).finally(() => {
+        allBtn.setText("Load all");
+        allBtn.disabled = false;
+      });
+    };
+    this.chatContainer.prepend(banner);
+    this.historyBannerEl = banner;
+  }
+
+  /** Render a single message from a history payload (file or RPC). */
+  private renderMessageFromHistory(msg: any): void {
+    if (msg.role === "user") {
+      const content =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content.map((c: any) => c.text || "").join("")
+            : "";
+      this.addMessage("user", content);
+    } else if (msg.role === "compactionSummary") {
+      this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore);
+    } else if (msg.role === "branchSummary") {
+      this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary");
+    } else if (msg.role === "assistant") {
+      const rendered = this.addMessage("assistant", "");
+      this.currentAssistantMsg = rendered;
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "text" && block.text) {
+            rendered.el.setAttribute("data-raw-content", block.text);
+            const textBlock =
+              rendered.contentEl.createDiv("pi-agent-text-block markdown-preview-view markdown-rendered");
+            void MarkdownRenderer.render(this.app, block.text, textBlock, "", this);
+          } else if (block.type === "thinking" && this.plugin.settings.showThinking) {
+            const tb = rendered.contentEl.createDiv("pi-agent-thinking-block is-collapsed");
+            const header = tb.createDiv("pi-agent-thinking-header");
+            const iconSpan = header.createSpan("pi-agent-thinking-icon");
+            setIcon(iconSpan, "brain");
+            const textSpan = header.createSpan("pi-agent-thinking-text");
+            textSpan.setText(" Thought");
+            tb.createDiv("pi-agent-thinking-content").textContent = block.thinking || "";
+            header.onclick = () => {
+              tb.toggleClass("is-collapsed", !tb.hasClass("is-collapsed"));
+            };
+          } else if (block.type === "toolCall") {
+            this.handleToolStart({
+              type: "tool_execution_start",
+              toolName: block.name,
+              toolCallId: block.id,
+              args: block.arguments
             });
           }
         }
-        this.scrollToBottom(true, true);
       }
-    } catch {
-      // It's okay if there are no messages
-      console.log("[pi-agent] No existing messages to load");
+      this.currentAssistantMsg = null;
+    } else if (msg.role === "toolResult") {
+      this.handleToolEnd({
+        type: "tool_execution_end",
+        toolName: msg.toolName,
+        toolCallId: msg.toolCallId,
+        isError: msg.isError,
+        result: {
+          content: msg.content,
+          isError: msg.isError,
+          details: msg.details
+        }
+      });
     }
   }
 

@@ -72,6 +72,53 @@
   background: var(--background-modifier-border-hover);
 }
 
+/* History paging banner: shown when only a slice of a large session is loaded. */
+.pi-agent-history-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 8px 12px 0 12px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.pi-agent-history-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.pi-agent-history-banner-btn {
+  padding: 4px 10px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: opacity 0.15s;
+}
+
+.pi-agent-history-banner-btn:hover { opacity: 0.85; }
+.pi-agent-history-banner-btn:disabled { opacity: 0.5; cursor: default; }
+
+.pi-agent-history-banner-btn-secondary {
+  background: transparent;
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.pi-agent-history-banner-btn-secondary:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--pi-brand);
+}
+
 /* Message-nav: vertical stack of 4 buttons, positioned absolutely
    inside the input-area on the right side, between the input box
    and the footer row. */
@@ -86,6 +133,18 @@
 .pi-agent-input-row .pi-agent-input {
   flex: 1;
   min-width: 0;
+}
+
+/* Right column inside input-row: 4 nav buttons + Send button stacked. */
+.pi-agent-input-right {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-right: 4px;
+  align-self: stretch;
+  justify-content: center;
 }
 
 .pi-agent-message-nav {
@@ -328,7 +387,8 @@
 }
 
 .pi-agent-option-submit,
-.pi-agent-option-clear {
+.pi-agent-option-clear,
+.pi-agent-option-custom {
   margin-left: 4px;
   border: none;
   border-radius: 16px;
@@ -357,6 +417,17 @@
 .pi-agent-option-clear {
   background: var(--background-modifier-border);
   color: var(--text-normal);
+}
+
+.pi-agent-option-custom {
+  background: transparent;
+  color: var(--interactive-accent);
+  border: 1px solid var(--interactive-accent);
+}
+
+.pi-agent-option-custom:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
 }
 
 /* Usage Stats Modal */
@@ -1442,12 +1513,6 @@
   background: var(--background-modifier-hover);
   color: var(--text-normal);
   border-color: var(--interactive-accent);
-}
-
-.pi-agent-send-btn {
-  color: var(--text-normal);
-  font-weight: bold;
-  font-size: 14px;
 }
 
 .pi-agent-abort-btn {
