@@ -1490,6 +1490,9 @@ export class PiAgentView extends ItemView {
     const total = (steering?.length || 0) + (followUp?.length || 0);
     if (total > 0) {
       this.setStatus(`📋 ${total} queued message(s)`, "thinking");
+    } else {
+      // 队列清空后重置状态
+      this.setStatus("✅ Ready", "ok");
     }
   }
 
