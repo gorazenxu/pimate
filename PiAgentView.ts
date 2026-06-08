@@ -72,6 +72,10 @@ interface ChatTab {
   label: string;
   client: PiAgentClient | null;
   isStreaming: boolean;
+  queueCount?: number;
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
   sessionFile?: string;
   sessionId?: string;
   restored?: boolean;
@@ -685,6 +689,9 @@ export class PiAgentView extends ItemView {
         label: String(i),
         client: null,
         isStreaming: false,
+        modelProvider: pTab?.modelProvider,
+        modelId: pTab?.modelId,
+        thinkingLevel: pTab?.thinkingLevel,
         sessionFile: pTab?.sessionFile,
         sessionId: pTab?.sessionId,
         restored: !!pTab?.sessionFile,
@@ -784,11 +791,13 @@ export class PiAgentView extends ItemView {
     this.updateWidget("tasks", undefined);
     await this.ensureTabClient(tab);
     this.client = tab.client;
+    this.renderActiveTabRuntimeStatus();
     // Parallelize non-blocking post-start calls so the UI feels snappy.
     // Each call sets a different part of the UI and they don't depend on each other.
     void this.refreshStateDisplay();
     void this.loadAvailableCommands();
     await this.loadMessages();
+    this.renderActiveTabRuntimeStatus();
     this.updateButtons();
     await this.persistSessionTabs();
   }
@@ -839,6 +848,7 @@ export class PiAgentView extends ItemView {
     tab.client = client;
 
     client.on("event", (event: RpcEvent) => {
+      this.recordTabRuntimeState(tab, event);
       if (this.activeTabId !== tab.id) return;
       this.handleEvent(event);
     });
@@ -905,6 +915,42 @@ export class PiAgentView extends ItemView {
 
   // ─── Event Handling ───────────────────────────────────────────────────
 
+  private getQueueTotal(event: RpcEvent): number {
+    const steering = event.steering as string[] | undefined;
+    const followUp = event.followUp as string[] | undefined;
+    return (steering?.length || 0) + (followUp?.length || 0);
+  }
+
+  private recordTabRuntimeState(tab: ChatTab, event: RpcEvent): void {
+    switch (event.type) {
+      case "agent_start":
+        tab.isStreaming = true;
+        break;
+      case "agent_end":
+        tab.isStreaming = false;
+        break;
+      case "queue_update":
+        tab.queueCount = this.getQueueTotal(event);
+        break;
+    }
+  }
+
+  private renderActiveTabRuntimeStatus(): void {
+    const tab = this.activeTab;
+    if (!tab) {
+      this.setStatus("✅ Ready", "ok");
+      return;
+    }
+    const queueCount = tab.queueCount || 0;
+    if (queueCount > 0) {
+      this.setStatus(`📋 ${queueCount} queued message(s)`, "thinking");
+    } else if (tab.isStreaming) {
+      this.setStatus("🤔 Thinking...", "thinking");
+    } else {
+      this.setStatus("✅ Ready", "ok");
+    }
+  }
+
   private handleEvent(event: RpcEvent): void {
     switch (event.type) {
       case "agent_start":
@@ -922,7 +968,7 @@ export class PiAgentView extends ItemView {
         this.currentThinkingBlock = null;
         this.currentThinkingContent = null;
         this.updateButtons();
-        this.setStatus("✅ Ready", "ok");
+        this.renderActiveTabRuntimeStatus();
         void this.refreshStateDisplay();
         break;
 
@@ -955,7 +1001,7 @@ export class PiAgentView extends ItemView {
         break;
 
       case "turn_end":
-        this.setStatus("✅ Turn complete", "ok");
+        this.renderActiveTabRuntimeStatus();
         break;
 
       case "queue_update":
@@ -996,7 +1042,7 @@ export class PiAgentView extends ItemView {
           : message.content
               ?.map((c) => c.text || c.thinking || "")
               .join("") || "";
-      const rendered = this.addMessage("user", content);
+      const rendered = this.addMessage("user", this.stripRecentContextGuard(content));
       // Attach any images that were sent with this message to the bubble.
       if (this.pendingUserImages.length > 0) {
         this.renderUserMessageImages(rendered, this.pendingUserImages);
@@ -1485,15 +1531,9 @@ export class PiAgentView extends ItemView {
   }
 
   private handleQueueUpdate(event: RpcEvent): void {
-    const steering = event.steering as string[] | undefined;
-    const followUp = event.followUp as string[] | undefined;
-    const total = (steering?.length || 0) + (followUp?.length || 0);
-    if (total > 0) {
-      this.setStatus(`📋 ${total} queued message(s)`, "thinking");
-    } else {
-      // 队列清空后重置状态
-      this.setStatus("✅ Ready", "ok");
-    }
+    const total = this.getQueueTotal(event);
+    if (this.activeTab) this.activeTab.queueCount = total;
+    this.renderActiveTabRuntimeStatus();
   }
 
   private handleExtensionUIRequest(event: RpcEvent): void {
@@ -1575,7 +1615,7 @@ export class PiAgentView extends ItemView {
         badge.setText("👤 You");
         break;
       case "assistant":
-        badge.setText("🤖 Pi");
+        badge.setText("π Pi");
         break;
       case "system":
         badge.setText("ℹ️ System");
@@ -1588,8 +1628,9 @@ export class PiAgentView extends ItemView {
     const contentEl = msgEl.createDiv("pi-agent-message-content");
 
     if (role === "user" && content) {
-      contentEl.createSpan({ text: content });
-      msgEl.setAttribute("data-raw-content", content);
+      const visibleContent = this.stripRecentContextGuard(content);
+      contentEl.createSpan({ text: visibleContent });
+      msgEl.setAttribute("data-raw-content", visibleContent);
     }
 
     // Add floating hover actions
@@ -2110,7 +2151,7 @@ export class PiAgentView extends ItemView {
   private async sendMessage(): Promise<void> {
     if (!this.client || !this.inputEl) return;
     const rawMessage = this.inputEl.value.trim();
-    const contextPrefix = this.buildContextPrefix() + this.buildRecentContextGuard(rawMessage);
+    const contextPrefix = this.buildContextPrefix();
     const images = this.getImagePayloads();
     const userMessage = rawMessage || (images.length ? "Please analyze the attached image(s)." : "");
     const baseMessage = `${contextPrefix}${userMessage}`.trim();
@@ -2474,8 +2515,10 @@ export class PiAgentView extends ItemView {
       const titleEl = this.modelPopupEl.createDiv("pi-agent-model-popup-group-title");
       titleEl.setText(groupName);
 
+      const currentProvider = this.activeTab?.modelProvider || this.plugin.settings.provider || "";
+      const currentModelId = this.activeTab?.modelId || this.plugin.settings.modelId || "";
       for (const model of groupModels) {
-        const isCurrent = this.plugin.settings.modelId === model.id;
+        const isCurrent = currentModelId === model.id && (!currentProvider || currentProvider === model.provider);
         const itemEl = this.modelPopupEl.createDiv({
           cls: `pi-agent-model-popup-item ${isCurrent ? "is-active" : ""}`
         });
@@ -2550,7 +2593,7 @@ export class PiAgentView extends ItemView {
       { id: "xhigh", name: "xhigh", desc: isZh ? "最高强度推理" : "Max Reasoning" }
     ];
 
-    let currentLevel = this.plugin.settings.thinkingLevel || "";
+    let currentLevel = this.activeTab?.thinkingLevel ?? this.plugin.settings.thinkingLevel ?? "";
     if (currentLevel === "auto") currentLevel = "";
 
     for (const option of options) {
@@ -2761,16 +2804,33 @@ export class PiAgentView extends ItemView {
           return;
         }
 
+        const currentSessionPath = this.activeTab?.sessionFile
+          ?.replace(/\\/g, "/")
+          .toLowerCase();
+
         for (const session of filtered) {
-          const itemEl = listContainer.createDiv("pi-agent-history-item");
+          const sessionPath = session.path?.replace(/\\/g, "/").toLowerCase();
+          const isCurrentSession = !!currentSessionPath && sessionPath === currentSessionPath;
+          const itemEl = listContainer.createDiv(
+            isCurrentSession
+              ? "pi-agent-history-item is-current-session"
+              : "pi-agent-history-item"
+          );
           const iconEl = itemEl.createDiv("pi-agent-history-item-icon");
-          setIcon(iconEl, "message-square");
+          setIcon(iconEl, isCurrentSession ? "message-square-dot" : "message-square");
 
           const contentEl = itemEl.createDiv("pi-agent-history-item-content");
           const nameText = session.label || (isZh ? "未命名对话" : "Untitled Session");
           contentEl.createDiv({ text: nameText, cls: "pi-agent-history-item-name" });
-          const timeText = this.formatHistoryTime(session.mtime);
-          contentEl.createDiv({ text: timeText, cls: "pi-agent-history-item-time" });
+          if (isCurrentSession) {
+            contentEl.createDiv({
+              text: "Current session",
+              cls: "pi-agent-history-item-current",
+            });
+          } else {
+            const timeText = this.formatHistoryTime(session.mtime);
+            contentEl.createDiv({ text: timeText, cls: "pi-agent-history-item-time" });
+          }
 
           itemEl.onclick = () => {
             this.runAsync(async () => {
@@ -3508,29 +3568,12 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private buildRecentContextGuard(rawMessage: string): string {
-    // Pi's backend compaction should preserve summary + recent tail, but very
-    // terse follow-ups ("A", "选第二个", "yes") can become ambiguous if the
-    // compaction summary omitted the immediately preceding choice/question.
-    // Keep the visible transcript intact, and only add a small guard after a
-    // compaction for short replies.
-    if (!this.compactedContextActive) return "";
-    const trimmed = rawMessage.trim();
-    if (!trimmed || trimmed.length > 40) return "";
-    const lastAssistant = [...this.renderedMessages]
-      .reverse()
-      .find((m) => m.role === "assistant")
-      ?.el.getAttribute("data-raw-content")
-      ?.trim();
-    if (!lastAssistant) return "";
-    return [
-      "<recent_context_guard>",
-      "The user's short reply may refer to the immediately preceding assistant message. Use this previous assistant message to resolve pronouns/options, but answer the user's latest request directly.",
-      lastAssistant.slice(-3000),
-      "</recent_context_guard>",
-      "",
-    ].join("\n");
+  private stripRecentContextGuard(text: string): string {
+    return text
+      .replace(/<recent_context_guard>[\s\S]*?<\/recent_context_guard>\s*/g, "")
+      .trim();
   }
+
 
   private buildContextPrefix(): string {
     const fileItems = this.contextItems.filter((item) => item.type === "file");
@@ -3654,14 +3697,28 @@ export class PiAgentView extends ItemView {
 
   private async persistSessionTabs(): Promise<void> {
     this.plugin.settings.sessionTabs = this.tabs
-      .filter((tab) => tab.sessionFile)
+      .filter((tab) => tab.sessionFile || tab.modelProvider || tab.modelId || (typeof tab.thinkingLevel === "string"))
       .map((tab) => ({
         label: tab.label,
         sessionFile: tab.sessionFile,
         sessionId: tab.sessionId,
+        modelProvider: tab.modelProvider,
+        modelId: tab.modelId,
+        thinkingLevel: tab.thinkingLevel,
       }));
     this.plugin.settings.activeSessionFile = this.activeTab?.sessionFile || "";
     await this.plugin.saveSettings();
+  }
+
+  private restoreTabModelConfig(): void {
+    const persisted = this.plugin.settings.sessionTabs || [];
+    for (let i = 0; i < this.tabs.length && i < persisted.length; i++) {
+      const saved = persisted[i];
+      if (!saved) continue;
+      if (saved.modelProvider) this.tabs[i].modelProvider = saved.modelProvider;
+      if (saved.modelId) this.tabs[i].modelId = saved.modelId;
+      if (typeof saved.thinkingLevel === "string") this.tabs[i].thinkingLevel = saved.thinkingLevel;
+    }
   }
 
   private updateModelDisplay(provider: string, modelId: string): void {
@@ -3836,7 +3893,7 @@ export class PiAgentView extends ItemView {
           : Array.isArray(msg.content)
             ? msg.content.map((c: any) => c.text || "").join("")
             : "";
-      this.addMessage("user", content);
+      this.addMessage("user", this.stripRecentContextGuard(content));
     } else if (msg.role === "compactionSummary") {
       this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore);
     } else if (msg.role === "branchSummary") {
@@ -4444,6 +4501,7 @@ export class PiAgentView extends ItemView {
         });
       }
     }
+    this.restoreTabModelConfig();
     if (!this.tabs.some((t) => t.id === this.activeTabId)) {
       this.activeTabId = this.tabs[0]?.id || null;
     }

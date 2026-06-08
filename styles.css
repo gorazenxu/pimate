@@ -243,16 +243,41 @@
   word-wrap: break-word;
 }
 
-.pi-agent-message-badge { display: none; }
+/* Small role label above each message. Visually marks who is speaking. */
+.pi-agent-message-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  user-select: none;
+}
 
+.pi-agent-message-user .pi-agent-message-badge {
+  display: none;
+}
+
+.pi-agent-message-assistant .pi-agent-message-badge {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+/* User messages: clear bubble, right-aligned, accent tinted. */
 .pi-agent-message-user {
   position: relative;
-  background: rgba(var(--interactive-accent-rgb), 0.12);
-  border: 1px solid rgba(var(--interactive-accent-rgb), 0.22);
   align-self: flex-end;
-  border-radius: 8px;
-  border-end-end-radius: 2px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  max-width: 85%;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 10px;
+  border-bottom-right-radius: 2px;
+  padding: 8px 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  color: var(--text-normal);
 }
 
 .pi-agent-message-user ::selection {
@@ -260,13 +285,17 @@
   color: inherit;
 }
 
+/* Assistant messages: no bubble, full-width log stream with a subtle left rail. */
 .pi-agent-message-assistant {
-  background: transparent;
   align-self: stretch;
   width: 100%;
   max-width: 100%;
-  border-end-start-radius: 4px;
+  background: transparent;
+  border-left: 2px solid var(--background-modifier-border);
+  border-radius: 0;
+  padding: 4px 0 4px 10px;
   text-align: start;
+  color: var(--text-normal);
 }
 
 .pi-agent-message-content {
@@ -1976,6 +2005,21 @@
   background: var(--background-modifier-hover);
 }
 
+/* Current conversation marker, Claudian-style: stays in-place, visibly marked. */
+.pi-agent-history-item.is-current-session {
+  border-left: 3px solid var(--interactive-accent);
+  padding-left: 5px;
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+}
+
+.pi-agent-history-item.is-current-session .pi-agent-history-item-icon {
+  color: var(--interactive-accent);
+}
+
+.pi-agent-history-item.is-current-session:hover {
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
 .pi-agent-history-item-icon {
   display: flex;
   align-items: center;
@@ -2008,9 +2052,14 @@
   text-overflow: ellipsis;
 }
 
-.pi-agent-history-item-time {
+.pi-agent-history-item-time,
+.pi-agent-history-item-current {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.pi-agent-history-item-current {
+  font-weight: 500;
 }
 
 .pi-agent-history-empty {

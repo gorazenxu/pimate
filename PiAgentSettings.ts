@@ -20,6 +20,9 @@ export interface PersistedSessionTab {
   label: string;
   sessionFile?: string;
   sessionId?: string;
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
 }
 
 export interface PiAgentSettings {
