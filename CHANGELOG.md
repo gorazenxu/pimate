@@ -32,6 +32,7 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ### Conversation UI
 
+- 改：默认开启“显示思考过程”（`showThinking: true`），保留历史 thinking 块可见
 - 新：当前会话在历史列表中加高亮标识
   - 紫色竖线
   - `message-square-dot` 图标

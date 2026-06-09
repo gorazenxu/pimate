@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   thinkingLevel: "",
   apiKey: "",
   autoScroll: true,
-  showThinking: false,
+  showThinking: true,
   maxHistoryDisplay: 100,
   sessionTabs: [],
   activeSessionFile: "",
