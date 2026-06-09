@@ -12,11 +12,18 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-> 本次会话累积的修改（尚未 commit，尚未 bump 版本号）。
+_当前没有未提交的修改。_
 
 ---
 
-## 📦 v1.0.23 (2026-06-08)
+## 📦 v1.0.24 (2026-06-09)
+
+- 改：默认开启“显示思考过程”（`showThinking: true`），保留历史 thinking 块可见
+- 改：默认流式渲染模式改为 `pretty`（原版美观体验）
+
+---
+
+## 📦 v1.0.23 (2026-06-09)
 
 ### Runtime / tab state
 
