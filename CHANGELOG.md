@@ -32,6 +32,7 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ### Conversation UI
 
+- 改：默认流式渲染模式改为 `pretty`（原版美观体验）
 - 新：当前会话在历史列表中加高亮标识
   - 紫色竖线
   - `message-square-dot` 图标
@@ -47,6 +48,13 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 - 删：`buildRecentContextGuard()` 不再发送 `<recent_context_guard>` 给后端，避免污染 session 历史
 - 新：`stripRecentContextGuard()` 兼容旧历史中的残留显示 / 复制 / 复用
+
+---
+
+## 📦 v1.0.24 (2026-06-08)
+
+- 改：默认开启“显示思考过程”（`showThinking: true`），保留历史 thinking 块可见
+- 改：默认流式渲染模式改为 `pretty`（原版美观体验）
 
 ---
 

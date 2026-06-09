@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   thinkingLevel: "",
   apiKey: "",
   autoScroll: true,
-  showThinking: false,
+  showThinking: true,
   maxHistoryDisplay: 100,
   sessionTabs: [],
   activeSessionFile: "",
@@ -61,7 +61,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   snippets: [],
   language: "zh",
   maxTabs: 3,
-  streamingRenderMode: "auto",
+  streamingRenderMode: "pretty",
   sessionTitles: {},
   // (addExplorerSelectionHotkey removed — right-click now handles multi-select)
 };
