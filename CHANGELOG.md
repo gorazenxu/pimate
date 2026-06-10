@@ -12,7 +12,11 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+- 修：pretty 渲染 / thinking / fast streaming 时自动滚动偶发失效；现在会在内容变高前记录是否贴底，渲染后只对原本贴底的场景强制跟随到底
+- 优：assistant 正文 Markdown 渲染前增加轻量容错，只修两类常见格式问题：
+  - `文字###标题` → `文字\n\n### 标题`
+  - `###A.` / `###第1步` / `###C.暂停` → `### A.` / `### 第1步` / `### C. 暂停`
+  - 仅作用于 assistant 正文显示，不修改 session 原文，不处理 tool output，不处理代码块内文本
 
 ---
 
