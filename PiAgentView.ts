@@ -1158,8 +1158,9 @@ export class PiAgentView extends ItemView {
 
       case "thinking_delta":
         if (this.currentThinkingContent) {
+          const shouldStickToBottom = this.isNearBottom();
           this.currentThinkingContent.appendText(delta.delta || "");
-          this.scrollToBottom();
+          if (shouldStickToBottom) this.scrollToBottom(true, true);
         }
         break;
 
@@ -1214,6 +1215,8 @@ export class PiAgentView extends ItemView {
 
     if (this.currentAssistantMsg) {
       this.currentAssistantMsg.el.setAttribute("data-raw-content", this.currentRawText);
+      const shouldStickToBottom = this.isNearBottom();
+      const renderPromises: Promise<unknown>[] = [];
 
       // Finalize all streaming text blocks: replace the cheap <pre>-style buffer
       // with a single full MarkdownRenderer pass.
@@ -1234,13 +1237,13 @@ export class PiAgentView extends ItemView {
             "markdown-rendered"
           );
           textBlock.empty();
-          void MarkdownRenderer.render(
+          renderPromises.push(MarkdownRenderer.render(
             this.app,
-            raw,
+            this.normalizeAssistantMarkdown(raw),
             textBlock as HTMLElement,
             "",
             this
-          );
+          ));
         } else {
           textBlock.remove();
         }
@@ -1257,7 +1260,10 @@ export class PiAgentView extends ItemView {
         this.renderOptionChips(this.currentAssistantMsg, parsed.options, parsed.isQuestion);
       }
 
-      this.scrollToBottom();
+      if (shouldStickToBottom) {
+        this.scrollToBottom(true, true);
+        void Promise.all(renderPromises).then(() => this.scrollToBottom(true, true));
+      }
     } else {
       this.scrollToBottom();
     }
@@ -1765,6 +1771,15 @@ export class PiAgentView extends ItemView {
 
   private clearEmptyState(): void {
     this.chatContainer?.querySelector(".pi-agent-empty-state")?.remove();
+  }
+
+  private isNearBottom(threshold = 80): boolean {
+    if (!this.chatContainer) return true;
+    const scrollOffset =
+      this.chatContainer.scrollHeight -
+      this.chatContainer.scrollTop -
+      this.chatContainer.clientHeight;
+    return scrollOffset <= threshold;
   }
 
   private scrollToBottom(immediate = true, force = false): void {
@@ -3907,7 +3922,7 @@ export class PiAgentView extends ItemView {
             rendered.el.setAttribute("data-raw-content", block.text);
             const textBlock =
               rendered.contentEl.createDiv("pi-agent-text-block markdown-preview-view markdown-rendered");
-            void MarkdownRenderer.render(this.app, block.text, textBlock, "", this);
+            void MarkdownRenderer.render(this.app, this.normalizeAssistantMarkdown(block.text), textBlock, "", this);
           } else if (block.type === "thinking" && this.plugin.settings.showThinking) {
             const tb = rendered.contentEl.createDiv("pi-agent-thinking-block is-collapsed");
             const header = tb.createDiv("pi-agent-thinking-header");
@@ -4131,9 +4146,11 @@ export class PiAgentView extends ItemView {
     const now = Date.now();
     const delay = 50;
     const apply = () => {
+      const shouldStickToBottom = this.isNearBottom();
       if (this.streamingTextEl) {
         this.streamingTextEl.textContent = rawText;
       }
+      if (shouldStickToBottom) this.scrollToBottom(true, true);
       this.lastRenderTime = Date.now();
     };
     if (now - this.lastRenderTime >= delay) {
@@ -4146,10 +4163,40 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  private normalizeAssistantMarkdown(text: string): string {
+    if (!text) return text;
+    const codeBlocks: string[] = [];
+    const placeholderPrefix = "@@PIMATE_CODE_BLOCK_";
+    const protectedText = text.replace(/```[\s\S]*?```/g, (block) => {
+      const key = `${placeholderPrefix}${codeBlocks.length}@@`;
+      codeBlocks.push(block);
+      return key;
+    });
+
+    const normalized = protectedText
+      // Fix: "文字###标题" -> "文字\n\n### 标题".
+      .replace(/([^\n])([ \t]*#{2,6})(?=[\p{L}\p{N}])/gu, (_m, before, hashes) => {
+        return `${before}\n\n${hashes.trim()} `;
+      })
+      // Fix: "###A." / "###第1步" -> "### A." / "### 第1步".
+      .replace(/^(#{1,6})(?!\s)([^#\s].*)$/gmu, (_m, hashes, rest) => {
+        return `${hashes} ${rest}`;
+      })
+      // Fix: "### C.暂停" -> "### C. 暂停".
+      .replace(/^(#{1,6}\s+[A-Za-z]\.)(?=\S)/gmu, "$1 ");
+
+    return normalized.replace(
+      new RegExp(`${placeholderPrefix}(\\d+)@@`, "g"),
+      (_m, index) => codeBlocks[Number(index)] || ""
+    );
+  }
+
   private renderMarkdownWithCursor(rawText: string, targetEl: HTMLElement): void {
+    const shouldStickToBottom = this.isNearBottom();
     targetEl.empty();
 
-    const lines = rawText.split("\n");
+    const normalizedText = this.normalizeAssistantMarkdown(rawText);
+    const lines = normalizedText.split("\n");
     let inCodeblock = false;
     for (const line of lines) {
       if (line.trimStart().startsWith("```")) {
@@ -4158,7 +4205,7 @@ export class PiAgentView extends ItemView {
     }
 
     const cursor = inCodeblock ? " ▊" : ' <span class="pi-agent-typing-cursor">▊</span>';
-    const textWithCursor = rawText + cursor;
+    const textWithCursor = normalizedText + cursor;
     const finalRenderText = inCodeblock ? textWithCursor + "\n```" : textWithCursor;
 
     void MarkdownRenderer.render(
@@ -4167,8 +4214,9 @@ export class PiAgentView extends ItemView {
       targetEl,
       "",
       this
-    );
-    this.scrollToBottom();
+    ).then(() => {
+      if (shouldStickToBottom) this.scrollToBottom(true, true);
+    });
   }
 
   // ─── Autocomplete Mention Methods ───────────────────────────────────
