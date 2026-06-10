@@ -12,6 +12,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.29 (2026-06-10)
+
 - 优：auto 模式重写为按换行符触发 pretty
   - 文本输出中以 fast（`textContent`）跟手
   - 遇到 `text_delta` 含 `\n` 时立即调一次 `MarkdownRenderer.render`，使段落 / 列表项 / 表格行等 markdown 边界成型为 pretty
