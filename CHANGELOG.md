@@ -12,7 +12,15 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+- 优：auto 模式重写为按换行符触发 pretty
+  - 文本输出中以 fast（`textContent`）跟手
+  - 遇到 `text_delta` 含 `\n` 时立即调一次 `MarkdownRenderer.render`，使段落 / 列表项 / 表格行等 markdown 边界成型为 pretty
+  - 停顿 idle 触发作为补充，避免单行长句、表格内不换行等场景不 pretty
+  - message_end 仍走原 pretty 收尾，结果一致性不变
+- 优：pretty 模式节流频率 80ms → 150ms，给主线程留更多余量
+  - 纯 pretty 模式下重渲次数减少约一半，长回复闪烁与卡顿明显改善
+  - auto 模式不受影响
+  - fast 模式不受影响
 
 ---
 

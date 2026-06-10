@@ -813,7 +813,7 @@ export class PiAgentView extends ItemView {
     this.renderActiveTabSpeed();
     this.renderActiveTabModelAndEffort();
     this.updateButtons();
-    await this.persistSessionTabs();
+    void this.persistSessionTabs();
   }
 
   private async closeTab(tabId: string): Promise<void> {
@@ -1175,7 +1175,7 @@ export class PiAgentView extends ItemView {
           if (!this.currentTextBlock.classList.contains("pi-agent-streaming-block")) {
             this.convertCurrentTextBlockToFastStreaming();
           }
-          this.appendStreamingDelta(this.currentBlockRawText);
+          this.appendStreamingDelta(this.currentBlockRawText, deltaText);
         }
         break;
       }
@@ -3996,23 +3996,11 @@ export class PiAgentView extends ItemView {
     let total = 0;
     let usedFile = false;
 
-    // While a tab is actively streaming, the jsonl file can lag behind the
-    // in-memory RPC state. Prefer RPC in that case so tab switching does not
-    // hide the latest in-flight turn.
-    if (tab?.isStreaming) {
-      try {
-        const result = await this.client.getMessages();
-        if (result.success && result.data) {
-          const rpcMessages = (result.data as any).messages || [];
-          total = rpcMessages.length;
-          messages = limit > 0 ? rpcMessages.slice(-limit) : rpcMessages;
-        }
-      } catch {
-        // Fall back to file below.
-      }
-    }
-
-    if (messages.length === 0 && filePath) {
+    // Prefer direct jsonl reads when possible. During streaming, RPC getMessages
+    // can contend with live generation on the same subprocess and make large
+    // model replies feel slower; missed live deltas are recovered by
+    // ensureAssistantStreamMessage().
+    if (filePath) {
       const fileResult = this.readLastMessagesFromFile(filePath, limit);
       if (fileResult.total > 0) {
         messages = fileResult.messages;
@@ -4020,7 +4008,7 @@ export class PiAgentView extends ItemView {
         usedFile = true;
       }
     }
-    if (messages.length === 0 && !usedFile) {
+    if (!usedFile) {
       try {
         const result = await this.client.getMessages();
         if (result.success && result.data) {
@@ -4344,9 +4332,16 @@ export class PiAgentView extends ItemView {
     const mode = this.plugin.settings.streamingRenderMode || "auto";
     if (mode === "pretty") return true;
     if (mode === "fast") return false;
-    // Auto: preserve the original pretty Markdown feel for short replies, then
-    // switch to cheap plain streaming before long M3 outputs start janking.
-    return rawLength <= 1500;
+    // Auto: stay in cheap fast streaming while tokens are flowing; an idle
+    // debounce in throttleRender() promotes the accumulated text to pretty
+    // when the model pauses. Pretty is also force-flushed at text_end /
+    // message_end so we never leave a reply half-decorated.
+    return false;
+  }
+
+  private isAutoStreamingMode(): boolean {
+    const mode = this.plugin.settings.streamingRenderMode || "auto";
+    return mode === "auto";
   }
 
   private convertCurrentTextBlockToFastStreaming(): void {
@@ -4364,8 +4359,14 @@ export class PiAgentView extends ItemView {
       this.renderTimeout = null;
     }
 
+    // In auto mode we behave like an idle debounce: keep fast text on screen,
+    // and only promote to pretty MarkdownRenderer when the model pauses.
+    // Pretty throttles on a 150ms cadence (was 80ms) to leave the main thread
+    // some breathing room on long replies. Fast mode is unaffected.
+    const isAuto = this.isAutoStreamingMode();
+    const delay = isAuto ? 140 : 150;
+
     const now = Date.now();
-    const delay = 80;
     if (now - this.lastRenderTime >= delay) {
       this.renderMarkdownWithCursor(rawText, targetEl);
       this.lastRenderTime = now;
@@ -4381,7 +4382,12 @@ export class PiAgentView extends ItemView {
   // two <div>/<span> nodes — no MarkdownRenderer pass, no DOM re-build, no
   // markdown re-parse. The final MarkdownRenderer.render() happens once at
   // message_end in handleMessageEnd().
-  private appendStreamingDelta(rawText: string): void {
+  //
+  // In auto mode we additionally promote the in-flight fast text to pretty
+  // Markdown as soon as the model emits a newline, so each completed
+  // paragraph / list item / table row is rendered with full formatting
+  // exactly once, without forcing a 140ms idle wait.
+  private appendStreamingDelta(rawText: string, deltaText: string): void {
     if (this.renderTimeout) {
       window.clearTimeout(this.renderTimeout);
       this.renderTimeout = null;
@@ -4404,6 +4410,23 @@ export class PiAgentView extends ItemView {
         delay - (now - this.lastRenderTime)
       );
     }
+
+    if (this.isAutoStreamingMode() && deltaText && deltaText.includes("\n")) {
+      this.flushPrettyIfNeeded();
+    }
+  }
+
+  // Promote the in-flight fast text to pretty Markdown right now. Used by
+  // auto mode at text_end / message_end to guarantee the user never sees an
+  // unrendered reply.
+  private flushPrettyIfNeeded(): void {
+    if (!this.isAutoStreamingMode()) return;
+    if (!this.currentTextBlock || !this.streamingTextEl) return;
+    const raw = this.currentTextBlock.getAttribute("data-stream-raw")
+      || this.streamingTextEl.textContent
+      || "";
+    if (!raw) return;
+    this.renderMarkdownWithCursor(raw, this.currentTextBlock);
   }
 
   private normalizeAssistantMarkdown(text: string): string {
