@@ -76,6 +76,9 @@ interface ChatTab {
   modelProvider?: string;
   modelId?: string;
   thinkingLevel?: string;
+  speedStartedAt?: number | null;
+  speedEstimatedTokens?: number;
+  speedHideAt?: number | null;
   sessionFile?: string;
   sessionId?: string;
   restored?: boolean;
@@ -800,12 +803,15 @@ export class PiAgentView extends ItemView {
     await this.ensureTabClient(tab);
     this.client = tab.client;
     this.renderActiveTabRuntimeStatus();
+    this.renderActiveTabSpeed();
     // Parallelize non-blocking post-start calls so the UI feels snappy.
     // Each call sets a different part of the UI and they don't depend on each other.
     void this.refreshStateDisplay();
     void this.loadAvailableCommands();
     await this.loadMessages();
     this.renderActiveTabRuntimeStatus();
+    this.renderActiveTabSpeed();
+    this.renderActiveTabModelAndEffort();
     this.updateButtons();
     await this.persistSessionTabs();
   }
@@ -1795,14 +1801,18 @@ export class PiAgentView extends ItemView {
       window.clearInterval(this.speedTimer);
       this.speedTimer = null;
     }
+    const tab = this.activeTab;
+    if (tab) {
+      tab.speedStartedAt = null;
+      tab.speedEstimatedTokens = 0;
+      tab.speedHideAt = null;
+    }
     this.speedStartedAt = null;
     this.speedEstimatedTokens = 0;
     if (this.speedEl) {
-      this.speedEl.removeClass("pi-agent-hidden");
-      this.speedEl.setText("… tok/s");
-      this.speedEl.setAttribute("title", "Waiting for output…");
+      this.speedEl.addClass("pi-agent-hidden");
+      this.speedEl.setText("…");
     }
-    this.speedTimer = window.setInterval(() => this.updateSpeedIndicator(false), 750);
   }
 
   private estimateTokenCount(text: string): number {
@@ -1818,6 +1828,11 @@ export class PiAgentView extends ItemView {
 
   private addSpeedDelta(text: string): void {
     if (!text) return;
+    const tab = this.activeTab;
+    if (tab) {
+      if (!tab.speedStartedAt) tab.speedStartedAt = Date.now();
+      tab.speedEstimatedTokens = (tab.speedEstimatedTokens || 0) + this.estimateTokenCount(text);
+    }
     if (!this.speedStartedAt) this.speedStartedAt = Date.now();
     this.speedEstimatedTokens += this.estimateTokenCount(text);
     this.updateSpeedIndicator(false);
@@ -1825,18 +1840,21 @@ export class PiAgentView extends ItemView {
 
   private updateSpeedIndicator(final: boolean): void {
     if (!this.speedEl) return;
-    if (!this.speedStartedAt || this.speedEstimatedTokens <= 0) {
-      this.speedEl.setText("… tok/s");
+    const tab = this.activeTab;
+    const startedAt = tab?.speedStartedAt ?? this.speedStartedAt;
+    const tokens = tab?.speedEstimatedTokens ?? this.speedEstimatedTokens;
+    if (!startedAt || tokens <= 0) {
+      this.speedEl.setText("…");
       return;
     }
-    const elapsedSec = Math.max(0.1, (Date.now() - this.speedStartedAt) / 1000);
-    const rate = this.speedEstimatedTokens / elapsedSec;
+    const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
+    const rate = tokens / elapsedSec;
     const rounded = rate >= 10 ? Math.round(rate) : Number(rate.toFixed(1));
     const prefix = final ? "" : "~";
     this.speedEl.setText(`${prefix}${rounded} tok/s`);
     this.speedEl.setAttribute(
       "title",
-      `Estimated output speed: ${rounded} tok/s · ${Math.round(this.speedEstimatedTokens)} tokens · ${elapsedSec.toFixed(1)}s`
+      `Estimated output speed: ${rounded} tok/s · ${Math.round(tokens)} tokens · ${elapsedSec.toFixed(1)}s`
     );
   }
 
@@ -1845,12 +1863,66 @@ export class PiAgentView extends ItemView {
       window.clearInterval(this.speedTimer);
       this.speedTimer = null;
     }
+    const tab = this.activeTab;
+    if (tab) tab.speedHideAt = Date.now() + 8000;
     this.updateSpeedIndicator(true);
     if (this.speedHideTimer) window.clearTimeout(this.speedHideTimer);
     this.speedHideTimer = window.setTimeout(() => {
-      if (!this.isStreaming) this.speedEl?.addClass("pi-agent-hidden");
+      this.speedEl?.addClass("pi-agent-hidden");
       this.speedHideTimer = null;
     }, 8000);
+  }
+
+  private renderActiveTabSpeed(): void {
+    if (!this.speedEl) return;
+    if (this.speedTimer) {
+      window.clearInterval(this.speedTimer);
+      this.speedTimer = null;
+    }
+    if (this.speedHideTimer) {
+      window.clearTimeout(this.speedHideTimer);
+      this.speedHideTimer = null;
+    }
+    const tab = this.activeTab;
+    if (!tab) {
+      this.speedEl.addClass("pi-agent-hidden");
+      return;
+    }
+    const startedAt = tab.speedStartedAt || null;
+    const tokens = tab.speedEstimatedTokens || 0;
+    this.speedStartedAt = startedAt;
+    this.speedEstimatedTokens = tokens;
+    if (!startedAt || tokens <= 0) {
+      this.speedEl.addClass("pi-agent-hidden");
+      return;
+    }
+    this.speedEl.removeClass("pi-agent-hidden");
+    this.updateSpeedIndicator(true);
+    if (tab.isStreaming) {
+      this.speedTimer = window.setInterval(() => this.updateSpeedIndicator(false), 750);
+    } else {
+      const hideAt = tab.speedHideAt && tab.speedHideAt > Date.now()
+        ? tab.speedHideAt - Date.now()
+        : 8000;
+      this.speedHideTimer = window.setTimeout(() => {
+        if (!this.activeTab?.isStreaming) {
+          this.speedEl?.addClass("pi-agent-hidden");
+        }
+        this.speedHideTimer = null;
+      }, hideAt);
+    }
+  }
+
+  private renderActiveTabModelAndEffort(): void {
+    const tab = this.activeTab;
+    if (!tab) return;
+    const provider = tab.modelProvider || this.plugin.settings.provider || "";
+    const modelId = tab.modelId || this.plugin.settings.modelId || "";
+    const level = tab.thinkingLevel ?? this.plugin.settings.thinkingLevel ?? "";
+    this.updateModelDisplay(provider, modelId);
+    if (this.footerEffortCurrent) {
+      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+    }
   }
 
   private isNearBottom(threshold = 80): boolean {
