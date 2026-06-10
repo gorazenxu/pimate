@@ -112,6 +112,11 @@ export class PiAgentView extends ItemView {
   private widgetEl: HTMLElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
   private statusBar: HTMLElement | null = null;
+  private speedEl: HTMLElement | null = null;
+  private speedStartedAt: number | null = null;
+  private speedEstimatedTokens = 0;
+  private speedTimer: number | null = null;
+  private speedHideTimer: number | null = null;
   private footerModelLabel: HTMLElement | null = null;
   private footerModelDropdown: HTMLElement | null = null;
   private effortSelector: HTMLElement | null = null;
@@ -324,6 +329,9 @@ export class PiAgentView extends ItemView {
     const titleEl = header.createDiv("pi-agent-title");
     titleEl.createSpan({ text: "π", cls: "pi-agent-logo" });
     titleEl.createSpan({ text: "Pimate" });
+
+    this.speedEl = header.createDiv("pi-agent-speed-indicator pi-agent-hidden");
+    this.speedEl.setAttribute("title", isZh ? "实时输出速度（估算）" : "Realtime output speed (estimated)");
 
     // 右上角设置按钮 (按用户要求保留，放右上角合适的位置)
     const headerActions = header.createDiv("pi-agent-header-actions");
@@ -956,6 +964,7 @@ export class PiAgentView extends ItemView {
       case "agent_start":
         this.isStreaming = true;
         if (this.activeTab) this.activeTab.isStreaming = true;
+        this.startSpeedIndicator();
         this.updateButtons();
         this.setStatus("🤔 Thinking...", "thinking");
         break;
@@ -967,6 +976,7 @@ export class PiAgentView extends ItemView {
         this.currentTextBlock = null;
         this.currentThinkingBlock = null;
         this.currentThinkingContent = null;
+        this.stopSpeedIndicator();
         this.updateButtons();
         this.renderActiveTabRuntimeStatus();
         void this.refreshStateDisplay();
@@ -1097,8 +1107,10 @@ export class PiAgentView extends ItemView {
               );
             }
           }
-          this.currentBlockRawText += delta.delta || "";
-          this.currentRawText += delta.delta || "";
+          const deltaText = delta.delta || "";
+          this.currentBlockRawText += deltaText;
+          this.currentRawText += deltaText;
+          this.addSpeedDelta(deltaText);
           this.currentTextBlock.setAttribute("data-stream-raw", this.currentBlockRawText);
 
           const usePretty = this.shouldUsePrettyStreaming(this.currentBlockRawText.length);
@@ -1259,6 +1271,7 @@ export class PiAgentView extends ItemView {
       if (parsed && parsed.options.length >= 2) {
         this.renderOptionChips(this.currentAssistantMsg, parsed.options, parsed.isQuestion);
       }
+      this.finalizeAssistantMessageVisibility(this.currentAssistantMsg);
 
       if (shouldStickToBottom) {
         this.scrollToBottom(true, true);
@@ -1773,6 +1786,73 @@ export class PiAgentView extends ItemView {
     this.chatContainer?.querySelector(".pi-agent-empty-state")?.remove();
   }
 
+  private startSpeedIndicator(): void {
+    if (this.speedHideTimer) {
+      window.clearTimeout(this.speedHideTimer);
+      this.speedHideTimer = null;
+    }
+    if (this.speedTimer) {
+      window.clearInterval(this.speedTimer);
+      this.speedTimer = null;
+    }
+    this.speedStartedAt = null;
+    this.speedEstimatedTokens = 0;
+    if (this.speedEl) {
+      this.speedEl.removeClass("pi-agent-hidden");
+      this.speedEl.setText("… tok/s");
+      this.speedEl.setAttribute("title", "Waiting for output…");
+    }
+    this.speedTimer = window.setInterval(() => this.updateSpeedIndicator(false), 750);
+  }
+
+  private estimateTokenCount(text: string): number {
+    if (!text) return 0;
+    let cjk = 0;
+    let other = 0;
+    for (const ch of text) {
+      if (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(ch)) cjk++;
+      else if (!/\s/.test(ch)) other++;
+    }
+    return cjk + other / 4;
+  }
+
+  private addSpeedDelta(text: string): void {
+    if (!text) return;
+    if (!this.speedStartedAt) this.speedStartedAt = Date.now();
+    this.speedEstimatedTokens += this.estimateTokenCount(text);
+    this.updateSpeedIndicator(false);
+  }
+
+  private updateSpeedIndicator(final: boolean): void {
+    if (!this.speedEl) return;
+    if (!this.speedStartedAt || this.speedEstimatedTokens <= 0) {
+      this.speedEl.setText("… tok/s");
+      return;
+    }
+    const elapsedSec = Math.max(0.1, (Date.now() - this.speedStartedAt) / 1000);
+    const rate = this.speedEstimatedTokens / elapsedSec;
+    const rounded = rate >= 10 ? Math.round(rate) : Number(rate.toFixed(1));
+    const prefix = final ? "" : "~";
+    this.speedEl.setText(`${prefix}${rounded} tok/s`);
+    this.speedEl.setAttribute(
+      "title",
+      `Estimated output speed: ${rounded} tok/s · ${Math.round(this.speedEstimatedTokens)} tokens · ${elapsedSec.toFixed(1)}s`
+    );
+  }
+
+  private stopSpeedIndicator(): void {
+    if (this.speedTimer) {
+      window.clearInterval(this.speedTimer);
+      this.speedTimer = null;
+    }
+    this.updateSpeedIndicator(true);
+    if (this.speedHideTimer) window.clearTimeout(this.speedHideTimer);
+    this.speedHideTimer = window.setTimeout(() => {
+      if (!this.isStreaming) this.speedEl?.addClass("pi-agent-hidden");
+      this.speedHideTimer = null;
+    }, 8000);
+  }
+
   private isNearBottom(threshold = 80): boolean {
     if (!this.chatContainer) return true;
     const scrollOffset =
@@ -2234,6 +2314,8 @@ export class PiAgentView extends ItemView {
   private abortAgent(): void {
     this.client?.abort();
     this.isStreaming = false;
+    if (this.activeTab) this.activeTab.isStreaming = false;
+    this.stopSpeedIndicator();
     this.updateButtons();
     this.setStatus("⏹ Aborted", "warning");
   }
@@ -3899,6 +3981,31 @@ export class PiAgentView extends ItemView {
     this.historyBannerEl = banner;
   }
 
+  private finalizeAssistantMessageVisibility(message: RenderedMessage): void {
+    const hasText = !!message.contentEl.querySelector(".pi-agent-text-block");
+    const thinkingBlocks = Array.from(
+      message.contentEl.querySelectorAll(".pi-agent-thinking-block")
+    ) as HTMLElement[];
+    const hasThinking = thinkingBlocks.some((block) => {
+      const content = block.querySelector(".pi-agent-thinking-content") as HTMLElement | null;
+      return !!content?.textContent?.trim();
+    });
+    const hasTool = !!message.contentEl.querySelector(".pi-agent-tool-block");
+
+    for (const block of thinkingBlocks) {
+      const content = block.querySelector(".pi-agent-thinking-content") as HTMLElement | null;
+      if (!content?.textContent?.trim()) block.remove();
+    }
+
+    if (!hasText && !hasThinking && !hasTool) {
+      message.el.remove();
+      this.renderedMessages = this.renderedMessages.filter((m) => m !== message);
+      return;
+    }
+
+    message.el.toggleClass("is-tool-only", hasTool && !hasText && !hasThinking);
+  }
+
   /** Render a single message from a history payload (file or RPC). */
   private renderMessageFromHistory(msg: any): void {
     if (msg.role === "user") {
@@ -3914,16 +4021,22 @@ export class PiAgentView extends ItemView {
     } else if (msg.role === "branchSummary") {
       this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary");
     } else if (msg.role === "assistant") {
+      const blocks = Array.isArray(msg.content) ? msg.content : [];
+      const hasVisibleText = blocks.some((block: any) => block.type === "text" && String(block.text || "").trim());
+      const hasVisibleThinking = blocks.some((block: any) => block.type === "thinking" && String(block.thinking || "").trim());
+      const hasToolCall = blocks.some((block: any) => block.type === "toolCall");
+      if (!hasVisibleText && !hasVisibleThinking && !hasToolCall) return;
+
       const rendered = this.addMessage("assistant", "");
       this.currentAssistantMsg = rendered;
-      if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
+      if (blocks.length > 0) {
+        for (const block of blocks) {
           if (block.type === "text" && block.text) {
             rendered.el.setAttribute("data-raw-content", block.text);
             const textBlock =
               rendered.contentEl.createDiv("pi-agent-text-block markdown-preview-view markdown-rendered");
             void MarkdownRenderer.render(this.app, this.normalizeAssistantMarkdown(block.text), textBlock, "", this);
-          } else if (block.type === "thinking" && this.plugin.settings.showThinking) {
+          } else if (block.type === "thinking" && this.plugin.settings.showThinking && String(block.thinking || "").trim()) {
             const tb = rendered.contentEl.createDiv("pi-agent-thinking-block is-collapsed");
             const header = tb.createDiv("pi-agent-thinking-header");
             const iconSpan = header.createSpan("pi-agent-thinking-icon");
@@ -3944,6 +4057,7 @@ export class PiAgentView extends ItemView {
           }
         }
       }
+      this.finalizeAssistantMessageVisibility(rendered);
       this.currentAssistantMsg = null;
     } else if (msg.role === "toolResult") {
       this.handleToolEnd({
