@@ -50,5 +50,6 @@ jobs:
           gh release create "$tag" \
             --title "$tag" \
             --notes-file release-notes.md \
+            --latest=true \
             main.js manifest.json styles.css
 

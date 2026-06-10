@@ -16,6 +16,23 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.28 (2026-06-10)
+
+- 修：切走 tab 时正在流式回复的对话看不见（错过 message_start）
+  - 新增 `ensureAssistantStreamMessage()`：遇到 `text_delta` / `thinking_start` / `error` 但当前没有 assistant 卡片时现场创建，继续接流
+- 修：切到 streaming tab 时 jsonl 写盘可能滞后，丢失最新 in-flight 消息
+  - `loadMessages()` 在 `tab.isStreaming` 时优先走 RPC `getMessages()`，非 streaming 走文件直读
+- 优：header 速度 pill 隐藏时不再用 `display:none` 顶开右侧按钮位置
+  - 改用 title 自身 `margin-inline-end: auto` 顶 right actions
+  - speed pill 只负责内容，layout 不再受隐藏影响
+- 修：model / effort 弹窗又写回全局 settings
+  - 统一封装 `updateActiveTabModel` / `updateActiveTabThinkingLevel`
+  - footer 弹窗、命令面板入口（`showModelSelector` / `showThinkingLevelSelector`）改为只写 `activeTab` + 调用该 tab 自己的 client
+  - 启动 / 恢复 tab client 时执行 `applyTabRuntimePreferences(tab)`，把 tab 保存的 model / effort 应用到该 client
+- 优：RPC 拉到的消息按 `maxHistoryDisplay` 截最后 N 条，避免大历史切回时一次性渲染过多
+
+---
+
 ## 📦 v1.0.27 (2026-06-10)
 
 - 优：实时速度状态按 tab 隔离；切换 tab 后 header 速度面板会按当前 tab 的状态重绘（不再被上一个 tab 残留）

@@ -888,6 +888,7 @@ export class PiAgentView extends ItemView {
           new Notice(`Failed to restore session: ${tab.label}`);
         }
       }
+      await this.applyTabRuntimePreferences(tab);
       if (this.activeTabId === tab.id) {
         this.setStatus("Ready", "ok");
         void this.loadAvailableCommands();
@@ -917,6 +918,41 @@ export class PiAgentView extends ItemView {
       cwd: vaultBasePath,
       noSession: false,
     });
+  }
+
+  private async applyTabRuntimePreferences(tab: ChatTab): Promise<void> {
+    if (!tab.client) return;
+    try {
+      if (tab.modelProvider && tab.modelId) {
+        await tab.client.setModel(tab.modelProvider, tab.modelId);
+      }
+      if (typeof tab.thinkingLevel === "string") {
+        await tab.client.setThinkingLevel(tab.thinkingLevel);
+      }
+    } catch (err) {
+      console.warn("[pimate] failed to apply tab runtime preferences", err);
+    }
+  }
+
+  private async updateActiveTabModel(provider: string, modelId: string): Promise<void> {
+    const tab = this.activeTab;
+    if (tab) {
+      tab.modelProvider = provider;
+      tab.modelId = modelId;
+    }
+    await this.persistSessionTabs();
+    await this.client?.setModel(provider, modelId);
+    this.updateModelDisplay(provider, modelId);
+  }
+
+  private async updateActiveTabThinkingLevel(level: string): Promise<void> {
+    const tab = this.activeTab;
+    if (tab) tab.thinkingLevel = level;
+    await this.persistSessionTabs();
+    if (this.client) await this.client.setThinkingLevel(level);
+    if (this.footerEffortCurrent) {
+      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+    }
   }
 
   private resetActiveRenderState(): void {
@@ -1082,6 +1118,19 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  private ensureAssistantStreamMessage(): RenderedMessage {
+    if (!this.currentAssistantMsg) {
+      this.currentAssistantMsg = this.addMessage("assistant", "");
+      this.currentTextBlock = null;
+      this.currentThinkingBlock = null;
+      this.currentThinkingContent = null;
+      this.currentRawText = "";
+      this.currentBlockRawText = "";
+      this.lastRenderTime = 0;
+    }
+    return this.currentAssistantMsg;
+  }
+
   private handleMessageUpdate(event: RpcEvent): void {
     const delta = event.assistantMessageEvent as AssistantMessageEvent;
     if (!delta) return;
@@ -1094,51 +1143,49 @@ export class PiAgentView extends ItemView {
         this.streamingCursorEl = null;
         break;
 
-      case "text_delta":
-        if (this.currentAssistantMsg) {
-          if (!this.currentTextBlock) {
-            const usePretty = this.shouldUsePrettyStreaming(0);
-            this.currentTextBlock =
-              this.currentAssistantMsg.contentEl.createDiv(
-                usePretty
-                  ? "pi-agent-text-block markdown-preview-view markdown-rendered"
-                  : "pi-agent-text-block pi-agent-streaming-block"
-              );
-            if (!usePretty) {
-              this.streamingTextEl = this.currentTextBlock.createDiv(
-                "pi-agent-streaming-text"
-              );
-              this.streamingCursorEl = this.currentTextBlock.createSpan(
-                "pi-agent-streaming-cursor"
-              );
-            }
-          }
-          const deltaText = delta.delta || "";
-          this.currentBlockRawText += deltaText;
-          this.currentRawText += deltaText;
-          this.addSpeedDelta(deltaText);
-          this.currentTextBlock.setAttribute("data-stream-raw", this.currentBlockRawText);
-
-          const usePretty = this.shouldUsePrettyStreaming(this.currentBlockRawText.length);
-          if (usePretty) {
-            this.throttleRender(this.currentBlockRawText, this.currentTextBlock);
-          } else {
-            if (!this.currentTextBlock.classList.contains("pi-agent-streaming-block")) {
-              this.convertCurrentTextBlockToFastStreaming();
-            }
-            this.appendStreamingDelta(this.currentBlockRawText);
+      case "text_delta": {
+        const message = this.ensureAssistantStreamMessage();
+        if (!this.currentTextBlock) {
+          const usePretty = this.shouldUsePrettyStreaming(0);
+          this.currentTextBlock =
+            message.contentEl.createDiv(
+              usePretty
+                ? "pi-agent-text-block markdown-preview-view markdown-rendered"
+                : "pi-agent-text-block pi-agent-streaming-block"
+            );
+          if (!usePretty) {
+            this.streamingTextEl = this.currentTextBlock.createDiv(
+              "pi-agent-streaming-text"
+            );
+            this.streamingCursorEl = this.currentTextBlock.createSpan(
+              "pi-agent-streaming-cursor"
+            );
           }
         }
+        const deltaText = delta.delta || "";
+        this.currentBlockRawText += deltaText;
+        this.currentRawText += deltaText;
+        this.addSpeedDelta(deltaText);
+        this.currentTextBlock.setAttribute("data-stream-raw", this.currentBlockRawText);
+
+        const usePretty = this.shouldUsePrettyStreaming(this.currentBlockRawText.length);
+        if (usePretty) {
+          this.throttleRender(this.currentBlockRawText, this.currentTextBlock);
+        } else {
+          if (!this.currentTextBlock.classList.contains("pi-agent-streaming-block")) {
+            this.convertCurrentTextBlockToFastStreaming();
+          }
+          this.appendStreamingDelta(this.currentBlockRawText);
+        }
         break;
+      }
 
       case "thinking_start":
-        if (
-          this.plugin.settings.showThinking &&
-          this.currentAssistantMsg
-        ) {
+        if (this.plugin.settings.showThinking) {
+          const message = this.ensureAssistantStreamMessage();
           this.thinkingStartedAt = Date.now();
           this.currentThinkingBlock =
-            this.currentAssistantMsg.contentEl.createDiv(
+            message.contentEl.createDiv(
               "pi-agent-thinking-block is-collapsed"
             );
           const header = this.currentThinkingBlock.createDiv(
@@ -1211,13 +1258,13 @@ export class PiAgentView extends ItemView {
       case "done":
         break;
 
-      case "error":
-        if (this.currentAssistantMsg) {
-          this.currentAssistantMsg.contentEl.createDiv(
-            "pi-agent-error-block"
-          ).textContent = `⚠️ Error: ${delta.reason || "Unknown error"}`;
-        }
+      case "error": {
+        const message = this.ensureAssistantStreamMessage();
+        message.contentEl.createDiv(
+          "pi-agent-error-block"
+        ).textContent = `⚠️ Error: ${delta.reason || "Unknown error"}`;
         break;
+      }
     }
   }
 
@@ -1828,13 +1875,19 @@ export class PiAgentView extends ItemView {
 
   private addSpeedDelta(text: string): void {
     if (!text) return;
+    const estimatedTokens = this.estimateTokenCount(text);
     const tab = this.activeTab;
     if (tab) {
       if (!tab.speedStartedAt) tab.speedStartedAt = Date.now();
-      tab.speedEstimatedTokens = (tab.speedEstimatedTokens || 0) + this.estimateTokenCount(text);
+      tab.speedEstimatedTokens = (tab.speedEstimatedTokens || 0) + estimatedTokens;
+      tab.speedHideAt = null;
     }
     if (!this.speedStartedAt) this.speedStartedAt = Date.now();
-    this.speedEstimatedTokens += this.estimateTokenCount(text);
+    this.speedEstimatedTokens += estimatedTokens;
+    if (this.speedEl) this.speedEl.removeClass("pi-agent-hidden");
+    if (!this.speedTimer) {
+      this.speedTimer = window.setInterval(() => this.updateSpeedIndicator(false), 750);
+    }
     this.updateSpeedIndicator(false);
   }
 
@@ -1844,9 +1897,9 @@ export class PiAgentView extends ItemView {
     const startedAt = tab?.speedStartedAt ?? this.speedStartedAt;
     const tokens = tab?.speedEstimatedTokens ?? this.speedEstimatedTokens;
     if (!startedAt || tokens <= 0) {
-      this.speedEl.setText("…");
       return;
     }
+    this.speedEl.removeClass("pi-agent-hidden");
     const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
     const rate = tokens / elapsedSec;
     const rounded = rate >= 10 ? Math.round(rate) : Number(rate.toFixed(1));
@@ -1901,15 +1954,17 @@ export class PiAgentView extends ItemView {
     if (tab.isStreaming) {
       this.speedTimer = window.setInterval(() => this.updateSpeedIndicator(false), 750);
     } else {
-      const hideAt = tab.speedHideAt && tab.speedHideAt > Date.now()
-        ? tab.speedHideAt - Date.now()
-        : 8000;
+      const hideAt = tab.speedHideAt || 0;
+      if (hideAt <= Date.now()) {
+        this.speedEl.addClass("pi-agent-hidden");
+        return;
+      }
       this.speedHideTimer = window.setTimeout(() => {
         if (!this.activeTab?.isStreaming) {
           this.speedEl?.addClass("pi-agent-hidden");
         }
         this.speedHideTimer = null;
-      }, hideAt);
+      }, hideAt - Date.now());
     }
   }
 
@@ -2701,11 +2756,7 @@ export class PiAgentView extends ItemView {
         itemEl.onclick = (e) => {
           e.stopPropagation();
           this.runAsync(async () => {
-            this.plugin.settings.provider = model.provider;
-            this.plugin.settings.modelId = model.id;
-            await this.plugin.saveSettings();
-            await this.client?.setModel(model.provider, model.id);
-            this.updateModelDisplay(model.provider, model.id);
+            await this.updateActiveTabModel(model.provider, model.id);
             new Notice(isZh ? `模型已切换为 ${shortName}` : `Model set to ${shortName}`);
             this.closeModelPopup();
           });
@@ -2784,15 +2835,8 @@ export class PiAgentView extends ItemView {
       itemEl.onclick = (e) => {
         e.stopPropagation();
         this.runAsync(async () => {
-          this.plugin.settings.thinkingLevel = option.id;
-          await this.plugin.saveSettings();
-        if (this.client) {
-          await this.client.setThinkingLevel(option.id);
-        }
-        if (this.footerEffortCurrent) {
-          this.footerEffortCurrent.setText(this.getThinkingLevelLabel(option.id));
-        }
-        new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
+          await this.updateActiveTabThinkingLevel(option.id);
+          new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
           this.closeEffortPopup();
         });
       };
@@ -3397,11 +3441,7 @@ export class PiAgentView extends ItemView {
       }
 
       new ModelSuggestModal(this.app, models, async (model) => {
-        this.plugin.settings.provider = model.provider;
-        this.plugin.settings.modelId = model.id;
-        await this.plugin.saveSettings();
-        await this.client?.setModel(model.provider, model.id);
-        this.updateModelDisplay(model.provider, model.id);
+        await this.updateActiveTabModel(model.provider, model.id);
         new Notice(`Model set to ${model.provider}/${model.id}`);
       }).open();
     } catch (err) {
@@ -3956,7 +3996,23 @@ export class PiAgentView extends ItemView {
     let total = 0;
     let usedFile = false;
 
-    if (filePath) {
+    // While a tab is actively streaming, the jsonl file can lag behind the
+    // in-memory RPC state. Prefer RPC in that case so tab switching does not
+    // hide the latest in-flight turn.
+    if (tab?.isStreaming) {
+      try {
+        const result = await this.client.getMessages();
+        if (result.success && result.data) {
+          const rpcMessages = (result.data as any).messages || [];
+          total = rpcMessages.length;
+          messages = limit > 0 ? rpcMessages.slice(-limit) : rpcMessages;
+        }
+      } catch {
+        // Fall back to file below.
+      }
+    }
+
+    if (messages.length === 0 && filePath) {
       const fileResult = this.readLastMessagesFromFile(filePath, limit);
       if (fileResult.total > 0) {
         messages = fileResult.messages;
@@ -3964,12 +4020,13 @@ export class PiAgentView extends ItemView {
         usedFile = true;
       }
     }
-    if (!usedFile) {
+    if (messages.length === 0 && !usedFile) {
       try {
         const result = await this.client.getMessages();
         if (result.success && result.data) {
-          messages = (result.data as any).messages || [];
-          total = messages.length;
+          const rpcMessages = (result.data as any).messages || [];
+          total = rpcMessages.length;
+          messages = limit > 0 ? rpcMessages.slice(-limit) : rpcMessages;
         }
       } catch {
         console.log("[pi-agent] No existing messages to load");
@@ -4707,15 +4764,7 @@ export class PiAgentView extends ItemView {
     ];
 
     new ThinkingLevelSuggestModal(this.app, options, isZh, async (option) => {
-      this.plugin.settings.thinkingLevel = option.id;
-      await this.plugin.saveSettings();
-      if (this.client) {
-        await this.client.setThinkingLevel(option.id);
-      }
-      if (this.footerEffortCurrent) {
-        this.footerEffortCurrent.setText(this.getThinkingLevelLabel(option.id));
-      }
-
+      await this.updateActiveTabThinkingLevel(option.id);
       new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
     }).open();
   }
