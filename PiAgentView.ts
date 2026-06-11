@@ -4411,9 +4411,40 @@ export class PiAgentView extends ItemView {
       );
     }
 
-    if (this.isAutoStreamingMode() && deltaText && deltaText.includes("\n")) {
+    if (
+      this.isAutoStreamingMode() &&
+      deltaText &&
+      deltaText.includes("\n") &&
+      !this.isInsideUnclosedFence(rawText)
+    ) {
       this.flushPrettyIfNeeded();
     }
+  }
+
+  private isInsideUnclosedFence(text: string): boolean {
+    // Treat a line as a fenced code block delimiter only when the marker
+    // occupies the whole line (after optional indentation). This avoids
+    // mis-counting lines like `open \`\`\` here` or `\`\`\`` embedded in
+    // prose as fence openers/closers.
+    let inFence = false;
+    let fenceChar = "";
+    let fenceLen = 0;
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^\s*(`{3,}|~{3,})\s*([^\s`]*)\s*$/);
+      if (!match) continue;
+      const marker = match[1];
+      const markerChar = marker[0];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = markerChar;
+        fenceLen = marker.length;
+      } else if (markerChar === fenceChar && marker.length >= fenceLen) {
+        inFence = false;
+        fenceChar = "";
+        fenceLen = 0;
+      }
+    }
+    return inFence;
   }
 
   // Promote the in-flight fast text to pretty Markdown right now. Used by
@@ -4462,13 +4493,7 @@ export class PiAgentView extends ItemView {
     targetEl.empty();
 
     const normalizedText = this.normalizeAssistantMarkdown(rawText);
-    const lines = normalizedText.split("\n");
-    let inCodeblock = false;
-    for (const line of lines) {
-      if (line.trimStart().startsWith("```")) {
-        inCodeblock = !inCodeblock;
-      }
-    }
+    const inCodeblock = this.isInsideUnclosedFence(normalizedText);
 
     const cursor = inCodeblock ? " ▊" : ' <span class="pi-agent-typing-cursor">▊</span>';
     const textWithCursor = normalizedText + cursor;
