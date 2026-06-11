@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 pnpm-lock.yaml
 pnpm-workspace.yaml
+.gitconfig.release
