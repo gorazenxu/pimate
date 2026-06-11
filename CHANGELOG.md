@@ -12,17 +12,13 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-- 优：auto 模式重写为按换行符触发 pretty
-  - 文本输出中以 fast（`textContent`）跟手
-  - 遇到 `text_delta` 含 `\n` 时立即调一次 `MarkdownRenderer.render`，使段落 / 列表项 / 表格行等 markdown 边界成型为 pretty
-  - 如果当前处于未闭合 fenced code block 内，则跳过换行 pretty，避免代码块 / Markdown 示例在流式中途被过早渲染坏
-  - 停顿 idle 触发作为补充，避免单行长句、表格内不换行等场景不 pretty
-  - message_end 仍走原 pretty 收尾，结果一致性不变
-- 优：pretty 模式节流频率 80ms → 150ms，给主线程留更多余量
-  - 纯 pretty 模式下重渲次数减少约一半，长回复闪烁与卡顿明显改善
-  - auto 模式不受影响
-  - fast 模式不受影响
-- 修：pretty / auto渲染时 fenced code block 边界识别误判
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.30 (2026-06-11)
+
+- 修：pretty / auto 渲染时 fenced code block 边界识别误判
   - 新增 `isInsideUnclosedFence()`，要求 fence 行只有 fence 标记 + 可选语言名，避免 inline ```` ``` ```` / ` ~~~ ` 被误识别
   - 同时支持 ```` ``` ```` 和 `~~~` 两种 fence
   - `renderMarkdownWithCursor()` 改用同一检测，光标与临时闭合 `\n```` ` 补齐基于正确状态
