@@ -50,13 +50,23 @@ if [ -n "$WORKING_HAS_ITEMS" ] && ! echo "$WORKING_HAS_ITEMS" | grep -q "_当前
   exit 1
 fi
 
-VER=$(node -p "require('./package.json').version")
+# Compute the version that will be released (= current version + 1 patch).
+# The script's job is to bump and release, so the only thing that matters
+# is whether the *next* version's tag already exists.
+CUR_VER=$(node -p "require('./package.json').version")
+NEXT_VER=$(node -e "
+  const [a,b,c] = '$CUR_VER'.split('.').map(Number);
+  console.log(\`\${a}.\${b}.\${c+1}\`);
+")
 
-if git rev-parse "$VER" >/dev/null 2>&1; then
-  echo "ERROR: tag $VER already exists locally."
-  git rev-parse "$VER"
+if git rev-parse "$NEXT_VER" >/dev/null 2>&1; then
+  echo "ERROR: tag $NEXT_VER already exists locally (current package.json is $CUR_VER)."
+  echo "Either delete the tag and re-run, or update CHANGELOG with a new section."
+  git rev-parse "$NEXT_VER"
   exit 1
 fi
+
+VER="$NEXT_VER"
 
 ORIGIN_SHA=$(git rev-parse origin/main 2>/dev/null || echo "no-origin-main")
 LOCAL_SHA=$(git rev-parse HEAD)
