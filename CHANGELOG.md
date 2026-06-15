@@ -12,6 +12,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.31 (2026-06-11)
+
 - 修：避免模型选择时 provider / modelId 串台
   - 选择模型时同步更新 active tab 与全局 settings，避免出现 `openai-codex + MiniMax-M3` 这类错误组合
   - 新建 tab 会继承当前 tab / 全局的 provider、model、thinking level
