@@ -718,11 +718,15 @@ export class PiAgentView extends ItemView {
   }
 
   private async createAndSwitchTab(): Promise<void> {
+    const source = this.activeTab;
     const tab: ChatTab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
       client: null,
       isStreaming: false,
+      modelProvider: source?.modelProvider || this.plugin.settings.provider,
+      modelId: source?.modelId || this.plugin.settings.modelId,
+      thinkingLevel: source?.thinkingLevel || this.plugin.settings.thinkingLevel,
     };
     this.tabs.push(tab);
     this.activeTabId = tab.id;
@@ -858,7 +862,7 @@ export class PiAgentView extends ItemView {
 
     if (tab.client?.isRunning()) return;
 
-    const client = this.createClient();
+    const client = this.createClient(tab);
     tab.client = client;
 
     client.on("event", (event: RpcEvent) => {
@@ -903,17 +907,21 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private createClient(): PiAgentClient {
+  private createClient(tab?: ChatTab): PiAgentClient {
     const settings = this.plugin.settings;
     const adapter = this.app.vault.adapter;
     const vaultBasePath =
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : undefined;
 
+    const provider = tab?.modelProvider || settings.provider;
+    const modelId = tab?.modelId || settings.modelId;
+    const thinkingLevel = tab?.thinkingLevel || settings.thinkingLevel;
+
     return new PiAgentClient({
       piPath: settings.piPath,
-      provider: settings.provider,
-      modelId: settings.modelId,
-      thinkingLevel: settings.thinkingLevel,
+      provider,
+      modelId,
+      thinkingLevel,
       apiKey: settings.apiKey,
       cwd: vaultBasePath,
       noSession: false,
@@ -940,6 +948,12 @@ export class PiAgentView extends ItemView {
       tab.modelProvider = provider;
       tab.modelId = modelId;
     }
+    // Keep global defaults in sync so a newly created/restarted tab cannot
+    // accidentally start with an old provider and a new model id (for example
+    // openai-codex + MiniMax-M3).
+    this.plugin.settings.provider = provider;
+    this.plugin.settings.modelId = modelId;
+    await this.plugin.saveSettings();
     await this.persistSessionTabs();
     await this.client?.setModel(provider, modelId);
     this.updateModelDisplay(provider, modelId);

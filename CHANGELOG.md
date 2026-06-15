@@ -12,7 +12,13 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+- 修：避免模型选择时 provider / modelId 串台
+  - 选择模型时同步更新 active tab 与全局 settings，避免出现 `openai-codex + MiniMax-M3` 这类错误组合
+  - 新建 tab 会继承当前 tab / 全局的 provider、model、thinking level
+  - 启动 Pi client 时优先使用 tab 自己保存的 provider / model / thinking level，而不是只读全局 settings
+- 配：MiniMax-M3 国内 provider 改走 Anthropic-compatible 端点
+  - `minimax-cn` 改为 `https://api.minimaxi.com/anthropic` + `anthropic-messages`，让 Pi 原生接收 `thinking_start` / `thinking_delta` / `thinking_end`
+  - 旧 OpenAI-compatible 端点保留为 `minimax-cn-openai` fallback
 
 ---
 
