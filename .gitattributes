@@ -1,0 +1,21 @@
+# Normalize line endings across Windows / macOS / Linux.
+# Keep generated/release files stable when switching machines.
+
+* text=auto
+
+# Pin generated and release-critical files to LF.
+main.js text eol=lf
+styles.css text eol=lf
+manifest.json text eol=lf
+package.json text eol=lf
+package-lock.json text eol=lf
+versions.json text eol=lf
+CHANGELOG.md text eol=lf
+README.md text eol=lf
+*.ts text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.css text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
