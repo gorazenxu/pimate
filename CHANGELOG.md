@@ -16,6 +16,15 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.32 (2026-06-17)
+
+- 修：Obsidian 在 macOS / Linux 上启动 Pi 时提示 `process not running`
+  - `~/.local/bin/pi` 是带 `#!/usr/bin/env node` shebang 的 JS shim，Obsidian GUI 环境 `PATH` 没有 Node，导致子进程立刻退出
+  - 新增 POSIX 解析：找到 `node`（PATH / Homebrew / `/usr/local/bin`）并把 `pi` 解析到真实 `cli.js`，用 `node cli.js --mode rpc ...` 启动
+  - 完整路径的 `piPath`（如 `/Users/.../.local/bin/pi`）也走同一解析逻辑
+
+---
+
 ## 📦 v1.0.31 (2026-06-11)
 
 - 修：避免模型选择时 provider / modelId 串台
