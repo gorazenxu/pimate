@@ -66,6 +66,77 @@ function resolveWindowsSpawn(
   return null;
 }
 
+function resolvePosixNode(): string | null {
+  if (process.platform === "win32") return null;
+
+  const searchDirs = [
+    ...(process.env.PATH || "").split(path.delimiter),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+
+  const seen = new Set<string>();
+  for (const dir of searchDirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    const candidate = path.join(dir, "node");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return null;
+}
+
+function resolvePosixScript(candidate: string, nodePath: string | null): { cmd: string; scriptArgs: string[] } | null {
+  const realPath = fs.realpathSync(candidate);
+  if (/\.js$/i.test(realPath) && nodePath) {
+    return { cmd: nodePath, scriptArgs: [realPath] };
+  }
+
+  return null;
+}
+
+function resolvePosixSpawn(
+  userPiPath: string
+): { cmd: string; scriptArgs: string[] } | null {
+  if (process.platform === "win32") return null;
+
+  const nodePath = resolvePosixNode();
+
+  if (/\.js$/i.test(userPiPath)) {
+    return nodePath ? { cmd: nodePath, scriptArgs: [userPiPath] } : null;
+  }
+
+  if (/[\\/]/.test(userPiPath)) {
+    if (!fs.existsSync(userPiPath)) return null;
+    return resolvePosixScript(userPiPath, nodePath);
+  }
+
+  const searchDirs = [
+    ...(process.env.PATH || "").split(path.delimiter),
+    process.env.HOME ? path.join(process.env.HOME, ".local", "bin") : "",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+
+  const seen = new Set<string>();
+  for (const dir of searchDirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    const candidate = path.join(dir, userPiPath);
+    if (!fs.existsSync(candidate)) continue;
+
+    return resolvePosixScript(candidate, nodePath) || { cmd: candidate, scriptArgs: [] };
+  }
+
+  return null;
+}
+
+function resolvePiSpawn(
+  userPiPath: string
+): { cmd: string; scriptArgs: string[] } | null {
+  return resolveWindowsSpawn(userPiPath) || resolvePosixSpawn(userPiPath);
+}
+
 // ─── RPC Types ─────────────────────────────────────────────────────────────
 
 export interface RpcRequest {
@@ -241,7 +312,7 @@ export class PiAgentClient extends EventEmitter {
         // 安全传递，pi 自己用 Node 也是 UTF-8。
         let executable = this.options.piPath;
         let execArgs = args;
-        const resolved = resolveWindowsSpawn(this.options.piPath);
+        const resolved = resolvePiSpawn(this.options.piPath);
         if (resolved) {
           executable = resolved.cmd;
           execArgs = [...resolved.scriptArgs, ...args];
