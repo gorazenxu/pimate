@@ -718,15 +718,18 @@ export class PiAgentView extends ItemView {
   }
 
   private async createAndSwitchTab(): Promise<void> {
-    const source = this.activeTab;
     const tab: ChatTab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
       client: null,
       isStreaming: false,
-      modelProvider: source?.modelProvider || this.plugin.settings.provider,
-      modelId: source?.modelId || this.plugin.settings.modelId,
-      thinkingLevel: source?.thinkingLevel || this.plugin.settings.thinkingLevel,
+      // New tabs always start from the global default provider/model/thinking
+      // (the same values the user sees in Plugin settings), so the tab
+      // doesn't accidentally inherit a stale value from the previous active
+      // tab after a provider switch.
+      modelProvider: this.plugin.settings.provider,
+      modelId: this.plugin.settings.modelId,
+      thinkingLevel: this.plugin.settings.thinkingLevel,
     };
     this.tabs.push(tab);
     this.activeTabId = tab.id;

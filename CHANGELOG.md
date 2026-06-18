@@ -16,12 +16,23 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.33 (2026-06-17)
+
+- 优：新建 / 重启 tab 直接使用全局 settings 的 provider / modelId / thinkingLevel
+  - 之前会在 `createAndSwitchTab()` 里继承当前 active tab 的状态，导致 provider 切换后新建 tab 仍跑旧 provider
+
+---
+
 ## 📦 v1.0.32 (2026-06-17)
 
 - 修：Obsidian 在 macOS / Linux 上启动 Pi 时提示 `process not running`
   - `~/.local/bin/pi` 是带 `#!/usr/bin/env node` shebang 的 JS shim，Obsidian GUI 环境 `PATH` 没有 Node，导致子进程立刻退出
   - 新增 POSIX 解析：找到 `node`（PATH / Homebrew / `/usr/local/bin`）并把 `pi` 解析到真实 `cli.js`，用 `node cli.js --mode rpc ...` 启动
   - 完整路径的 `piPath`（如 `/Users/.../.local/bin/pi`）也走同一解析逻辑
+- 配：新增 `.gitattributes` 固定跨平台换行符
+  - 统一 Windows / macOS / Linux 下生成文件与发布关键文件的 LF 行尾
+  - 避免 `main.js` / `styles.css` / `manifest.json` 等文件在不同系统 checkout 或 build 后出现无意义 diff
+  - 不影响插件运行逻辑
 
 ---
 
