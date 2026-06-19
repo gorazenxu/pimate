@@ -12,7 +12,11 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+- 清：从设置面板的下拉 / 默认值列表 / 自动检测列表里移除"火山引擎 / 豆包 (volcengine)"选项
+  - Pi Coding Agent 后端并没有 `volcengine` 这个内置 provider，配置后实际不可用
+  - 仅保留 icon 注册名（PiAgentView 里 provider 图标映射），不影响功能
+- 新：凭证配置区底部增加提示，引导用户通过 Pimate 对话接入列表外模型
+  - "💡 需要接入其他模型？" 提示行，告知可通过已配置的模型提供商与 Pimate 对话让 AI 帮完成接入
 
 ---
 

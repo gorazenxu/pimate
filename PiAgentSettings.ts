@@ -443,11 +443,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
         desc: isZh ? "推荐: deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1" : "Recommended: deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1",
         placeholder: "deepseek-ai/DeepSeek-V3"
       },
-      "volcengine": {
-        model: "",
-        desc: isZh ? "需要填写你的火山引擎 Endpoint ID (例如 ep-2026xxxx-xxxx)" : "Need to specify your Volcengine Endpoint ID (e.g. ep-2026xxxx-xxxx)",
-        placeholder: "ep-..."
-      },
       "google": {
         model: "gemini-2.5-flash",
         desc: isZh ? "推荐: gemini-2.5-flash, gemini-2.5-pro" : "Recommended: gemini-2.5-flash, gemini-2.5-pro",
@@ -466,7 +461,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
           { id: "minimax", name: "MiniMax (国际 / International)" },
           { id: "minimax-cn", name: "MiniMax (国内 / China)" },
           { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-          { id: "volcengine", name: "火山引擎 / 豆包 (Volcengine / Doubao)" },
           { id: "google", name: "Google (Gemini)" }
         ];
 
@@ -594,7 +588,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
       { id: "minimax", name: "MiniMax (国际 / International)" },
       { id: "minimax-cn", name: "MiniMax (国内 / China)" },
       { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-      { id: "volcengine", name: "火山引擎 / 豆包 (Volcengine / Doubao)" },
       { id: "google", name: "Google (Gemini)" }
     ];
 
@@ -766,6 +759,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
              });
         });
     }
+
+    new Setting(containerEl)
+      .setName(isZh ? "💡 需要接入其他模型？" : "💡 Need other model providers?")
+      .setDesc(isZh
+        ? "火山引擎 / 豆包、字节方舟等不在列表中的模型，可以通过已配置的模型提供商与 Pimate 对话，让 AI 帮你完成接入配置。"
+        : "For providers not listed here (Volcengine/Doubao, ByteArk, etc.), talk to Pimate through a configured provider and the AI can help you set them up.")
 
     new Setting(containerEl)
       .setName(isZh ? "提示词默认设置" : "Prompt Defaults")

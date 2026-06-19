@@ -508,7 +508,6 @@ export default class PiAgentPlugin extends Plugin {
         { id: "minimax", defaultModel: "MiniMax-M2.7" },
         { id: "minimax-cn", defaultModel: "MiniMax-M2.7" },
         { id: "siliconflow", defaultModel: "deepseek-ai/DeepSeek-V3" },
-        { id: "volcengine", defaultModel: "" },
         { id: "google", defaultModel: "gemini-2.5-flash" },
         { id: "anthropic", defaultModel: "claude-3-5-sonnet-latest" }
       ];
