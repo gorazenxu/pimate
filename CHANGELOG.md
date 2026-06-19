@@ -12,6 +12,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.34 (unreleased)
+
 - 清：从设置面板的下拉 / 默认值列表 / 自动检测列表里移除"火山引擎 / 豆包 (volcengine)"选项
   - Pi Coding Agent 后端并没有 `volcengine` 这个内置 provider，配置后实际不可用
   - 仅保留 icon 注册名（PiAgentView 里 provider 图标映射），不影响功能
