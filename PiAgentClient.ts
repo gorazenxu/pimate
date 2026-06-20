@@ -288,6 +288,13 @@ export class PiAgentClient extends EventEmitter {
         groq: "GROQ_API_KEY",
         xai: "XAI_API_KEY",
         mistral: "MISTRAL_API_KEY",
+        // 自定义 provider（在 ~/.pi/agent/models.json 里用 "$XXX_API_KEY" 鉴权）：
+        // Pimate 面板"凭证配置区"填的 key 存 auth.json，这里按 provider 注入
+        // 对应环境变量，让 pi 后端能解析 models.json 的 apiKey 引用。
+        "minimax": "MINIMAX_API_KEY",
+        "minimax-cn": "MINIMAX_API_KEY",
+        "siliconflow": "SILICONFLOW_API_KEY",
+        "zhipu": "ZHIPU_API_KEY",
       };
       const envVar = keyMap[provider];
       if (envVar) {

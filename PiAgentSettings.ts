@@ -447,6 +447,13 @@ export class PiAgentSettingTab extends PluginSettingTab {
         model: "gemini-2.5-flash",
         desc: isZh ? "推荐: gemini-2.5-flash, gemini-2.5-pro" : "Recommended: gemini-2.5-flash, gemini-2.5-pro",
         placeholder: "gemini-2.5-flash"
+      },
+      "zhipu": {
+        model: "glm-5.2",
+        desc: isZh
+          ? "推荐: glm-5.2（Z.ai 旗舰, 1M 上下文）。GLM Coding Plan 套餐须走专属端点 https://open.bigmodel.cn/api/coding/paas/v4 —— 通用端点 /api/paas/v4 不抵扣套餐、按量扣费（会报 429 余额不足）。"
+          : "Recommended: glm-5.2 (Z.ai flagship, 1M context). GLM Coding Plan MUST use https://open.bigmodel.cn/api/coding/paas/v4 — the generic /api/paas/v4 bypasses the plan and bills per-token (causes 429 balance errors).",
+        placeholder: "glm-5.2"
       }
     };
 
@@ -461,7 +468,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
           { id: "minimax", name: "MiniMax (国际 / International)" },
           { id: "minimax-cn", name: "MiniMax (国内 / China)" },
           { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-          { id: "google", name: "Google (Gemini)" }
+          { id: "google", name: "Google (Gemini)" },
+          { id: "zhipu", name: "智谱 (Zhipu GLM)" }
         ];
 
         for (const p of providers) {
@@ -588,7 +596,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
       { id: "minimax", name: "MiniMax (国际 / International)" },
       { id: "minimax-cn", name: "MiniMax (国内 / China)" },
       { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-      { id: "google", name: "Google (Gemini)" }
+      { id: "google", name: "Google (Gemini)" },
+      { id: "zhipu", name: "智谱 (Zhipu GLM)" }
     ];
 
     // 已配好的 ID

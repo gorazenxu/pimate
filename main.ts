@@ -168,6 +168,10 @@ export default class PiAgentPlugin extends Plugin {
       "pi-agent-icon-siliconflow",
       `<svg viewBox="0 0 24 24" fill="currentColor" class="svg-icon" style="color: #00a3ff;"><path clip-rule="evenodd" d="M22.956 6.521H12.522c-.577 0-1.044.468-1.044 1.044v3.13c0 .577-.466 1.044-1.043 1.044H1.044c-.577 0-1.044.467-1.044 1.044v4.174C0 17.533.467 18 1.044 18h10.434c.577 0 1.044-.467 1.044-1.043v-3.13c0-.578.466-1.044 1.043-1.044h9.391c.577 0 1.044-.467 1.044-1.044V7.565c0-.576-.467-1.044-1.044-1.044z"/></svg>`
     );
+    addIcon(
+      "pi-agent-icon-zhipu",
+      `<svg viewBox="0 0 24 24" fill="currentColor" class="svg-icon" style="color: #3b82f6;"><path d="M3 3h7.2L12 5.4 13.8 3H21v7.2L18.6 12 21 13.8V21h-7.2L12 18.6 10.2 21H3v-7.2L5.4 12 3 10.2V3zm2.4 1.8v4.4L8.6 12 5.4 14.8v4.4h4.4L12 15.4l2.2 3.8h4.4v-4.4L15.4 12l3.2-2.8V4.8h-4.4L12 8.6 9.8 4.8H5.4zM12 10.2L13.5 12 12 13.8 10.5 12 12 10.2z"/></svg>`
+    );
 
     await this.loadSettings();
 
@@ -509,7 +513,8 @@ export default class PiAgentPlugin extends Plugin {
         { id: "minimax-cn", defaultModel: "MiniMax-M2.7" },
         { id: "siliconflow", defaultModel: "deepseek-ai/DeepSeek-V3" },
         { id: "google", defaultModel: "gemini-2.5-flash" },
-        { id: "anthropic", defaultModel: "claude-3-5-sonnet-latest" }
+        { id: "anthropic", defaultModel: "claude-3-5-sonnet-latest" },
+        { id: "zhipu", defaultModel: "glm-5.2" }
       ];
       
       for (const provider of apiProviders) {

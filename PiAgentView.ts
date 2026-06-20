@@ -925,10 +925,33 @@ export class PiAgentView extends ItemView {
       provider,
       modelId,
       thinkingLevel,
-      apiKey: settings.apiKey,
+      // 优先用当前 provider 在 auth.json 里的 key（面板"凭证配置区"填的），
+      // 否则回退到全局 settings.apiKey。PiAgentClient 会按 provider 把它
+      // 注入对应环境变量（如 ZHIPU_API_KEY），让 pi 后端 models.json 的
+      // "$XXX_API_KEY" 能解析成功。
+      apiKey: this.readProviderApiKey(provider) || settings.apiKey,
       cwd: vaultBasePath,
       noSession: false,
     });
+  }
+
+  // 按当前 provider 从 ~/.pi/agent/auth.json 读取 API Key。
+  // 与 PiAgentSettings.readApiKey 同源（面板"凭证配置区"写入的就是这里）。
+  // OAuth 类型（如 openai-codex）不返回 key —— pi 后端自行用 auth.json 的 OAuth token。
+  private readProviderApiKey(provider: string): string {
+    try {
+      const filePath = join(homedir(), ".pi", "agent", "auth.json");
+      if (!existsSync(filePath)) return "";
+      const data = JSON.parse(readFileSync(filePath, "utf-8"));
+      const item = data?.[provider];
+      if (item && item.type === "api_key" && typeof item.key === "string") {
+        return item.key.trim();
+      }
+      return "";
+    } catch (e) {
+      console.warn("[pimate] readProviderApiKey failed:", e);
+      return "";
+    }
   }
 
   private async applyTabRuntimePreferences(tab: ChatTab): Promise<void> {
@@ -1368,7 +1391,7 @@ export class PiAgentView extends ItemView {
       }
       const m = line.match(optionRe);
       if (m) {
-        current.push(m[2].trim());
+        current.push(m[1].trim());
       } else {
         if (current.length > best.length) best = current;
         current = [];
@@ -4895,6 +4918,7 @@ export class PiAgentView extends ItemView {
     if (p.includes("google") || p.includes("gemini") || m.includes("gemini")) return "pi-agent-icon-gemini";
     if (p.includes("volcengine") || p.includes("doubao") || p.includes("seed") || m.includes("doubao") || m.includes("seed")) return "pi-agent-icon-volcengine";
     if (p.includes("siliconflow") || p.includes("siliconcloud") || m.includes("siliconflow") || m.includes("siliconcloud")) return "pi-agent-icon-siliconflow";
+    if (p.includes("zhipu") || p.includes("智谱") || m.includes("glm") || m.includes("zhipu")) return "pi-agent-icon-zhipu";
     return "pi-agent-icon-claude";
   }
 
