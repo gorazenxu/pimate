@@ -12,7 +12,31 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+## 📦 v1.0.35
+
+- 新：在设置面板添加"智谱 (Zhipu GLM)"服务商
+  - 三个下拉（默认服务商 / 添加服务商 / 自动检测默认模型）都加上 `zhipu`
+  - `providerDefaults` 默认模型 `glm-5.2`（Z.ai 最新旗舰，1M 上下文）
+  - 国内版端点 `https://open.bigmodel.cn/api/coding/paas/v4`（GLM Coding Plan 专属端点，OpenAI 兼容，`compat.thinkingFormat: deepseek`）
+  - 列出 `glm-5.2`（后续精简为只列 `glm-5.2`）
+  - 新增 `pi-agent-icon-zhipu` 图标 + 映射规则（按 `zhipu` / `智谱` / `glm` 匹配）
+
+- 修：zhipu 等自定义 provider "面板已配置但实际调不通" —— 打通凭证注入链路
+  - 根因：面板填的 key 存 `~/.pi/agent/auth.json`，但 `createClient()` 传的是全局 `settings.apiKey`（非 provider 专属），且 `PiAgentClient` 的 env `keyMap` 不含 zhipu，导致 pi 后端 models.json 的 `$ZHIPU_API_KEY` 解析失败、provider 不可用
+  - `PiAgentView.createClient()`：`apiKey` 改为按当前 provider 从 auth.json 读（新增 `readProviderApiKey()`，与 `PiAgentSettings.readApiKey` 同源），回退 `settings.apiKey`
+  - `PiAgentClient` env `keyMap` 补 minimax / minimax-cn / siliconflow / zhipu，按 provider 注入对应环境变量
+  - 受益：所有在 models.json 用 `$XXX_API_KEY` 鉴权的自定义 provider，面板填 key 即生效，不再依赖单独设系统环境变量
+
+- 修：Pimate 渲染带编号/列表项的 AI 回复时崩溃 —— `parseOptionsFromMessage` 捕获组索引笔误
+  - 现象：AI 回复含 `1. xxx` / `a. xxx` / `- xxx` 等列表项时，控制台报 `Cannot read properties of undefined (reading 'trim')`，该条消息渲染异常
+  - 根因：正则 `^(?:...)\s+(.+)$` 中 `(?:...)` 是非捕获组，唯一捕获组（选项文本）对应 `m[1]`，但代码写了 `m[2].trim()` —— `m[2]` 恒为 undefined
+  - 修复：`m[2]` → `m[1]`（`PiAgentView.ts parseOptionsFromMessage`）
+
+- 修：zhipu（智谱 GLM）端点配错 → GLM Coding Plan 套餐不生效、报 429 余额不足
+  - 根因：models.json 里 zhipu `baseUrl` 用了通用端点 `https://open.bigmodel.cn/api/paas/v4`；GLM Coding Plan 必须用专属端点 `https://open.bigmodel.cn/api/coding/paas/v4`，用错会按量扣费、套餐不抵扣 → 账户余额耗尽 → 429
+  - 证据：智谱官方文档 `docs.bigmodel.cn/cn/coding-plan/quick-start`「需配置专属 Coding API 端点 `/api/coding/paas/v4` 而非通用端点」；官方 FAQ「报余额不足/扣账号余额是未满足套餐使用条件」
+  - 修复：models.json zhipu `baseUrl` → `…/api/coding/paas/v4`
+  - 同步：`PiAgentSettings.ts` zhipu hint 更新端点说明（提示通用端点会按量扣费报 429）
 
 ---
 
