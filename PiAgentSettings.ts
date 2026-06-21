@@ -115,6 +115,10 @@ export interface DiscoveredSkill {
 export class PiAgentSettingTab extends PluginSettingTab {
   plugin: PiAgentPlugin;
   temporaryProviders: string[] = [];
+  // 刚添加（未提交 key）的内置 provider id，display() 后用
+  // `data-just-added` 定位那一行的 key input，避免「猜最后一个 input」的
+  // 误跳焦点问题（自定义 provider 区里的 input 也匹配 input[type=password]）。
+  justAddedBuiltinId: string | null = null;
 
   constructor(app: App, plugin: PiAgentPlugin) {
     super(app, plugin);
@@ -744,10 +748,25 @@ export class PiAgentSettingTab extends PluginSettingTab {
         .addButton(btn => {
           btn.setButtonText(isZh ? "添加" : "Add").setCta().onClick(() => {
             this.temporaryProviders.push(selectedBuiltinAdd);
+            // 记录刚添加的 id，renderBuiltinCredentialRow 会给该行
+            // settingEl 上加 data-just-added 属性
+            this.justAddedBuiltinId = selectedBuiltinAdd;
             this.display();
             window.setTimeout(() => {
-              const inputs = containerEl.querySelectorAll("input[type='password']");
-              if (inputs.length > 0) (inputs[inputs.length - 1] as HTMLInputElement).focus();
+              const target = containerEl.querySelector(
+                "[data-just-added='true'] input[type='password']"
+              ) as HTMLInputElement | null;
+              if (target) {
+                target.focus();
+              } else {
+                // 兑底：fall back 到该 setting 里的 input（防止某些 provider
+                // 不产生 password input，如 OAuth）
+                const anyInput = containerEl.querySelector(
+                  "[data-just-added='true'] input"
+                ) as HTMLInputElement | null;
+                if (anyInput) anyInput.focus();
+              }
+              this.justAddedBuiltinId = null;
             }, 50);
           });
         });
@@ -897,10 +916,13 @@ export class PiAgentSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.showThinking)
+          .setValue(this.plugin.settings.showThinking !== false)
           .onChange(async (value) => {
             this.plugin.settings.showThinking = value;
             await this.plugin.saveSettings();
+            for (const leaf of this.app.workspace.getLeavesOfType(PI_AGENT_VIEW_TYPE)) {
+              void (leaf.view as any)?.refreshThinkingVisibility?.();
+            }
           })
       );
 
@@ -1053,6 +1075,11 @@ export class PiAgentSettingTab extends PluginSettingTab {
         : (isConfigured
           ? (isZh ? `API 密钥已配置 / Connected${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `API Key configured${p.envVar ? "  ·  env " + p.envVar : ""}`)
           : (isZh ? `等待配置 API 密钥${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `Awaiting API Key${p.envVar ? "  ·  env " + p.envVar : ""}`)));
+
+    // 如果是刚被点击「添加」的 provider，标记该行以便 display() 后定位
+    if (this.justAddedBuiltinId === id) {
+      setting.settingEl.dataset.justAdded = "true";
+    }
 
     if (isOauth) {
       setting.addButton(btn => {

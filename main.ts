@@ -489,6 +489,10 @@ export default class PiAgentPlugin extends Plugin {
       DEFAULT_SETTINGS,
       await this.loadData()
     );
+    // Migration/default guard: "Show thinking" should be ON unless the user
+    // explicitly saved false. Older builds or malformed data may leave this
+    // undefined/null while the settings UI still appears enabled.
+    this.settings.showThinking = this.settings.showThinking !== false;
     this.autoDetectDefaultModel();
   }
 

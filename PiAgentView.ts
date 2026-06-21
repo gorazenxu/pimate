@@ -4034,6 +4034,11 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  public async refreshThinkingVisibility(): Promise<void> {
+    if (this.activeTab?.isStreaming) return;
+    await this.reloadMessagesFromClient();
+  }
+
   private async reloadMessagesFromClient(): Promise<void> {
     if (this.chatContainer) {
       this.chatContainer.empty();

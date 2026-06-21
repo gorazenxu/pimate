@@ -292,7 +292,10 @@ export class PiAgentClient extends EventEmitter {
         // Pimate 面板"凭证配置区"填的 key 存 auth.json，这里按 provider 注入
         // 对应环境变量，让 pi 后端能解析 models.json 的 apiKey 引用。
         "minimax": "MINIMAX_API_KEY",
-        "minimax-cn": "MINIMAX_API_KEY",
+        // Pi 官方 env 映射：国内 MiniMax 使用 MINIMAX_CN_API_KEY。
+        // 之前误写成 MINIMAX_API_KEY，会让国际 minimax 也被 getAvailable()
+        // 判定为已配置，导致模型 picker 同时出现 MINIMAX 和 MINIMAX-CN 两组。
+        "minimax-cn": "MINIMAX_CN_API_KEY",
         "siliconflow": "SILICONFLOW_API_KEY",
         "zhipu": "ZHIPU_API_KEY",
       };

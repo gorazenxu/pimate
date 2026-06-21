@@ -16,6 +16,23 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.38 (unreleased)
+
+- 修：添加内置 provider 后焦点跳到自定义 model 列表最后一个 input
+  - 原因：`containerEl.querySelectorAll("input[type='password']")` 拿到所有 tab 里的密码框，`.at(-1)` 选中页面上**最后一个**
+  - 自定义 provider 区在内置区之后，它的 password input 被误中
+  - 修：记录刚添加的 id `justAddedBuiltinId`，渲染时给该行 `settingEl` 加 `data-just-added="true"` 标记，display() 后用该选择器精确定位
+  - 兑底：若该 provider 是 OAuth（无 password input），focus 到行内任意 input
+- 修：MiniMax 国内 provider 的 env 映射错误导致模型 picker 出现国际 MINIMAX
+  - Pi 官方映射是 `minimax -> MINIMAX_API_KEY`、`minimax-cn -> MINIMAX_CN_API_KEY`
+  - Pimate 原来把 `minimax-cn` 也映射到 `MINIMAX_API_KEY`，使 Pi 子进程误判国际 `minimax` 已配置
+  - 改为 `minimax-cn -> MINIMAX_CN_API_KEY`，对齐 pi-web / pi-ai 行为
+- 修：显示思考过程开关默认开启但更新后需手动关开一次才生效
+  - 加载配置时规范化 `showThinking`：只有明确保存为 `false` 才关闭，其余缺省/旧值都按开启
+  - 设置页切换后通知已打开的 Pimate 视图刷新当前会话消息，避免 UI 状态与聊天渲染不同步
+
+---
+
 ## 📦 v1.0.37 (unreleased)
 
 - 配：加 commit message 模板 `.gitmessage`
