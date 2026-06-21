@@ -12,6 +12,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.36 (unreleased)
+
 - 改：凭证配置区全面重构 —— 以「内置 vs 自定义」两栏区分
   - 新增 `BUILTIN_PROVIDERS` 清单（与 `pi-ai` env-api-keys 对齐），覆盖 Anthropic / OpenAI / Google / Groq / xAI / OpenRouter / Mistral / Together / Fireworks / NVIDIA / DeepSeek / Z.ai / Kimi / Moonshot / Xiaomi 等 19+ provider
   - 「添加服务商凭证」下拉拆成两栏：栏 1 内置（配 key 即用，含 OAuth），栏 2 自定义（来自 `models.json`）
