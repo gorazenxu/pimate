@@ -16,6 +16,44 @@ const OPENAI_CODEX_VERIFICATION_URI = "https://auth.openai.com/codex/device";
 const OPENAI_CODEX_DEVICE_REDIRECT_URI = "https://auth.openai.com/deviceauth/callback";
 const OPENAI_CODEX_TIMEOUT_SECONDS = 15 * 60;
 
+// ─── Pi 内置 Provider 清单 ────────────────────────────────────────────────
+// 与 @earendil-works/pi-ai 的 env-api-keys.ts 对齐。Pimate 设置页据此区分
+// 「内置（配 key 即用）」与「自定义（来自 models.json）」两类 provider。
+// 完整列表见 Pi 文档 providers.md；此处只列常用项，未列出的内置 provider
+// 仍可通过环境变量直接使用。
+interface BuiltinProvider {
+  id: string;
+  name: string;
+  envVar: string;
+  oauth?: boolean;        // true = 走订阅/OAuth，不填 API Key
+  authJsonKey?: string;   // auth.json 里的字段名（多数等于 id，少数不同）
+}
+
+const BUILTIN_PROVIDERS: BuiltinProvider[] = [
+  // ─ 国际主流 ─
+  { id: "anthropic",     name: "Anthropic (Claude)",        envVar: "ANTHROPIC_API_KEY",   authJsonKey: "anthropic" },
+  { id: "openai-codex",  name: "OpenAI (ChatGPT 订阅)",      envVar: "",                    oauth: true, authJsonKey: "openai-codex" },
+  { id: "openai",        name: "OpenAI (API Key)",           envVar: "OPENAI_API_KEY",      authJsonKey: "openai" },
+  { id: "google",        name: "Google (Gemini)",            envVar: "GEMINI_API_KEY",      authJsonKey: "google" },
+  { id: "groq",          name: "Groq",                       envVar: "GROQ_API_KEY",        authJsonKey: "groq" },
+  { id: "xai",           name: "xAI (Grok)",                 envVar: "XAI_API_KEY",         authJsonKey: "xai" },
+  { id: "openrouter",    name: "OpenRouter",                 envVar: "OPENROUTER_API_KEY",  authJsonKey: "openrouter" },
+  { id: "mistral",       name: "Mistral",                    envVar: "MISTRAL_API_KEY",     authJsonKey: "mistral" },
+  { id: "together",      name: "Together AI",                envVar: "TOGETHER_API_KEY",    authJsonKey: "together" },
+  { id: "fireworks",     name: "Fireworks",                  envVar: "FIREWORKS_API_KEY",   authJsonKey: "fireworks" },
+  { id: "nvidia",        name: "NVIDIA NIM",                 envVar: "NVIDIA_API_KEY",      authJsonKey: "nvidia" },
+  // ─ 国内 / 中文场景 ─
+  { id: "deepseek",      name: "DeepSeek",                   envVar: "DEEPSEEK_API_KEY",    authJsonKey: "deepseek" },
+  { id: "zai",           name: "智谱 Z.AI (GLM)",            envVar: "ZAI_API_KEY",         authJsonKey: "zai" },
+  { id: "zai-coding-cn", name: "智谱 Coding Plan (国内)",    envVar: "ZAI_CODING_CN_API_KEY", authJsonKey: "zai-coding-cn" },
+  { id: "minimax",       name: "MiniMax (国际)",             envVar: "MINIMAX_API_KEY",     authJsonKey: "minimax" },
+  { id: "minimax-cn",    name: "MiniMax (国内)",             envVar: "MINIMAX_CN_API_KEY",  authJsonKey: "minimax-cn" },
+  { id: "moonshotai",    name: "月之暗面 Kimi (国际)",        envVar: "MOONSHOT_API_KEY",    authJsonKey: "moonshotai" },
+  { id: "moonshotai-cn", name: "月之暗面 Kimi (国内)",        envVar: "MOONSHOT_API_KEY",    authJsonKey: "moonshotai-cn" },
+  { id: "xiaomi",        name: "小米 MiMo",                  envVar: "XIAOMI_API_KEY",      authJsonKey: "xiaomi" },
+  { id: "kimi-coding",   name: "Kimi For Coding",            envVar: "KIMI_API_KEY",        authJsonKey: "kimi-coding" },
+];
+
 export interface PersistedSessionTab {
   label: string;
   sessionFile?: string;
@@ -87,6 +125,61 @@ export class PiAgentSettingTab extends PluginSettingTab {
   private getAuthJsonPath(): string {
     const homeDir = os.homedir();
     return path.join(homeDir, ".pi", "agent", "auth.json");
+  }
+
+  // 辅助方法：获取 models.json 的绝对路径（自定义 provider 定义）
+  private getModelsJsonPath(): string {
+    const homeDir = os.homedir();
+    return path.join(homeDir, ".pi", "agent", "models.json");
+  }
+
+  // 辅助方法：读取 models.json 的 providers 部分
+  // 返回 { providers: Record<string, any> }；文件不存在或格式错返回空对象
+  private readModelsJson(): Record<string, any> {
+    const filePath = this.getModelsJsonPath();
+    if (!fs.existsSync(filePath)) return {};
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      const data = JSON.parse(content) || {};
+      return (data.providers && typeof data.providers === "object") ? data.providers : {};
+    } catch (e) {
+      console.error("读取 models.json 失败:", e);
+      return {};
+    }
+  }
+
+  // 辅助方法：安全写入 models.json（保留原有顶层字段，只替换 providers）
+  private writeModelsJson(providers: Record<string, any>): void {
+    const filePath = this.getModelsJsonPath();
+    let data: Record<string, any> = {};
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        data = JSON.parse(content) || {};
+      } catch (e) {
+        console.error("解析已有 models.json 失败，将重置配置:", e);
+      }
+    }
+    data.providers = providers;
+    try {
+      const dirPath = path.dirname(filePath);
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+      }
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch (e) {
+      console.error("写入 models.json 失败:", e);
+    }
+  }
+
+  // 辅助方法：判断某 provider id 是否为 Pi 内置
+  private isBuiltinProvider(id: string): boolean {
+    return BUILTIN_PROVIDERS.some(p => p.id === id);
+  }
+
+  // 辅助方法：取内置 provider 的展示信息
+  private getBuiltinProvider(id: string): BuiltinProvider | undefined {
+    return BUILTIN_PROVIDERS.find(p => p.id === id);
   }
 
   // 辅助方法：以 UTF-8 编码读取对应厂商的 API Key
@@ -461,16 +554,21 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setName(isZh ? "默认服务商 (Default Provider)" : "Default Provider")
       .setDesc(isZh ? "选择聊天时默认启用的模型服务商。" : "Choose the default model provider for chat sessions.")
       .addDropdown((dropdown) => {
-        const providers = [
-          { id: "anthropic", name: "Anthropic (Claude)" },
-          { id: "openai-codex", name: "OpenAI (GPT / Codex)" },
-          { id: "deepseek", name: "DeepSeek" },
-          { id: "minimax", name: "MiniMax (国际 / International)" },
-          { id: "minimax-cn", name: "MiniMax (国内 / China)" },
-          { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-          { id: "google", name: "Google (Gemini)" },
-          { id: "zhipu", name: "智谱 (Zhipu GLM)" }
-        ];
+        // 动态构建：内置 provider 清单 + models.json 自定义 provider
+        const customProv = this.readModelsJson();
+        const providers: { id: string; name: string }[] = [];
+        // 内置（按清单顺序）
+        for (const p of BUILTIN_PROVIDERS) {
+          providers.push({ id: p.id, name: p.name });
+        }
+        // 自定义（models.json 里不在内置清单的）
+        for (const id of Object.keys(customProv)) {
+          if (!this.isBuiltinProvider(id)) {
+            const prov = customProv[id];
+            const modelCount = Array.isArray(prov?.models) ? prov.models.length : 0;
+            providers.push({ id, name: `${id} (自定义/${modelCount}模型)` });
+          }
+        }
 
         for (const p of providers) {
           const key = this.readApiKey(p.id);
@@ -589,191 +687,111 @@ export class PiAgentSettingTab extends PluginSettingTab {
       }
     }
 
-    const allBuiltin = [
-      { id: "anthropic", name: "Anthropic (Claude)" },
-      { id: "openai-codex", name: "OpenAI (GPT / Codex)" },
-      { id: "deepseek", name: "DeepSeek" },
-      { id: "minimax", name: "MiniMax (国际 / International)" },
-      { id: "minimax-cn", name: "MiniMax (国内 / China)" },
-      { id: "siliconflow", name: "硅基流动 (SiliconFlow)" },
-      { id: "google", name: "Google (Gemini)" },
-      { id: "zhipu", name: "智谱 (Zhipu GLM)" }
-    ];
+    // 读取 models.json 的自定义 provider
+    const customProviders = this.readModelsJson();
 
-    // 已配好的 ID
+    // 已配好凭证的 provider id（auth.json 里有 key 或 oauth）
     const configuredIds = Object.keys(authData).filter(id => {
       const item = authData[id];
       return item && (item.type === "oauth" || (item.key && item.key.trim()));
     });
 
-    // 合并并去重，得出要在列表中显示的所有项
-    const displayProviders = Array.from(new Set([...configuredIds, ...this.temporaryProviders]));
+    // ─── 栏 1：内置 Provider（配 key 即用）───────────────────────────────
+    new Setting(containerEl)
+      .setName(isZh ? "内置 Provider（配 key 即用）" : "Built-in Providers (key only)")
+      .setDesc(isZh
+        ? "这些服务商 Pi 原生支持，填入 API Key 或完成 OAuth 即可使用。未列出的内置 provider 也可通过环境变量配置。"
+        : "Pi natively supports these providers — just add an API Key or complete OAuth. Other built-in providers can also be used via environment variables.")
+      .setHeading();
 
-    if (displayProviders.length === 0) {
+    // 决定要显示哪些内置 provider：已配置的 + 临时添加的，并集
+    const builtinIdsToShow = Array.from(new Set([
+      ...BUILTIN_PROVIDERS.map(p => p.id).filter(id => configuredIds.includes(id)),
+      ...this.temporaryProviders.filter(id => this.isBuiltinProvider(id))
+    ]));
+
+    if (builtinIdsToShow.length === 0) {
       containerEl.createEl("p", {
-        text: isZh ? "当前未配置任何大模型凭据。请在下方选择服务商进行添加。" : "No credentials configured. Add one below.",
+        text: isZh ? "尚未配置任何内置 provider。在下方选择一个添加。" : "No built-in provider configured yet. Add one below.",
         cls: "setting-item-description"
       });
     } else {
-      for (const id of displayProviders) {
-        const builtin = allBuiltin.find(p => p.id === id);
-        const displayName = builtin ? builtin.name : id;
-        const item = authData[id];
-        const isOauth = item && item.type === "oauth";
-        const isConfigured = configuredIds.includes(id);
-
-        const setting = new Setting(containerEl)
-          .setName(displayName)
-          .setDesc(isOauth ? (isZh ? "OAuth 已授权 / Connected" : "OAuth Authorized") : (isConfigured ? (isZh ? "API 密钥已配置 / Connected" : "API Key configured") : (isZh ? "等待配置 API 密钥" : "Awaiting API Key")));
-
-        if (isOauth) {
-          // OAuth 只提供断开连接按钮
-          setting.addButton(btn => {
-            btn.setButtonText(isZh ? "断开连接" : "Disconnect");
-            btn.buttonEl.addClass("mod-warning");
-            btn.onClick(() => {
-              void (async () => {
-                delete authData[id];
-                fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-                this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
-                this.display();
-
-                // 联动更新聊天视图并物理重启子进程
-                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-                for (const leaf of leaves) {
-                  const view = leaf.view as any;
-                  if (view && view.client) {
-                    await view.client.restart();
-                  }
-                }
-              })().catch((err: unknown) => {
-                console.error("[pimate] disconnect provider failed", err);
-                new Notice(err instanceof Error ? err.message : String(err));
-              });
-            });
-          });
-        } else {
-          // 普通 API Key 提供密文输入框和断开连接按钮
-          if (id === "openai-codex") {
-            setting.addButton(btn => {
-              btn.setButtonText(isZh ? "Device Code 登录" : "Device Code Login")
-                 .setCta()
-                 .onClick(() => {
-                   void this.startOpenAICodexDeviceCodeLogin().catch((err: unknown) => {
-                     console.error("[pimate] device-code login failed", err);
-                     new Notice(err instanceof Error ? err.message : String(err));
-                   });
-                 });
-            });
-          }
-
-          setting.addText(text => {
-            let tempValue = "";
-            text.setPlaceholder(isConfigured ? (isZh ? "输入新密钥以替换..." : "Enter new key to replace...") : "sk-...")
-                .onChange((val) => {
-                  tempValue = val.trim();
-                });
-            
-            text.inputEl.type = "password";
-            text.inputEl.addClass("pi-agent-input-api-key");
-            
-            // 监听失去焦点和按下回车，在此时才真正保存并刷新列表显示
-            const saveValue = async () => {
-              if (tempValue) {
-                this.writeApiKey(id, tempValue);
-                this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
-                this.display();
-                
-                // 联动更新聊天视图
-                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-                for (const leaf of leaves) {
-                  const view = leaf.view as any;
-                  if (view && view.client) {
-                    await view.client.restart();
-                  }
-                }
-              }
-            };
-            
-            text.inputEl.addEventListener("blur", () => void saveValue());
-            text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void saveValue();
-              }
-            });
-          });
-
-          setting.addButton(btn => {
-            btn.setButtonText(isZh ? "断开连接" : "Disconnect");
-            btn.buttonEl.addClass("mod-warning");
-            btn.onClick(() => {
-              void (async () => {
-                delete authData[id];
-                fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-                this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
-                this.display();
-
-                // 联动更新聊天视图
-                const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-                for (const leaf of leaves) {
-                  const view = leaf.view as any;
-                  if (view && view.client) {
-                    await view.client.restart();
-                  }
-                }
-              })().catch((err: unknown) => {
-                console.error("[pimate] disconnect provider failed", err);
-                new Notice(err instanceof Error ? err.message : String(err));
-              });
-            });
-          });
-        }
+      // 按内置清单顺序渲染
+      for (const p of BUILTIN_PROVIDERS) {
+        if (!builtinIdsToShow.includes(p.id)) continue;
+        this.renderBuiltinCredentialRow(containerEl, p, authData, authPath, isZh);
+      }
+      // 临时添加但不在内置清单里的（理论上不该有，容错）
+      for (const id of builtinIdsToShow) {
+        if (this.isBuiltinProvider(id)) continue;
+        // 极少数情况：temporaryProviders 里混入了未知 id，按自定义样式渲染
       }
     }
 
-    // 渲染“添加服务商”部分
-    // 找出未配置的内置服务商
-    const unconfigured = allBuiltin.filter(p => !configuredIds.includes(p.id) && !this.temporaryProviders.includes(p.id));
-
-    if (unconfigured.length > 0) {
-      let selectedAddId = unconfigured[0].id;
-      
+    // "+ 添加内置 provider" 下拉：从内置清单里选未显示的
+    const unconfiguredBuiltin = BUILTIN_PROVIDERS.filter(p => !builtinIdsToShow.includes(p.id));
+    if (unconfiguredBuiltin.length > 0) {
+      let selectedBuiltinAdd = unconfiguredBuiltin[0].id;
       new Setting(containerEl)
-        .setName(isZh ? "+ 添加服务商凭证" : "+ Add Provider Credentials")
-        .setDesc(isZh ? "选择未配置的服务商并点击添加" : "Select an unconfigured provider to configure")
+        .setName(isZh ? "+ 添加内置 Provider" : "+ Add Built-in Provider")
+        .setDesc(isZh ? "选择一个未配置的内置服务商并点击添加。" : "Select an unconfigured built-in provider to add.")
         .addDropdown(dropdown => {
-          for (const p of unconfigured) {
+          for (const p of unconfiguredBuiltin) {
             dropdown.addOption(p.id, p.name);
           }
-          dropdown.setValue(selectedAddId)
-                  .onChange(val => {
-                    selectedAddId = val;
-                  });
+          dropdown.setValue(selectedBuiltinAdd).onChange(val => { selectedBuiltinAdd = val; });
         })
         .addButton(btn => {
-          btn.setButtonText(isZh ? "添加" : "Add")
-             .setCta()
-             .onClick(() => {
-               this.temporaryProviders.push(selectedAddId);
-               this.display();
-               // 找到刚才添加的那个 input 元素并 focus！
-               window.setTimeout(() => {
-                 const inputs = containerEl.querySelectorAll("input[type='password']");
-                 if (inputs.length > 0) {
-                   const lastInput = inputs[inputs.length - 1] as HTMLInputElement;
-                   lastInput.focus();
-                 }
-               }, 50);
-             });
+          btn.setButtonText(isZh ? "添加" : "Add").setCta().onClick(() => {
+            this.temporaryProviders.push(selectedBuiltinAdd);
+            this.display();
+            window.setTimeout(() => {
+              const inputs = containerEl.querySelectorAll("input[type='password']");
+              if (inputs.length > 0) (inputs[inputs.length - 1] as HTMLInputElement).focus();
+            }, 50);
+          });
         });
     }
 
+    // ─── 栏 2：自定义 Provider（来自 models.json）─────────────────────────
     new Setting(containerEl)
-      .setName(isZh ? "💡 需要接入其他模型？" : "💡 Need other model providers?")
+      .setName(isZh ? "自定义 Provider（来自 models.json）" : "Custom Providers (models.json)")
       .setDesc(isZh
-        ? "火山引擎 / 豆包、字节方舟等不在列表中的模型，可以通过已配置的模型提供商与 Pimate 对话，让 AI 帮你完成接入配置。"
-        : "For providers not listed here (Volcengine/Doubao, ByteArk, etc.), talk to Pimate through a configured provider and the AI can help you set them up.")
+        ? "这些服务商在 ~/.pi/agent/models.json 中定义（如硅基流动、火山引擎等 Pi 不内置的服务）。点击“添加”可使用向导生成配置。"
+        : "Defined in ~/.pi/agent/models.json (e.g. SiliconFlow, Volcengine — providers Pi doesn't ship built-in). Use the wizard to add one.")
+      .setHeading();
+
+    const customIds = Object.keys(customProviders).filter(id => !this.isBuiltinProvider(id));
+    // 也显示已配 key 但未在内置清单里的（可能是用户手动加的自定义 provider）
+    const extraConfigured = configuredIds.filter(id => !this.isBuiltinProvider(id) && !customIds.includes(id));
+    const allCustomIds = Array.from(new Set([...customIds, ...extraConfigured, ...this.temporaryProviders.filter(id => !this.isBuiltinProvider(id))]));
+
+    if (allCustomIds.length === 0) {
+      containerEl.createEl("p", {
+        text: isZh ? "暂无自定义 provider。点击下方按钮使用向导添加。" : "No custom providers yet. Use the button below to add one via wizard.",
+        cls: "setting-item-description"
+      });
+    } else {
+      for (const id of allCustomIds) {
+        this.renderCustomProviderRow(containerEl, id, customProviders, authData, isZh);
+      }
+    }
+
+    // "+ 添加自定义 provider" 按钮 → 打开向导
+    new Setting(containerEl)
+      .setName(isZh ? "+ 添加自定义 Provider（向导）" : "+ Add Custom Provider (Wizard)")
+      .setDesc(isZh
+        ? "打开向导填表生成 models.json 配置，适配硅基流动/火山引擎/OpenAI 兼容端点等。"
+        : "Open a wizard to generate models.json config for SiliconFlow/Volcengine/OpenAI-compatible endpoints.")
+      .addButton(btn => {
+        btn.setButtonText(isZh ? "打开向导" : "Open Wizard").setCta().onClick(() => {
+          new CustomProviderWizardModal(this.app, isZh, async (config) => {
+            this.applyCustomProviderConfig(config, isZh);
+          }).open();
+        });
+      });
+
+    // ─── 默认服务商下拉已在上文动态化：内置 ∪ 自定义 ──────────────────
 
     new Setting(containerEl)
       .setName(isZh ? "提示词默认设置" : "Prompt Defaults")
@@ -1013,6 +1031,257 @@ export class PiAgentSettingTab extends PluginSettingTab {
             });
           });
       });
+  }
+
+  // 渲染单个内置 provider 的凭证行（复用原有 key 输入/OAuth/断开逻辑）
+  private renderBuiltinCredentialRow(
+    containerEl: HTMLElement,
+    p: BuiltinProvider,
+    authData: Record<string, any>,
+    authPath: string,
+    isZh: boolean
+  ): void {
+    const id = p.id;
+    const item = authData[id];
+    const isOauth = item && item.type === "oauth";
+    const isConfigured = !!(item && (item.type === "oauth" || (item.key && item.key.trim())));
+
+    const setting = new Setting(containerEl)
+      .setName(p.name)
+      .setDesc(isOauth
+        ? (isZh ? "OAuth 已授权 / Connected" : "OAuth Authorized")
+        : (isConfigured
+          ? (isZh ? `API 密钥已配置 / Connected${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `API Key configured${p.envVar ? "  ·  env " + p.envVar : ""}`)
+          : (isZh ? `等待配置 API 密钥${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `Awaiting API Key${p.envVar ? "  ·  env " + p.envVar : ""}`)));
+
+    if (isOauth) {
+      setting.addButton(btn => {
+        btn.setButtonText(isZh ? "断开连接" : "Disconnect");
+        btn.buttonEl.addClass("mod-warning");
+        btn.onClick(() => {
+          void (async () => {
+            delete authData[id];
+            fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+            this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+            this.display();
+            const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+            for (const leaf of leaves) {
+              const view = leaf.view as any;
+              if (view && view.client) await view.client.restart();
+            }
+          })().catch((err: unknown) => {
+            console.error("[pimate] disconnect provider failed", err);
+            new Notice(err instanceof Error ? err.message : String(err));
+          });
+        });
+      });
+      return;
+    }
+
+    // OAuth 类型（openai-codex）提供 Device Code 登录按钮
+    if (p.oauth && id === "openai-codex") {
+      setting.addButton(btn => {
+        btn.setButtonText(isZh ? "Device Code 登录" : "Device Code Login").setCta().onClick(() => {
+          void this.startOpenAICodexDeviceCodeLogin().catch((err: unknown) => {
+            console.error("[pimate] device-code login failed", err);
+            new Notice(err instanceof Error ? err.message : String(err));
+          });
+        });
+      });
+    }
+
+    // 普通 API Key 输入框
+    setting.addText(text => {
+      let tempValue = "";
+      text.setPlaceholder(isConfigured ? (isZh ? "输入新密钥以替换..." : "Enter new key to replace...") : "sk-...")
+          .onChange((val) => { tempValue = val.trim(); });
+      text.inputEl.type = "password";
+      text.inputEl.addClass("pi-agent-input-api-key");
+
+      const saveValue = async () => {
+        if (tempValue) {
+          this.writeApiKey(id, tempValue);
+          this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+          this.display();
+          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+          for (const leaf of leaves) {
+            const view = leaf.view as any;
+            if (view && view.client) await view.client.restart();
+          }
+        }
+      };
+      text.inputEl.addEventListener("blur", () => void saveValue());
+      text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.key === "Enter") { e.preventDefault(); void saveValue(); }
+      });
+    });
+
+    setting.addButton(btn => {
+      btn.setButtonText(isZh ? "断开连接" : "Disconnect");
+      btn.buttonEl.addClass("mod-warning");
+      btn.onClick(() => {
+        void (async () => {
+          delete authData[id];
+          fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+          this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+          this.display();
+          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+          for (const leaf of leaves) {
+            const view = leaf.view as any;
+            if (view && view.client) await view.client.restart();
+          }
+        })().catch((err: unknown) => {
+          console.error("[pimate] disconnect provider failed", err);
+          new Notice(err instanceof Error ? err.message : String(err));
+        });
+      });
+    });
+  }
+
+  // 渲染单个自定义 provider 的行（显示模型数量+列表+删除）
+  private renderCustomProviderRow(
+    containerEl: HTMLElement,
+    id: string,
+    customProviders: Record<string, any>,
+    authData: Record<string, any>,
+    isZh: boolean
+  ): void {
+    const prov = customProviders[id] || {};
+    const models: any[] = Array.isArray(prov.models) ? prov.models : [];
+    const modelCount = models.length;
+    const baseUrl = prov.baseUrl || "";
+    const apiType = prov.api || "";
+    const hasKey = !!(authData[id] && authData[id].key);
+
+    const descParts: string[] = [];
+    if (baseUrl) descParts.push(baseUrl);
+    if (apiType) descParts.push(`api: ${apiType}`);
+    descParts.push(isZh ? `${modelCount} 个模型` : `${modelCount} model${modelCount === 1 ? "" : "s"}`);
+    descParts.push(hasKey ? (isZh ? "key 已配置" : "key set") : (isZh ? "⚠ 未配 key" : "⚠ no key"));
+
+    const setting = new Setting(containerEl)
+      .setName(id + (hasKey ? "" : " ⚠"))
+      .setDesc(descParts.join("  ·  "));
+
+    // 如果有模型，额外展开模型列表
+    if (modelCount > 0) {
+      const modelListEl = setting.descEl.createEl("div", { cls: "pi-agent-custom-model-list" });
+      for (const m of models) {
+        const mid = typeof m === "string" ? m : (m.id || "");
+        const mname = typeof m === "object" && m.name ? m.name : "";
+        const item = modelListEl.createEl("div", { cls: "pi-agent-custom-model-item" });
+        item.createEl("span", { cls: "pi-agent-custom-model-id", text: mid });
+        if (mname && mname !== mid) {
+          item.createEl("span", { cls: "pi-agent-custom-model-name", text: mname });
+        }
+        if (typeof m === "object" && m.reasoning) {
+          item.createEl("span", { cls: "pi-agent-custom-model-tag", text: isZh ? "推理" : "reasoning" });
+        }
+      }
+    }
+
+    // API Key 输入（写入 auth.json）
+    setting.addText(text => {
+      let tempValue = "";
+      text.setPlaceholder(hasKey ? (isZh ? "输入新密钥以替换..." : "Enter new key to replace...") : "sk-...")
+          .onChange((val) => { tempValue = val.trim(); });
+      text.inputEl.type = "password";
+      text.inputEl.addClass("pi-agent-input-api-key");
+      const saveValue = async () => {
+        if (tempValue) {
+          this.writeApiKey(id, tempValue);
+          this.display();
+          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+          for (const leaf of leaves) {
+            const view = leaf.view as any;
+            if (view && view.client) await view.client.restart();
+          }
+        }
+      };
+      text.inputEl.addEventListener("blur", () => void saveValue());
+      text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.key === "Enter") { e.preventDefault(); void saveValue(); }
+      });
+    });
+
+    // 删除按钮（从 models.json 和 auth.json 同时删除）
+    setting.addButton(btn => {
+      btn.setButtonText(isZh ? "删除" : "Delete");
+      btn.buttonEl.addClass("mod-warning");
+      btn.onClick(() => {
+        const confirmed = window.confirm(isZh
+          ? `确定删除自定义 provider “${id}”？\n将从 models.json 和 auth.json 中移除该 provider。`
+          : `Delete custom provider "${id}"?\nIt will be removed from both models.json and auth.json.`);
+        if (!confirmed) return;
+        void (async () => {
+          const providers = this.readModelsJson();
+          delete providers[id];
+          this.writeModelsJson(providers);
+          // 同步删 auth.json
+          const aPath = this.getAuthJsonPath();
+          if (fs.existsSync(aPath)) {
+            try {
+              const a = JSON.parse(fs.readFileSync(aPath, "utf-8")) || {};
+              delete a[id];
+              fs.writeFileSync(aPath, JSON.stringify(a, null, 2), "utf-8");
+            } catch (e) { console.error("清理 auth.json 失败:", e); }
+          }
+          this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
+          this.display();
+          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+          for (const leaf of leaves) {
+            const view = leaf.view as any;
+            if (view && view.client) await view.client.restart();
+          }
+        })().catch((err: unknown) => {
+          console.error("[pimate] delete custom provider failed", err);
+          new Notice(err instanceof Error ? err.message : String(err));
+        });
+      });
+    });
+  }
+
+  // 应用向导生成的自定义 provider 配置（写入 models.json + auth.json）
+  private applyCustomProviderConfig(config: CustomProviderConfig, isZh: boolean): void {
+    const providers = this.readModelsJson();
+
+    // 构造 provider 对象
+    const prov: Record<string, any> = {
+      baseUrl: config.baseUrl.trim(),
+      api: config.apiType,
+    };
+    // API Key：写入 auth.json，models.json 里用 $ENV 占位或直接写 key
+    const apiKey = config.apiKey.trim();
+    if (apiKey) {
+      // 直接把 key 写进 models.json（最简单可靠，跟 siliconflow 现状一致）
+      prov.apiKey = apiKey;
+      // 同时写 auth.json 以便 UI 显示已配置
+      this.writeApiKey(config.providerId, apiKey);
+    }
+    // compat 选项
+    if (config.supportsDeveloperRole === false) {
+      prov.compat = { ...(prov.compat || {}), supportsDeveloperRole: false };
+    }
+    // 模型列表
+    prov.models = config.models.filter(m => m.id.trim());
+
+    providers[config.providerId] = prov;
+    this.writeModelsJson(providers);
+
+    new Notice(isZh
+      ? `已添加自定义 provider “${config.providerId}”到 models.json。重启 Pimate 生效。`
+      : `Custom provider "${config.providerId}" added to models.json. Restart Pimate to apply.`);
+
+    this.display();
+
+    // 联动重启聊天视图
+    const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
+    for (const leaf of leaves) {
+      const view = leaf.view as any;
+      if (view && view.client) {
+        void view.client.restart().catch((e: unknown) => console.error("[pimate] restart failed", e));
+      }
+    }
   }
 
   // 辅助渲染单个技能项目
@@ -1366,6 +1635,198 @@ export class PiAgentSettingTab extends PluginSettingTab {
       };
       signal.addEventListener("abort", onAbort, { once: true });
     });
+  }
+}
+
+// ─── 自定义 Provider 向导 ────────────────────────────────────────────────────
+
+interface CustomProviderConfig {
+  providerId: string;       // 如 "siliconflow"
+  displayName?: string;     // 如 "硅基流动"（可选，仅提示用）
+  baseUrl: string;          // 如 "https://api.siliconflow.cn/v1"
+  apiType: string;          // openai-completions / anthropic-messages / ...
+  apiKey: string;           // 可为空
+  supportsDeveloperRole?: boolean;  // 默认 true；false 时添加 compat
+  models: { id: string; name?: string; reasoning?: boolean }[];
+}
+
+class CustomProviderWizardModal extends Modal {
+  private isZh: boolean;
+  private onSubmit: (config: CustomProviderConfig) => void;
+
+  // 表单字段
+  private idInput!: HTMLInputElement;
+  private nameInput!: HTMLInputElement;
+  private baseUrlInput!: HTMLInputElement;
+  private apiTypeSelect!: HTMLSelectElement;
+  private apiKeyInput!: HTMLInputElement;
+  private devRoleCheckbox!: HTMLInputElement;
+  private modelsTextarea!: HTMLTextAreaElement;
+
+  constructor(app: App, isZh: boolean, onSubmit: (config: CustomProviderConfig) => void) {
+    super(app);
+    this.isZh = isZh;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("pi-agent-wizard-modal");
+    this.titleEl.setText(this.isZh ? "添加自定义 Provider" : "Add Custom Provider");
+
+    const t = (zh: string, en: string) => (this.isZh ? zh : en);
+
+    // 说明
+    contentEl.createEl("p", {
+      text: t(
+        "填写以下字段生成 ~/.pi/agent/models.json 配置。适用于硅基流动、火山引擎、OpenAI 兼容端点等 Pi 不内置的服务商。",
+        "Fill in the fields below to generate ~/.pi/agent/models.json config. For providers Pi doesn't ship built-in (SiliconFlow, Volcengine, OpenAI-compatible endpoints, etc.)."
+      ),
+      cls: "setting-item-description"
+    });
+
+    // Provider ID
+    this.addField(t("Provider ID", "Provider ID"), t("如 siliconflow（英文标识符）", "e.g. siliconflow"), "text", "siliconflow", el => this.idInput = el as HTMLInputElement);
+
+    // 显示名（可选）
+    this.addField(t("显示名（可选）", "Display name (optional)"), t("如 硅基流动", "e.g. SiliconFlow"), "text", "", el => this.nameInput = el as HTMLInputElement);
+
+    // Base URL
+    this.addField(t("Base URL", "Base URL"), t("如 https://api.siliconflow.cn/v1", "e.g. https://api.siliconflow.cn/v1"), "text", "https://api.siliconflow.cn/v1", el => this.baseUrlInput = el as HTMLInputElement);
+
+    // API 协议
+    const apiRow = contentEl.createDiv({ cls: "pi-agent-wizard-field" });
+    apiRow.createEl("label", { text: t("API 协议", "API protocol"), cls: "pi-agent-wizard-label" });
+    this.apiTypeSelect = apiRow.createEl("select", { cls: "dropdown pi-agent-wizard-select" });
+    const apiTypes = [
+      { id: "openai-completions", name: t("OpenAI Chat Completions（最常用）", "OpenAI Chat Completions (most common)") },
+      { id: "anthropic-messages", name: t("Anthropic Messages", "Anthropic Messages") },
+      { id: "openai-responses", name: "OpenAI Responses" },
+      { id: "google-generative-ai", name: "Google Generative AI" },
+    ];
+    for (const at of apiTypes) this.apiTypeSelect.createEl("option", { value: at.id, text: at.name });
+    this.apiTypeSelect.value = "openai-completions";
+    apiRow.createEl("div", { text: t("大多数 OpenAI 兼容服务选第一项。", "Most OpenAI-compatible services use the first option."), cls: "setting-item-description" });
+
+    // API Key
+    this.addField(t("API Key", "API Key"), t("可留空，稍后在列表里填。", "Optional; can fill in later in the list."), "password", "", el => this.apiKeyInput = el as HTMLInputElement);
+
+    // compat: supportsDeveloperRole
+    const compatRow = contentEl.createDiv({ cls: "pi-agent-wizard-field" });
+    this.devRoleCheckbox = compatRow.createEl("input", { type: "checkbox" });
+    this.devRoleCheckbox.checked = true;
+    compatRow.createEl("label", {
+      text: t("支持 developer role", "Supports developer role"),
+      cls: "pi-agent-wizard-label"
+    });
+    compatRow.createEl("div", {
+      text: t(
+        "若服务商不认 OpenAI 的 developer role（如硅基流动会报 400），取消勾选此项。默认勾选。",
+        "Uncheck if the provider rejects OpenAI's developer role (e.g. SiliconFlow returns 400). Checked by default."
+      ),
+      cls: "setting-item-description"
+    });
+
+    // 模型列表
+    const modelRow = contentEl.createDiv({ cls: "pi-agent-wizard-field" });
+    modelRow.createEl("label", {
+      text: t("模型列表（每行一个）", "Models (one per line)"),
+      cls: "pi-agent-wizard-label"
+    });
+    this.modelsTextarea = modelRow.createEl("textarea", { cls: "pi-agent-wizard-textarea" });
+    this.modelsTextarea.rows = 5;
+    this.modelsTextarea.placeholder = t(
+      "deepseek-ai/DeepSeek-V4-Flash\nzai-org/GLM-5.2 | GLM-5.2\ndeepseek-ai/DeepSeek-V4-Pro | DeepSeek V4 Pro | reasoning",
+      "deepseek-ai/DeepSeek-V4-Flash\nzai-org/GLM-5.2 | GLM-5.2\ndeepseek-ai/DeepSeek-V4-Pro | DeepSeek V4 Pro | reasoning"
+    );
+    modelRow.createEl("div", {
+      text: t(
+        "格式：模型ID  或  模型ID | 显示名  或  模型ID | 显示名 | reasoning",
+        "Format: model-id  or  model-id | display name  or  model-id | display name | reasoning"
+      ),
+      cls: "setting-item-description"
+    });
+
+    // 按钮
+    const btnRow = contentEl.createDiv({ cls: "pi-agent-wizard-buttons" });
+    const cancelBtn = btnRow.createEl("button", { text: t("取消", "Cancel") });
+    cancelBtn.onclick = () => this.close();
+    const submitBtn = btnRow.createEl("button", { text: t("生成配置", "Generate"), cls: "mod-cta" });
+    submitBtn.onclick = () => this.handleSubmit();
+  }
+
+  private addField(
+    label: string,
+    placeholder: string,
+    type: string,
+    defaultValue: string,
+    register: (el: HTMLInputElement) => void
+  ): void {
+    const row = this.contentEl.createDiv({ cls: "pi-agent-wizard-field" });
+    row.createEl("label", { text: label, cls: "pi-agent-wizard-label" });
+    const input = row.createEl("input", { type, cls: "text-input pi-agent-wizard-input" });
+    input.placeholder = placeholder;
+    input.value = defaultValue;
+    register(input);
+  }
+
+  private handleSubmit(): void {
+    const id = this.idInput.value.trim();
+    const baseUrl = this.baseUrlInput.value.trim();
+    const apiType = this.apiTypeSelect.value;
+    const apiKey = this.apiKeyInput.value.trim();
+    const supportsDeveloperRole = this.devRoleCheckbox.checked;
+    const displayName = this.nameInput.value.trim();
+
+    if (!id) {
+      new Notice(this.isZh ? "Provider ID 不能为空" : "Provider ID is required");
+      this.idInput.focus();
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+      new Notice(this.isZh ? "Provider ID 只能含字母数字、下划线、连字符" : "Provider ID may only contain letters, digits, _ and -");
+      this.idInput.focus();
+      return;
+    }
+    if (!baseUrl) {
+      new Notice(this.isZh ? "Base URL 不能为空" : "Base URL is required");
+      this.baseUrlInput.focus();
+      return;
+    }
+
+    // 解析模型列表
+    const models: { id: string; name?: string; reasoning?: boolean }[] = [];
+    const lines = this.modelsTextarea.value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      const parts = line.split("|").map(s => s.trim());
+      const mid = parts[0];
+      if (!mid) continue;
+      const m: { id: string; name?: string; reasoning?: boolean } = { id: mid };
+      if (parts[1]) m.name = parts[1];
+      if (parts.includes("reasoning") || parts.includes("推理")) m.reasoning = true;
+      models.push(m);
+    }
+    if (models.length === 0) {
+      new Notice(this.isZh ? "至少需要一个模型" : "At least one model is required");
+      this.modelsTextarea.focus();
+      return;
+    }
+
+    this.onSubmit({
+      providerId: id,
+      displayName: displayName || undefined,
+      baseUrl,
+      apiType,
+      apiKey,
+      supportsDeveloperRole,
+      models
+    });
+    this.close();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
 

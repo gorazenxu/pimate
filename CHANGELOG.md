@@ -12,6 +12,24 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+- 改：凭证配置区全面重构 —— 以「内置 vs 自定义」两栏区分
+  - 新增 `BUILTIN_PROVIDERS` 清单（与 `pi-ai` env-api-keys 对齐），覆盖 Anthropic / OpenAI / Google / Groq / xAI / OpenRouter / Mistral / Together / Fireworks / NVIDIA / DeepSeek / Z.ai / Kimi / Moonshot / Xiaomi 等 19+ provider
+  - 「添加服务商凭证」下拉拆成两栏：栏 1 内置（配 key 即用，含 OAuth），栏 2 自定义（来自 `models.json`）
+  - 「默认服务商」下拉动态化：内置 ∪ 自定义，供用户一键切到自己的 zhipu / volcengine-ark 等
+  - 新增「自定义 Provider 向导」Modal（`pi-agent-wizard-modal`）：表单输入 provider id / 名称 / baseUrl / API key / 模型列表（多条目），确认后写入 `models.json`
+  - 凭证行下展开 `pi-agent-custom-model-list`：列出当前 provider 在 models.json 里实际配置的模型 id（`pi-agent-custom-model-id` / `-name` / `-tag` 样式）
+- 配：新增 `sync-plugin.sh` 同步脚本
+  - 源仓 `obsidian-pi-agent/` 根目录下的 helper：跑 `npm run build` 后 `cp` 到 vault 插件目录，再用 md5 校验一致性
+  - 避免手动 `cp` 遗漏
+- 样式：`styles.css` 新增 72 行，自定义 provider 凭证行 + 向导 modal 专用样式
+- 修：选项 chip 解析器过于激进
+  - 原 `parseOptionsFromMessage` 把 `[-*•]` 开头的普通 bullet 也当选项，回复里随手列点就跳出"快速选项"，给用户造成困扰
+  - 收紧 regex：只识别显式编号（`1.` / `2)` / `a.` / `一、` 等）
+  - `asksQuestion` 由软标签改为硬性条件：必须含 `?` / `吗` / `请选择`，否则不渲染 chip
+  - 保留了 AI 真问"选 A/B/C？"的场景
+
+---
+
 ## 📦 v1.0.35
 
 - 新：在设置面板添加"智谱 (Zhipu GLM)"服务商

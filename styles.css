@@ -2636,3 +2636,75 @@ summary.pi-agent-history-group-title:hover {
 .pi-agent-input-modal-input {
   width: 100%;
 }
+
+/* ─── 自定义 Provider 凭证行：模型列表展开样式 ─────────────────────────── */
+.pi-agent-custom-model-list {
+  margin-top: 8px;
+  padding: 6px 0 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px dashed var(--background-modifier-border);
+}
+.pi-agent-custom-model-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-ui-smaller);
+  padding: 2px 0;
+  flex-wrap: wrap;
+}
+.pi-agent-custom-model-id {
+  font-family: var(--font-monospace);
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.pi-agent-custom-model-name {
+  color: var(--text-muted);
+}
+.pi-agent-custom-model-tag {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-accent);
+  border: 1px solid var(--text-accent);
+  padding: 0 4px;
+  border-radius: 3px;
+  opacity: 0.8;
+}
+
+/* ─── 自定义 Provider 向导 Modal ──────────────────────────────────────── */
+.pi-agent-wizard-modal {
+  max-width: 560px;
+}
+.pi-agent-wizard-modal .modal-content {
+  padding: 16px 20px;
+}
+.pi-agent-wizard-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.pi-agent-wizard-label {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+.pi-agent-wizard-input,
+.pi-agent-wizard-select {
+  width: 100%;
+}
+.pi-agent-wizard-textarea {
+  width: 100%;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  resize: vertical;
+}
+.pi-agent-wizard-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}

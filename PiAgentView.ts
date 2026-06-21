@@ -1382,7 +1382,9 @@ export class PiAgentView extends ItemView {
     const lines = text.split("\n").map((l) => l.trim());
     let current: string[] = [];
     let best: string[] = [];
-    const optionRe = /^(?:\d+[.)]|[一二三四五六七八九十]+[、.)]|[a-zA-Z][.)]|[-*•])\s+(.+)$/;
+    // 只识别显式编号（1. / 2) / a. / 一、 等）；不再把普通 bullet（- * •）
+    // 误判为选项，避免回复里随手列点 → 跳出快速选项。
+    const optionRe = /^(?:\d+[.)]|[一二三四五六七八九十]+[、.)]|[a-zA-Z][.)])\s+(.+)$/;
     for (const line of lines) {
       if (line === "") {
         if (current.length > best.length) best = current;
@@ -1399,11 +1401,12 @@ export class PiAgentView extends ItemView {
     }
     if (current.length > best.length) best = current;
     if (best.length < 2) return null;
-    // Optional: verify the assistant also asked a question in the message
-    // somewhere — this is just a label hint, not a hard requirement.
+    // 要求消息里同时有提问信号（问号 / "要...吗" / "请选择"），避免把
+    // 1. 介绍 → 2. 详情 → 3. 总结 这种纯编号列表也当成选项。
     const asksQuestion = lines.some(
       (l) => /[?？]\s*$/.test(l) || /要.{0,6}[吗？]/.test(l) || /请选择|请告诉我/.test(l)
     );
+    if (!asksQuestion) return null;
     return { options: best.slice(0, 8), isQuestion: asksQuestion };
   }
 
