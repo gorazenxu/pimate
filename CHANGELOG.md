@@ -10,8 +10,13 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
-## 🛠 
-/ Uncommitted
+## 🛠 Working / Uncommitted
+
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.37 (unreleased)
 
 - 配：加 commit message 模板 `.gitmessage`
   - 规范：subject 限定 50 字内、type 前缀（新/修/改/配/样式/清/文档）、body 多行 bullet 列明改了什么
@@ -22,6 +27,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
   - bug 模板：复现步骤 / 预期 / 实际 / 环境（插件 / Obsidian / Pi / 模型） / DevTools console log / 截图
   - config.yml 关闭空 issue、加 contact_links 指向 Pi / Obsidian 插件文档避免噪音
   - README 补 "Reporting Issues" 段，列出反馈前要准备的 6 项信息
+- 修：选项 chip 解析器过于激进
+  - 原 `parseOptionsFromMessage` 把 `[-*•]` 开头的普通 bullet 也当选项，回复里随手列点就跳出"快速选项"
+  - 收紧 regex：只识别显式编号（`1.` / `2)` / `a.` / `一、` 等）
+  - 跟踪块位置，限制为「最后一个块」后面**紧跟**的下一行必须是问题
+  - 问题须以 `?` / `？` 结尾或含"选哪个"类
+  - 排除 `要...吗` yes/no 模式
 
 ---
 
