@@ -1,0 +1,22 @@
+# <type(scope)>: <subject in 50 chars, English or 中文>
+# 空行
+# <body: 多行说明，每件事一行的 "- xxx" 形式>
+# - 改了什么
+# - 为什么改
+# - 影响范围 / 破坏性
+#
+# Types:
+#   新/Add    - 新功能
+#   修/Fix    - 修 bug
+#   改/Refactor - 重构（不改外部行为）
+#   配/Config - 配置文件 / 脚本 / CI
+#   样式/Style - CSS / 视觉
+#   清/Clean  - 删除死代码 / 注释
+#   文档/Docs  - README / CHANGELOG / 注释
+#
+# 范例:
+#   修(option-chip): 不再把普通 bullet 误判为选项
+#
+#   - parseOptionsFromMessage regex 去掉 `[-*•]`，只识别显式编号
+#   - asksQuestion 由软标签改为硬性条件
+#   - 保留 AI 真问"选 A/B/C？"的场景

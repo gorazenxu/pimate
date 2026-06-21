@@ -1380,34 +1380,54 @@ export class PiAgentView extends ItemView {
   ): { options: string[]; isQuestion: boolean } | null {
     if (!text) return null;
     const lines = text.split("\n").map((l) => l.trim());
-    let current: string[] = [];
-    let best: string[] = [];
     // 只识别显式编号（1. / 2) / a. / 一、 等）；不再把普通 bullet（- * •）
     // 误判为选项，避免回复里随手列点 → 跳出快速选项。
     const optionRe = /^(?:\d+[.)]|[一二三四五六七八九十]+[、.)]|[a-zA-Z][.)])\s+(.+)$/;
-    for (const line of lines) {
+
+    // 找到所有连续选项块及位置（不止一个，可能存在历史/总结 + 提问）
+    type Block = { startIdx: number; endIdx: number; options: string[] };
+    const blocks: Block[] = [];
+    let cur: Block | null = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       if (line === "") {
-        if (current.length > best.length) best = current;
-        current = [];
+        if (cur && cur.options.length >= 2) blocks.push(cur);
+        cur = null;
         continue;
       }
       const m = line.match(optionRe);
       if (m) {
-        current.push(m[1].trim());
+        if (!cur) cur = { startIdx: i, endIdx: i, options: [] };
+        cur.endIdx = i;
+        cur.options.push(m[1].trim());
       } else {
-        if (current.length > best.length) best = current;
-        current = [];
+        if (cur && cur.options.length >= 2) blocks.push(cur);
+        cur = null;
       }
     }
-    if (current.length > best.length) best = current;
-    if (best.length < 2) return null;
-    // 要求消息里同时有提问信号（问号 / "要...吗" / "请选择"），避免把
-    // 1. 介绍 → 2. 详情 → 3. 总结 这种纯编号列表也当成选项。
-    const asksQuestion = lines.some(
-      (l) => /[?？]\s*$/.test(l) || /要.{0,6}[吗？]/.test(l) || /请选择|请告诉我/.test(l)
-    );
-    if (!asksQuestion) return null;
-    return { options: best.slice(0, 8), isQuestion: asksQuestion };
+    if (cur && cur.options.length >= 2) blocks.push(cur);
+    if (blocks.length === 0) return null;
+
+    const last = blocks[blocks.length - 1];
+
+    // 要求：选项块后面**紧跟**的下一行是非空问题。
+    // - 如果列表后面还有别的内容（其他段、表格、列表），不认为是在问选哪个
+    // - 问题不能是 yes/no（不要 `要...吗` 模式），必须真的是在问选哪个
+    let nextLine: string | null = null;
+    for (let i = last.endIdx + 1; i < lines.length; i++) {
+      if (lines[i] !== "") {
+        nextLine = lines[i];
+        break;
+      }
+    }
+    if (nextLine === null) return null;
+
+    const isSelectionQuestion =
+      /[?？]\s*$/.test(nextLine) || // 以 ? / ？ 结尾（开放或选择问句）
+      /请选择|请告诉我|选哪个|用哪个|choose|pick|select/i.test(nextLine); // 显式选择短语
+    if (!isSelectionQuestion) return null;
+
+    return { options: last.options.slice(0, 8), isQuestion: true };
   }
 
   private renderOptionChips(

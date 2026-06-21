@@ -10,9 +10,20 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
-## 🛠 Working / Uncommitted
+## 🛠 
+/ Uncommitted
 
-_当前没有未提交的修改。_
+- 配：加 commit message 模板 `.gitmessage`
+  - 规范：subject 限定 50 字内、type 前缀（新/修/改/配/样式/清/文档）、body 多行 bullet 列明改了什么
+  - 已 `git config commit.template .gitmessage`，以后 `git commit` 不带 -m 会进编辑器带模板
+  - 后续 commit 都按多段 body 写
+- 配：加 Issue 模板 + README 反馈段
+  - `.github/ISSUE_TEMPLATE/bug.md` / `feature.md` / `config.yml`
+  - bug 模板：复现步骤 / 预期 / 实际 / 环境（插件 / Obsidian / Pi / 模型） / DevTools console log / 截图
+  - config.yml 关闭空 issue、加 contact_links 指向 Pi / Obsidian 插件文档避免噪音
+  - README 补 "Reporting Issues" 段，列出反馈前要准备的 6 项信息
+
+---
 
 ---
 
@@ -33,6 +44,11 @@ _当前没有未提交的修改。_
   - 收紧 regex：只识别显式编号（`1.` / `2)` / `a.` / `一、` 等）
   - `asksQuestion` 由软标签改为硬性条件：必须含 `?` / `吗` / `请选择`，否则不渲染 chip
   - 保留了 AI 真问"选 A/B/C？"的场景
+- 修：选项 chip 仍有误判（`要 commit 吗？` 也会跳）—— 进一步收紧
+  - 跟踪每个选项块的位置，限制为「最后一个块」后面**紧跟**的下一行必须是问题
+  - 如果列表后还有其他段落 / 表格 / 列表，就不是问选哪个
+  - 问题需是「选哪个」式：必须以 `?` / `？` 结尾，或含 `请选择` / `选哪个` / `choose` / `pick` / `select`
+  - 排除 `要...吗` yes/no 模式：这种是「是/否」问句，不是选项选择
 
 ---
 

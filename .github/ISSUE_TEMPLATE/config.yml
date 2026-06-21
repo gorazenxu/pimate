@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Pi Coding Agent 文档
+    url: https://github.com/earendil-works/pi-coding-agent
+    about: Pi 后端配置 / RPC / 模型问题
+  - name: Obsidian 插件开发
+    url: https://docs.obsidian.md/Plugins/Getting+started/
+    about: Obsidian 插件 API / Plugin 框架

@@ -158,6 +158,24 @@ Pimate uses a few sensitive capabilities so it can act as a local coding/writing
 
 Because Pimate embeds a local agent, review commands and edits before approving them. Your API keys and vault content are handled locally by the plugin/Pi CLI except for requests you intentionally send to your selected AI provider.
 
+## Reporting Issues
+
+Found a bug or have a feature request? Open an issue:
+
+👉 **[github.com/gorazenxu/pimate/issues](https://github.com/gorazenxu/pimate/issues)**
+
+**Before opening a bug report**, please collect the following:
+
+- **Pimate version** — Settings → About, or the tag in the [releases list](https://github.com/gorazenxu/pimate/releases)
+- **Obsidian version** — Settings → About
+- **OS** — Windows / macOS / Linux + version
+- **Pi version** — run `pi --version` in your terminal
+- **Provider + model** — e.g. `minimax-cn / MiniMax-M3`
+- **Reproduction steps** — minimal example that triggers the bug
+- **Console logs** — open DevTools (`Ctrl+Shift+I` / `Cmd+Option+I`) → Console tab; copy errors and the red stack traces
+
+For Pi-backend / RPC / model-related problems, check the [Pi Coding Agent repo](https://github.com/earendil-works/pi-coding-agent) first — they may already be tracked there.
+
 ## License
 
 GNU General Public License v3.0
