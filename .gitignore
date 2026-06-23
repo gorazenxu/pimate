@@ -4,3 +4,4 @@ node_modules/
 pnpm-lock.yaml
 pnpm-workspace.yaml
 .gitconfig.release
+.claude/

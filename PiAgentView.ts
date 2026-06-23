@@ -863,7 +863,10 @@ export class PiAgentView extends ItemView {
       tab.restored = false;
     }
 
-    if (tab.client?.isRunning()) return;
+    if (tab.client?.isRunning()) {
+      await this.applyTabRuntimePreferences(tab);
+      return;
+    }
 
     const client = this.createClient(tab);
     tab.client = client;
@@ -1226,7 +1229,7 @@ export class PiAgentView extends ItemView {
           this.thinkingStartedAt = Date.now();
           this.currentThinkingBlock =
             message.contentEl.createDiv(
-              "pi-agent-thinking-block is-collapsed"
+              "pi-agent-thinking-block"
             );
           const header = this.currentThinkingBlock.createDiv(
             "pi-agent-thinking-header"
@@ -1275,6 +1278,7 @@ export class PiAgentView extends ItemView {
           this.thinkingTimer = null;
         }
         if (this.currentThinkingBlock) {
+          this.currentThinkingBlock.addClass("is-collapsed");
           const header =
             this.currentThinkingBlock.querySelector(
               ".pi-agent-thinking-header"
@@ -2513,7 +2517,7 @@ export class PiAgentView extends ItemView {
   private async newSession(): Promise<void> {
     const tab = this.activeTab;
     if (!tab) return;
-    
+
     // 清空当前 Tab 绑定的会话参数
     tab.sessionFile = undefined;
     tab.sessionId = undefined;
@@ -2665,6 +2669,8 @@ export class PiAgentView extends ItemView {
         active.sessionFile = session.path;
         active.sessionId = undefined;
         active.restored = true;
+
+        await this.applyTabRuntimePreferences(active);
 
         this.resetActiveRenderState();
         if (this.chatContainer) this.chatContainer.empty();
@@ -3968,16 +3974,14 @@ export class PiAgentView extends ItemView {
   }
 
   private async persistSessionTabs(): Promise<void> {
-    this.plugin.settings.sessionTabs = this.tabs
-      .filter((tab) => tab.sessionFile || tab.modelProvider || tab.modelId || (typeof tab.thinkingLevel === "string"))
-      .map((tab) => ({
-        label: tab.label,
-        sessionFile: tab.sessionFile,
-        sessionId: tab.sessionId,
-        modelProvider: tab.modelProvider,
-        modelId: tab.modelId,
-        thinkingLevel: tab.thinkingLevel,
-      }));
+    this.plugin.settings.sessionTabs = this.tabs.map((tab) => ({
+      label: tab.label,
+      sessionFile: tab.sessionFile,
+      sessionId: tab.sessionId,
+      modelProvider: tab.modelProvider,
+      modelId: tab.modelId,
+      thinkingLevel: tab.thinkingLevel,
+    }));
     this.plugin.settings.activeSessionFile = this.activeTab?.sessionFile || "";
     await this.plugin.saveSettings();
   }
@@ -4386,6 +4390,23 @@ export class PiAgentView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    if (this.thinkingTimer) {
+      window.clearInterval(this.thinkingTimer);
+      this.thinkingTimer = null;
+    }
+    if (this.renderTimeout) {
+      window.clearTimeout(this.renderTimeout);
+      this.renderTimeout = null;
+    }
+    if (this.speedTimer) {
+      window.clearInterval(this.speedTimer);
+      this.speedTimer = null;
+    }
+    if (this.speedHideTimer) {
+      window.clearTimeout(this.speedHideTimer);
+      this.speedHideTimer = null;
+    }
+
     await this.persistSessionTabs();
     for (const tab of this.tabs) {
       await tab.client?.destroy();

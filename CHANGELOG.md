@@ -16,6 +16,23 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.39 (unreleased)
+
+- 修：思考过程状态丢失与显示缺陷
+  - **症状**：切换 Tab 或热切换历史会话后，支持 thinking 的模型（如 MiniMax-M3）思考状态莫名变回 `off`；流式思考过程默认折叠收起不可见
+  - **根因**：
+    - `ensureTabClient` 在 Tab 进程已运行时直接 return，跳过 preferences 对齐，导致切换后前后端状态脱节
+    - `switchSession` 成功后未重新灌入 preferences，后端重放历史后状态变默认值
+    - `thinking_start` 写死 `is-collapsed` 类名，CSS 默认 `display: none`，流式过程被隐藏
+  - **修法**：
+    - `ensureTabClient` 快速返回前先调用 `applyTabRuntimePreferences(tab)` 强对齐
+    - `switchSession` 成功后立即 `applyTabRuntimePreferences(active)` 覆盖重放后的默认状态
+    - `thinking_start` 移除 `is-collapsed` → 默认展开流式思维
+    - `thinking_end` 自动添加 `is-collapsed` → 正文输出时自动折叠
+    - 顺手：`persistSessionTabs` 简化过滤（不再要求必须持久化有值的 tab）；`onClose` 清理所有 timer 防泄漏
+
+---
+
 ## 📦 v1.0.38 (unreleased)
 
 - 修：添加内置 provider 后焦点跳到自定义 model 列表最后一个 input
