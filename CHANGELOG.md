@@ -16,6 +16,16 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.40 (unreleased)
+
+- 优：Token Usage 统计加入增量缓存
+  - 拆 `scanUsageRange` 为 `scanUsageIncremental` + `aggregateUsage`：先按文件 mtime/size 复用缓存，只解析新增行；按时间范围过滤在内存里做
+  - 缓存写到 `~/.pi/agent/usage-cache.json`，按文件记录 `processedLines`，下次启动接着追加；文件截断/轮转（size 变小）触发全量重建
+  - 删除过的 session 文件不清理 records（历史保留参与统计）
+  - 切时间预设只调 `render()`，避免重复扫盘
+
+---
+
 ## 📦 v1.0.39 (unreleased)
 
 - 修：思考过程状态丢失与显示缺陷

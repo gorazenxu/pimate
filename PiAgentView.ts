@@ -13,8 +13,8 @@ import {
   Menu,
   setIcon,
 } from "obsidian";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "fs";
-import { basename, dirname, join } from "path";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { basename, dirname, join, relative } from "path";
 import { homedir } from "os";
 import type PiAgentPlugin from "./main";
 import {
@@ -5804,8 +5804,143 @@ function buildRange(
   }
 }
 
-function scanUsageRange(
+// 一条精简的用量记录（按文件持久化，供增量缓存与范围过滤复用）：
+// [ts, provider, model, input, output, cacheRead, cacheWrite, total, cost]
+type UsageRecord = [number, string, string, number, number, number, number, number, number];
+
+interface UsageCacheFile {
+  size: number;
+  mtimeMs: number;
+  processedLines: number;
+  records: UsageRecord[];
+}
+
+interface UsageCache {
+  version: number;
+  perFile: Record<string, UsageCacheFile>;
+}
+
+const USAGE_CACHE_VERSION = 1;
+
+function usageCachePath(): string {
+  return join(homedir(), ".pi", "agent", "usage-cache.json");
+}
+
+function loadUsageCache(cachePath: string): UsageCache | null {
+  try {
+    if (!existsSync(cachePath)) return null;
+    const raw = readFileSync(cachePath, "utf8");
+    const c = JSON.parse(raw) as UsageCache;
+    if (!c || c.version !== USAGE_CACHE_VERSION || !c.perFile) return null;
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+function saveUsageCache(cachePath: string, cache: UsageCache): void {
+  try {
+    writeFileSync(cachePath, JSON.stringify(cache), "utf8");
+  } catch {
+    // 缓存写入失败不影响统计结果，下次重建即可。
+  }
+}
+
+// 解析单个会话文件。命中增量时只解析新增行；截断/轮转时全量重建。
+function parseUsageFile(
+  fullPath: string,
+  cached: UsageCacheFile | undefined,
+  st: { size: number; mtimeMs: number }
+): UsageCacheFile {
+  let content = "";
+  try {
+    content = readFileSync(fullPath, "utf8");
+  } catch {
+    return cached ?? { size: 0, mtimeMs: 0, processedLines: 0, records: [] };
+  }
+  const lines = content.split(/\r?\n/);
+  // 末尾换行后的完整行数；未以 \n 结尾的尾行视为未完成，留待下次重读补全。
+  const completeLines = content.endsWith("\n") ? lines.length - 1 : lines.length;
+  const truncated = !!cached && st.size < cached.size;
+  const startLine = cached && !truncated ? cached.processedLines : 0;
+  const records: UsageRecord[] = cached && !truncated ? cached.records.slice() : [];
+  for (let i = startLine; i < completeLines; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    let evt: any;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (evt?.type !== "message") continue;
+    const msg = evt.message;
+    if (!msg || msg.role !== "assistant") continue;
+    const usage = msg.usage;
+    if (!usage) continue;
+    const ts = typeof evt.timestamp === "string" ? Date.parse(evt.timestamp) : 0;
+    const provider = (msg.provider as string) || (evt.provider as string) || "unknown";
+    const model = (msg.model as string) || (evt.model as string) || "unknown";
+    const input = Number(usage.input) || 0;
+    const output = Number(usage.output) || 0;
+    const cacheRead = Number(usage.cacheRead) || 0;
+    const cacheWrite = Number(usage.cacheWrite) || 0;
+    const total =
+      Number(usage.totalTokens) || input + output + cacheRead + cacheWrite;
+    const cost = Number(usage.cost?.total) || 0;
+    records.push([ts, provider, model, input, output, cacheRead, cacheWrite, total, cost]);
+  }
+  return { size: st.size, mtimeMs: st.mtimeMs, processedLines: completeLines, records };
+}
+
+// 增量扫描：mtime+size 未变的文件直接复用缓存记录，只读变化的文件；
+// 清理已删除文件；有变更时回写缓存。
+function scanUsageIncremental(
   sessionsBaseDir: string,
+  cachePath: string
+): UsageCache {
+  let cache = loadUsageCache(cachePath);
+  if (!cache) cache = { version: USAGE_CACHE_VERSION, perFile: {} };
+  let dirty = false;
+  if (existsSync(sessionsBaseDir)) {
+    const workspaceDirs = readdirSync(sessionsBaseDir)
+      .filter((n: string) => n.startsWith("--") && n.endsWith("--"))
+      .map((n) => join(sessionsBaseDir, n));
+    for (const wsDir of workspaceDirs) {
+      let files: string[] = [];
+      try {
+        files = readdirSync(wsDir).filter((f) => f.endsWith(".jsonl"));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        const fullPath = join(wsDir, f);
+        let st: { size: number; mtimeMs: number };
+        try {
+          const s = statSync(fullPath);
+          st = { size: s.size, mtimeMs: s.mtimeMs };
+        } catch {
+          continue;
+        }
+        const rel = relative(sessionsBaseDir, fullPath).replace(/\\/g, "/");
+        const cached = cache.perFile[rel];
+        if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
+          continue; // 命中缓存，复用 cached.records
+        }
+        cache.perFile[rel] = parseUsageFile(fullPath, cached, st);
+        dirty = true;
+      }
+    }
+  }
+  // 注意：已从磁盘删除的 session 文件不清理 —— 其 records 作为历史保留，
+  // 仍参与统计。文件截断/轮转（size 变小）由 parseUsageFile 全量重建处理。
+  if (dirty) saveUsageCache(cachePath, cache);
+  return cache;
+}
+
+// 在已缓存的全量记录上按 [from, to] 过滤并聚合，无需再次读盘。
+function aggregateUsage(
+  perFile: Record<string, UsageCacheFile>,
   from: number | null,
   to: number | null
 ): UsageResult {
@@ -5821,116 +5956,82 @@ function scanUsageRange(
     messageCount: 0,
   };
   let sessionCount = 0;
-  if (!existsSync(sessionsBaseDir)) {
-    return { from, to, sessionCount, byModel: [], totals };
-  }
-  const workspaceDirs = readdirSync(sessionsBaseDir)
-    .filter((n: string) => n.startsWith("--") && n.endsWith("--"))
-    .map((n) => join(sessionsBaseDir, n));
-  for (const wsDir of workspaceDirs) {
-    let files: string[] = [];
-    try {
-      files = readdirSync(wsDir).filter((f) => f.endsWith(".jsonl"));
-    } catch {
-      continue;
-    }
-    for (const f of files) {
-      const fullPath = join(wsDir, f);
-      let lines: string[] = [];
-      try {
-        const content = readFileSync(fullPath, "utf8");
-        lines = content.split(/\r?\n/);
-      } catch {
+  for (const key of Object.keys(perFile)) {
+    const fileRecords = perFile[key].records;
+    let touched = false;
+    for (const r of fileRecords) {
+      const ts = r[0];
+      if (ts && ((from != null && ts < from) || (to != null && ts > to))) {
         continue;
       }
-      let sessionTouched = false;
-      for (const line of lines) {
-        if (!line) continue;
-        let evt: any;
-        try {
-          evt = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (evt?.type !== "message") continue;
-        const msg = evt.message;
-        if (!msg || msg.role !== "assistant") continue;
-        const ts = typeof evt.timestamp === "string" ? Date.parse(evt.timestamp) : 0;
-        if (ts && ((from != null && ts < from) || (to != null && ts > to))) {
-          continue;
-        }
-        const usage = msg.usage;
-        if (!usage) continue;
-        // provider / model 位于 evt.message 内部（不在事件顶层），
-        // 同时保留顶层 fallback 以兼容早期会话。
-        const provider =
-          (msg.provider as string) ||
-          (evt.provider as string) ||
-          "unknown";
-        const model =
-          (msg.model as string) ||
-          (evt.model as string) ||
-          "unknown";
-        const key = `${provider}::${model}`;
-        let row = byModel.get(key);
-        if (!row) {
-          row = {
-            provider,
-            model,
-            messageCount: 0,
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            cacheTotal: 0,
-            totalTokens: 0,
-            cost: 0,
-            hitRate: null,
-            firstUsed: null,
-            lastUsed: null,
-          };
-          byModel.set(key, row);
-        }
-        const input = Number(usage.input) || 0;
-        const output = Number(usage.output) || 0;
-        const cacheRead = Number(usage.cacheRead) || 0;
-        const cacheWrite = Number(usage.cacheWrite) || 0;
-        const total = Number(usage.totalTokens) || input + output + cacheRead + cacheWrite;
-        const cost = Number(usage.cost?.total) || 0;
-        row.messageCount += 1;
-        row.input += input;
-        row.output += output;
-        row.cacheRead += cacheRead;
-        row.cacheWrite += cacheWrite;
-        row.cacheTotal += cacheRead + cacheWrite;
-        row.totalTokens += total;
-        row.cost += cost;
-        if (ts) {
-          if (row.firstUsed == null || ts < row.firstUsed) row.firstUsed = ts;
-          if (row.lastUsed == null || ts > row.lastUsed) row.lastUsed = ts;
-        }
-        totals.input += input;
-        totals.output += output;
-        totals.cacheRead += cacheRead;
-        totals.cacheWrite += cacheWrite;
-        totals.totalTokens += total;
-        totals.cost += cost;
-        totals.messageCount += 1;
-        sessionTouched = true;
+      const provider = r[1];
+      const model = r[2];
+      const mk = `${provider}::${model}`;
+      let row = byModel.get(mk);
+      if (!row) {
+        row = {
+          provider,
+          model,
+          messageCount: 0,
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cacheTotal: 0,
+          totalTokens: 0,
+          cost: 0,
+          hitRate: null,
+          firstUsed: null,
+          lastUsed: null,
+        };
+        byModel.set(mk, row);
       }
-      if (sessionTouched) sessionCount += 1;
+      const input = r[3];
+      const output = r[4];
+      const cacheRead = r[5];
+      const cacheWrite = r[6];
+      const total = r[7];
+      const cost = r[8];
+      row.messageCount += 1;
+      row.input += input;
+      row.output += output;
+      row.cacheRead += cacheRead;
+      row.cacheWrite += cacheWrite;
+      row.cacheTotal += cacheRead + cacheWrite;
+      row.totalTokens += total;
+      row.cost += cost;
+      if (ts) {
+        if (row.firstUsed == null || ts < row.firstUsed) row.firstUsed = ts;
+        if (row.lastUsed == null || ts > row.lastUsed) row.lastUsed = ts;
+      }
+      totals.input += input;
+      totals.output += output;
+      totals.cacheRead += cacheRead;
+      totals.cacheWrite += cacheWrite;
+      totals.totalTokens += total;
+      totals.cost += cost;
+      totals.messageCount += 1;
+      touched = true;
     }
+    if (touched) sessionCount += 1;
   }
-  // Compute hit rates and cache totals.
   for (const row of byModel.values()) {
     row.hitRate = computeHitRate(row.input, row.cacheRead);
   }
   totals.cacheTotal = totals.cacheRead + totals.cacheWrite;
-  // Sort by total tokens desc.
   const list = Array.from(byModel.values()).sort(
     (a, b) => b.totalTokens - a.totalTokens
   );
   return { from, to, sessionCount, byModel: list, totals };
+}
+
+function scanUsageRange(
+  sessionsBaseDir: string,
+  from: number | null,
+  to: number | null
+): UsageResult {
+  const cache = scanUsageIncremental(sessionsBaseDir, usageCachePath());
+  return aggregateUsage(cache.perFile, from, to);
 }
 
 class UsageStatsModal extends Modal {
@@ -6008,7 +6109,7 @@ class UsageStatsModal extends Modal {
       btn.onclick = () => {
         this.preset = p.id;
         this.render();
-        this.scan();
+        // render() 末尾已调用 scan()，无需重复扫描。
       };
     }
     if (this.preset === "custom") {
