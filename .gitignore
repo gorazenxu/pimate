@@ -5,3 +5,6 @@ pnpm-lock.yaml
 pnpm-workspace.yaml
 .gitconfig.release
 .claude/
+
+# Local working notes (not part of the plugin release)
+docs/thinking-issue-summary.md
