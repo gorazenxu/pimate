@@ -101,6 +101,15 @@ interface RenderedMessage {
   toolBlocks?: Map<string, HTMLElement>;
 }
 
+interface MentionEntry {
+  kind: "file" | "folder";
+  file?: TFile;
+  folder?: TFolder;
+  score: number;
+  path: string;
+  name: string;
+}
+
 export class PiAgentView extends ItemView {
   plugin: PiAgentPlugin;
   client: PiAgentClient | null = null;
@@ -162,7 +171,7 @@ export class PiAgentView extends ItemView {
 
   // ─── Autocomplete Mention Helper States ─────────────────────────────
   private mentionDropdown: HTMLElement | null = null;
-  private filteredMentionFiles: TFile[] = [];
+  private filteredMentionFiles: MentionEntry[] = [];
   private activeMentionIndex = 0;
   private mentionQueryStart = -1;
 
@@ -4645,26 +4654,60 @@ export class PiAgentView extends ItemView {
       : this.collectAllFolders();
 
     const fileEntries = files
-      .filter(
-        (f) =>
-          f.basename.toLowerCase().includes(q) ||
-          f.path.toLowerCase().includes(q)
-      )
-      .map((f) => ({ kind: "file" as const, file: f }));
+      .map((file) => this.createMentionEntry("file", file, q))
+      .filter((entry): entry is MentionEntry => entry !== null);
     const folderEntries = folders
-      .filter(
-        (folder) =>
-          (folder.name || "").toLowerCase().includes(q) ||
-          folder.path.toLowerCase().includes(q)
-      )
-      .map((f) => ({ kind: "folder" as const, folder: f }));
+      .map((folder) => this.createMentionEntry("folder", folder, q))
+      .filter((entry): entry is MentionEntry => entry !== null);
 
-    this.filteredMentionFiles = [...folderEntries, ...fileEntries].slice(
-      0,
-      12
-    ) as any;
+    this.filteredMentionFiles = [...folderEntries, ...fileEntries]
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (a.path.length !== b.path.length) return a.path.length - b.path.length;
+        return a.path.localeCompare(b.path);
+      })
+      .slice(0, 20);
 
     this.renderMentionDropdownItems();
+  }
+
+  private createMentionEntry(
+    kind: "file" | "folder",
+    item: TFile | TFolder,
+    query: string
+  ): MentionEntry | null {
+    const path = item.path || "/";
+    const name = item instanceof TFile ? item.basename : item.name || path;
+    const score = this.scoreMentionMatch(name, path, query);
+    if (score <= 0) return null;
+
+    const activeFile = this.app.workspace.getActiveFile();
+    const activeFileBonus = item instanceof TFile && activeFile?.path === item.path ? 100 : 0;
+    const typeBonus = kind === "folder" ? 20 : 0;
+
+    return {
+      kind,
+      file: item instanceof TFile ? item : undefined,
+      folder: item instanceof TFolder ? item : undefined,
+      score: score + activeFileBonus + typeBonus,
+      path,
+      name,
+    };
+  }
+
+  private scoreMentionMatch(name: string, path: string, query: string): number {
+    if (!query) return 100;
+
+    const q = query.toLowerCase();
+    const n = name.toLowerCase();
+    const p = path.toLowerCase();
+
+    if (n === q || p === q) return 1000;
+    if (n.startsWith(q)) return 800;
+    if (p.startsWith(q)) return 700;
+    if (n.includes(q)) return 600;
+    if (p.includes(q)) return 400;
+    return 0;
   }
 
   private collectAllFolders(): TFolder[] {
@@ -4695,20 +4738,23 @@ export class PiAgentView extends ItemView {
     );
     if (this.activeMentionIndex < 0) this.activeMentionIndex = 0;
 
-    (this.filteredMentionFiles as any[]).forEach((entry: any, index: number) => {
+    this.filteredMentionFiles.forEach((entry, index) => {
       const itemEl = this.mentionDropdown!.createDiv({
         cls: `pi-agent-mention-item ${index === this.activeMentionIndex ? "is-active" : ""}`,
       });
       const icon =
         entry.kind === "folder"
           ? "📁"
-          : this.getFileTypeIcon(entry.file.extension);
-      const label =
-        entry.kind === "folder"
-          ? entry.folder.path || "/"
-          : entry.file.basename;
+          : this.getFileTypeIcon(entry.file!.extension);
+      const label = entry.kind === "folder" ? entry.path : entry.name;
+      const subLabel = entry.kind === "folder" ? "" : entry.path;
+
       itemEl.createSpan({ text: icon + " ", cls: "pi-agent-mention-item-icon" });
-      itemEl.createSpan({ text: label, cls: "pi-agent-mention-item-name" });
+      const textEl = itemEl.createDiv({ cls: "pi-agent-mention-item-text" });
+      textEl.createSpan({ text: label, cls: "pi-agent-mention-item-name" });
+      if (subLabel && subLabel !== label) {
+        textEl.createSpan({ text: subLabel, cls: "pi-agent-mention-item-path" });
+      }
 
       itemEl.onclick = (e) => {
         e.stopPropagation();
@@ -4720,7 +4766,7 @@ export class PiAgentView extends ItemView {
 
   private insertMentionSelection(): void {
     if (!this.inputEl || this.mentionQueryStart === -1) return;
-    const entry: any = this.filteredMentionFiles[this.activeMentionIndex];
+    const entry = this.filteredMentionFiles[this.activeMentionIndex];
     if (!entry) return;
 
     const value = this.inputEl.value;
@@ -4731,11 +4777,13 @@ export class PiAgentView extends ItemView {
 
     let mentionText: string;
     if (entry.kind === "folder") {
-      const folder: TFolder = entry.folder;
+      const folder = entry.folder;
+      if (!folder) return;
       mentionText = `[[${(folder.path || "/")}/]]`;
       this.addFolderContextItem(folder, false);
     } else {
       const file = entry.file;
+      if (!file) return;
       mentionText = `[[${file.basename}]]`;
       this.addFileContextItem(file);
     }

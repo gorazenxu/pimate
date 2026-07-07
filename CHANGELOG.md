@@ -16,6 +16,19 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.41 (unreleased)
+
+- 优：@ 提及弹窗改为评分排序
+  - 引入 `MentionEntry` 统一类型（替代之前 `TFile[] as any`）
+  - `scoreMentionMatch`：精确 1000 / 名前缀 800 / 路径前缀 700 / 名字包含 600 / 路径包含 400
+  - 加分：当前打开文件 +100、文件夹 +20
+  - 二级排序：分数 → 路径短优先 → 字典序
+  - 结果数 12 → 20
+  - 文件项新增完整路径副标题（文件夹不显示避免重复）
+  - 入口 `insertMentionSelection` 显式 narrow `entry.file` / `entry.folder`，去除 `!` non-null 断言
+
+---
+
 ## 📦 v1.0.40 (unreleased)
 
 - 优：Token Usage 统计加入增量缓存

@@ -1673,6 +1673,20 @@
   white-space: nowrap;
 }
 
+.pi-agent-mention-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pi-agent-mention-item-path {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ─── Message Hover Actions ─── */
 .pi-agent-message {
   position: relative;
