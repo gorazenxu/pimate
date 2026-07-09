@@ -12,6 +12,12 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
+_当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.42 (unreleased)
+
 - 新：智能审核（Smart Review）—— Agent 长任务自检与自动继续
   - 设置页新增开关 + 最大自动继续次数（1-10，默认 3）；footer 栏「审/Review」按钮一键切换
   - `message_end` 后插件用规则自检最后一条 assistant 文本：done markers（已完成/测试通过/LGTM 等）放行；continue markers（未完成/我将/还需要/failed 等）触发自动继续
