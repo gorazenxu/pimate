@@ -139,6 +139,9 @@ export class PiAgentView extends ItemView {
   private footerContextEl: HTMLElement | null = null;
   private footerContextFillEl: SVGCircleElement | null = null;
   private footerContextPercentEl: HTMLElement | null = null;
+  private smartReviewToggleEl: HTMLElement | null = null;
+  private smartReviewContinues: number = 0;
+  private smartReviewOriginalGoal: string | null = null;
   private renderedMessages: RenderedMessage[] = [];
   private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
   // History paging (used for fast file-based load of large sessions).
@@ -676,6 +679,17 @@ export class PiAgentView extends ItemView {
 
     const footerRight = footer.createDiv("pi-agent-input-footer-right");
 
+    // Smart Review Toggle
+    this.smartReviewToggleEl = footerRight.createSpan({ cls: "pi-agent-smart-review-toggle" });
+    this.smartReviewToggleEl.onclick = () => {
+      this.runAsync(async () => {
+        this.plugin.settings.smartReviewEnabled = !this.plugin.settings.smartReviewEnabled;
+        await this.plugin.saveSettings();
+        this.updateSmartReviewToggleUI();
+      });
+    };
+    this.updateSmartReviewToggleUI();
+
     this.abortBtn = footerRight.createEl("button", {
       text: "×",
       cls: "pi-agent-footer-btn pi-agent-abort-btn",
@@ -1074,6 +1088,7 @@ export class PiAgentView extends ItemView {
         this.updateButtons();
         this.renderActiveTabRuntimeStatus();
         void this.refreshStateDisplay();
+        void this.maybeAutoContinueSmartReview();
         break;
 
       case "message_start":
@@ -2471,8 +2486,14 @@ export class PiAgentView extends ItemView {
     this.updateInputModeState();
     this.clearContextItems();
 
+    // Reset smart-review counter for fresh user goals so the auto-continue
+    // loop only runs within the same goal.
+    this.smartReviewContinues = 0;
+    this.smartReviewOriginalGoal = rawMessage || message;
+
     try {
       if (message.startsWith("!")) {
+        this.smartReviewOriginalGoal = null;
         await this.runBashMode(message);
       } else if (this.isStreaming) {
         // Queue as steer message
@@ -2488,15 +2509,177 @@ export class PiAgentView extends ItemView {
   }
 
   private applySystemPrompt(message: string): string {
+    if (message.startsWith("!")) return message;
+
+    const systemInstructions: string[] = [];
     const systemPrompt = (this.plugin.settings.systemPrompt || "").trim();
-    if (!systemPrompt || message.startsWith("!")) return message;
+    if (systemPrompt) systemInstructions.push(systemPrompt);
+
+    const smartReviewPrompt = this.getSmartReviewPrompt();
+    if (smartReviewPrompt) systemInstructions.push(smartReviewPrompt);
+
+    if (systemInstructions.length === 0) return message;
     return [
       "System instruction for this Pimate turn:",
-      systemPrompt,
+      systemInstructions.join("\n\n"),
       "",
       "User request:",
       message,
     ].join("\n");
+  }  private getSmartReviewPrompt(): string {
+    if (this.plugin.settings.smartReviewEnabled !== true) return "";
+    const isZh = this.plugin.settings.language !== "en";
+    return isZh
+      ? "智能审核已开启。任务完成后请明确回复“已完成”；若未完成，请简要说明还差什么。"
+      : "Smart review is on. When the task is complete, reply exactly with \"Done\". If not yet complete, briefly state what is still missing.";
+  }
+
+  // ─── Smart Review Auto-Continue Loop ───────────────────────────────
+  // Lightweight rule-based check against the last assistant text. We avoid an
+  // extra LLM call here to keep latency and cost low; upgrade to a judge
+  // later if we need richer semantics.
+
+  private shouldAutoContinueFromAssistantText(text: string): boolean {
+    const t = (text || "").trim();
+    if (!t) return false;
+    const lower = t.toLowerCase();
+
+    // Clear "done" markers — if any of these are present we trust the reply.
+    const doneMarkers = [
+      /已完成/,
+      /已经完成/,
+      /任务完成/,
+      /全部完成/,
+      /最终结果/,
+      /已经修复/,
+      /已经通过/,
+      /测试通过/,
+      /build (?:passes|succeeded|ok)/i,
+      /all (?:tests|checks?) pass/i,
+      /task (?:is )?(?:complete|done|finished)/i,
+      /no further (?:changes?|actions?) (?:needed|required)/i,
+      /lgtm/i,
+    ];
+    if (doneMarkers.some((r) => r.test(t))) return false;
+
+    // Incomplete markers — if any are present, continue.
+    const continueMarkers = [
+      /我将继续/,
+      /接下来我会/,
+      /下一步我会/,
+      /现在去/,
+      /我去/,
+      /正在修复/,
+      /尚未完成/,
+      /还没有完成/,
+      /未完成/,
+      /还没修复/,
+      /需要继续/,
+      /需要进一步/,
+      /还需要/,
+      /仍然存在/,
+      /测试失败/,
+      /failed/i,
+      /will (?:now |then )?(?:continue|fix|verify|run|check|proceed)/i,
+      /next[, ]? i (?:will|'ll)/i,
+      /todo:/i,
+      /not (?:yet )?(?:complete|done|finished|fixed)/i,
+      /still (?:need|needs|failing|pending)/i,
+    ];
+    if (continueMarkers.some((r) => r.test(t))) return true;
+
+    // Trailing ellipsis or trailing action hint often means the reply was cut
+    // off or the model is deferring action. Treat as continue.
+    if (/[。.…]{1,3}$/.test(t) && /(我|我们|i|we)\s*(?:将|会|'ll|will)/.test(lower)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private getSmartReviewMaxContinues(): number {
+    const raw = this.plugin.settings.smartReviewMaxContinues;
+    if (typeof raw !== "number" || isNaN(raw)) return 3;
+    return Math.max(1, Math.min(10, Math.floor(raw)));
+  }
+
+  private async maybeAutoContinueSmartReview(): Promise<void> {
+    if (this.plugin.settings.smartReviewEnabled !== true) return;
+    if (!this.client) return;
+    if (this.isStreaming) return;
+    if (this.smartReviewOriginalGoal == null) return;
+
+    const max = this.getSmartReviewMaxContinues();
+    if (this.smartReviewContinues >= max) {
+      this.setStatus(
+        `✅ Smart review limit reached (${this.smartReviewContinues}/${max})`,
+        "ok",
+      );
+      this.smartReviewOriginalGoal = null;
+      return;
+    }
+
+    let result;
+    try {
+      result = await this.client.getLastAssistantText();
+    } catch (err) {
+      console.warn("[pimate] smart review: failed to fetch last assistant text", err);
+      return;
+    }
+    if (!result.success) return;
+    const text = ((result.data as any)?.text as string | null | undefined) ?? "";
+    if (!text.trim()) return;
+
+    if (!this.shouldAutoContinueFromAssistantText(text)) {
+      this.smartReviewOriginalGoal = null;
+      return;
+    }
+
+    this.smartReviewContinues += 1;
+    const continuePrompt = this.buildSmartReviewContinuePrompt();
+    this.setStatus(
+      `🔁 Smart review continue ${this.smartReviewContinues}/${max}`,
+      "thinking",
+    );
+    this.addSystemMessage(`🔁 Smart review auto-continue (${this.smartReviewContinues}/${max})`);
+
+    try {
+      if (this.isStreaming) {
+        await this.client.steer(continuePrompt);
+      } else {
+        await this.client.prompt(continuePrompt);
+      }
+    } catch (err) {
+      this.addSystemMessage(
+        `❌ Smart review continue failed: ${(err as Error).message}`,
+      );
+      this.smartReviewOriginalGoal = null;
+    }
+  }
+
+  private buildSmartReviewContinuePrompt(): string {
+    const isZh = this.plugin.settings.language !== "en";
+    const goal = (this.smartReviewOriginalGoal || "").trim();
+    const goalSnippet = goal
+      ? `${isZh ? "原始目标" : "Original goal"}: ${goal.slice(0, 400)}\n\n`
+      : "";
+    return isZh
+      ? [
+          "智能审核自动继续指令：",
+          goalSnippet,
+          "你最近一轮回复看起来尚未真正完成原始目标，或者显示出还需要继续/修复/验证的信号。",
+          "请立即继续执行：不要再次复述目标，不要做新一轮总结性输出。",
+          "优先：完成未完成的步骤、运行已有测试或工具验证、修正上一轮提到的问题。",
+          "如果目标确实已经全部完成，请明确回复“已完成”并停止。",
+        ].join("\n")
+      : [
+          "Smart review auto-continue:",
+          goalSnippet,
+          "Your previous reply suggests the original goal is not fully complete or contains signals that more work / verification is required.",
+          "Continue executing now. Do not restate the goal; do not produce another summary first.",
+          "Prioritize: finish remaining steps, run existing tests or tools to verify, fix issues called out last turn.",
+          "If the goal is genuinely fully complete, reply exactly with \"Done\" and stop.",
+        ].join("\n");
   }
 
   private maybeTitleActiveTab(seed: string): void {
@@ -2520,6 +2703,8 @@ export class PiAgentView extends ItemView {
     if (this.activeTab) this.activeTab.isStreaming = false;
     this.stopSpeedIndicator();
     this.updateButtons();
+    this.smartReviewContinues = 0;
+    this.smartReviewOriginalGoal = null;
     this.setStatus("⏹ Aborted", "warning");
   }
 
@@ -4015,6 +4200,28 @@ export class PiAgentView extends ItemView {
       .slice(0, 18);
     this.footerModelLabel.setText(shortName || provider);
     this.footerModelLabel.setAttribute("title", `${provider}/${modelId}`);
+  }
+
+  public refreshSmartReviewToggle(): void {
+    this.updateSmartReviewToggleUI();
+  }
+
+  private updateSmartReviewToggleUI(): void {
+    if (!this.smartReviewToggleEl) return;
+    const isEnabled = this.plugin.settings.smartReviewEnabled === true;
+    const isZh = this.plugin.settings.language !== "en";
+    this.smartReviewToggleEl.setText(isZh ? "审" : "Review");
+    this.smartReviewToggleEl.setAttribute(
+      "title",
+      isEnabled
+        ? isZh
+          ? "智能审核已开启：长任务会自检并优化后再输出"
+          : "Smart review on: long tasks self-check before replying"
+        : isZh
+          ? "智能审核已关闭"
+          : "Smart review off"
+    );
+    this.smartReviewToggleEl.toggleClass("is-enabled", isEnabled);
   }
 
   async insertLastAssistantIntoActiveNote(): Promise<void> {

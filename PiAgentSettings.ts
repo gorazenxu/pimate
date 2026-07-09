@@ -71,6 +71,8 @@ export interface PiAgentSettings {
   apiKey: string;
   autoScroll: boolean;
   showThinking: boolean;
+  smartReviewEnabled: boolean;
+  smartReviewMaxContinues: number;
   maxHistoryDisplay: number;
   sessionTabs: PersistedSessionTab[];
   activeSessionFile: string;
@@ -92,6 +94,8 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   apiKey: "",
   autoScroll: true,
   showThinking: true,
+  smartReviewEnabled: false,
+  smartReviewMaxContinues: 3,
   maxHistoryDisplay: 100,
   sessionTabs: [],
   activeSessionFile: "",
@@ -922,6 +926,45 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             for (const leaf of this.app.workspace.getLeavesOfType(PI_AGENT_VIEW_TYPE)) {
               void (leaf.view as any)?.refreshThinkingVisibility?.();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName(isZh ? "智能审核" : "Smart review")
+      .setDesc(
+        isZh
+          ? "开启后，Agent 会在长任务中自检结果并尝试优化后再输出。"
+          : "When enabled, the agent self-checks long tasks and improves the result before replying."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.smartReviewEnabled === true)
+          .onChange(async (value) => {
+            this.plugin.settings.smartReviewEnabled = value;
+            await this.plugin.saveSettings();
+            for (const leaf of this.app.workspace.getLeavesOfType(PI_AGENT_VIEW_TYPE)) {
+              void (leaf.view as any)?.refreshSmartReviewToggle?.();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName(isZh ? "智能审核最大自动继续次数" : "Smart review max auto-continue")
+      .setDesc(
+        isZh
+          ? "开关开启时，Agent 结束后插件最多自动继续的次数。范围 1-10。"
+          : "When smart review is on, max auto-continue turns after the agent ends. Range 1-10."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("3")
+          .setValue(String(this.plugin.settings.smartReviewMaxContinues ?? 3))
+          .onChange(async (value) => {
+            const num = parseInt(value, 10);
+            if (!isNaN(num) && num >= 1 && num <= 10) {
+              this.plugin.settings.smartReviewMaxContinues = num;
+              await this.plugin.saveSettings();
             }
           })
       );
