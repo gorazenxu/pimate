@@ -597,16 +597,26 @@ export class PiAgentSettingTab extends PluginSettingTab {
             // 实时刷新设置页，以展示新 provider 的 Placeholder 和模型 ID 值
             this.display();
 
-            // 联动更新聊天视图
+            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口，
+            // 让设置页修改的默认 provider/model 也通过 getState() 兜底。
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
-                if (view.client && typeof view.client.setModel === "function") {
+                if (typeof view.updateActiveTabModel === "function") {
+                  try {
+                    await view.updateActiveTabModel(value, this.plugin.settings.modelId);
+                  } catch (err) {
+                    // Pi 拒绝了模型切换时，保持设置已写入但 UI 状态由
+                    // view 内部同步入口统一刷新；此处仅记录错误。
+                    console.warn("[pimate] updateActiveTabModel failed in settings:", err);
+                  }
+                } else if (view.client && typeof view.client.setModel === "function") {
+                  // 兜底：旧版本 view 仍直接调用底层 RPC。
                   await view.client.setModel(value, this.plugin.settings.modelId);
-                }
-                if (typeof view.updateModelDisplay === "function") {
-                  view.updateModelDisplay(value, this.plugin.settings.modelId);
+                  if (typeof view.updateModelDisplay === "function") {
+                    view.updateModelDisplay(value, this.plugin.settings.modelId);
+                  }
                 }
               }
             }
@@ -628,16 +638,22 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.plugin.settings.modelId = trimmed;
             await this.plugin.saveSettings();
 
-            // 联动更新聊天视图
+            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口。
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
-                if (view.client && typeof view.client.setModel === "function") {
+                if (typeof view.updateActiveTabModel === "function") {
+                  try {
+                    await view.updateActiveTabModel(this.plugin.settings.provider, trimmed);
+                  } catch (err) {
+                    console.warn("[pimate] updateActiveTabModel failed in settings:", err);
+                  }
+                } else if (view.client && typeof view.client.setModel === "function") {
                   await view.client.setModel(this.plugin.settings.provider, trimmed);
-                }
-                if (typeof view.updateModelDisplay === "function") {
-                  view.updateModelDisplay(this.plugin.settings.provider, trimmed);
+                  if (typeof view.updateModelDisplay === "function") {
+                    view.updateModelDisplay(this.plugin.settings.provider, trimmed);
+                  }
                 }
               }
             }
@@ -646,31 +662,38 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName(isZh ? "默认思考强度 (Default Effort Level)" : "Default Effort Level")
-      .setDesc(isZh ? "支持推理模型（如 o1/o3-mini/DeepSeek R1）的思考时长或强度。" : "Configure reasoning effort level for reasoning models.")
+      .setDesc(isZh ? "作为新 Tab 的默认偏好；当前模型实际支持哪些档位，以聊天页 Effort 弹窗和 Pi 生效结果为准。" : "Default preference for new tabs. The chat Effort popup and Pi's effective state determine which levels the current model actually supports.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("", isZh ? "默认 (Pi Default)" : "Pi Default")
           .addOption("off", isZh ? "关闭 (Off)" : "Off")
-          .addOption("minimal", isZh ? "最少 (Low (minimal))" : "Minimal (Low (minimal))")
-          .addOption("low", isZh ? "低 (Low)" : "Low")
-          .addOption("medium", isZh ? "中 (Medium)" : "Medium")
-          .addOption("high", isZh ? "高 (High)" : "High")
-          .addOption("xhigh", isZh ? "最高 (X-High)" : "X-High")
+          .addOption("minimal", isZh ? "最低 (Minimal)" : "Minimal")
+          .addOption("low", isZh ? "较低 (Low)" : "Low")
+          .addOption("medium", isZh ? "中等 (Medium)" : "Medium")
+          .addOption("high", isZh ? "较高 (High)" : "High")
+          .addOption("xhigh", isZh ? "极高 (X-High)" : "X-High")
+          .addOption("max", isZh ? "极限 (Max)" : "Max")
           .setValue(this.plugin.settings.thinkingLevel || "")
           .onChange(async (value) => {
             this.plugin.settings.thinkingLevel = value;
             await this.plugin.saveSettings();
 
-            // 联动更新聊天视图
+            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口。
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
               if (view) {
-                if (view.client && typeof view.client.setThinkingLevel === "function") {
+                if (typeof view.updateActiveTabThinkingLevel === "function") {
+                  try {
+                    await view.updateActiveTabThinkingLevel(value);
+                  } catch (err) {
+                    console.warn("[pimate] updateActiveTabThinkingLevel failed in settings:", err);
+                  }
+                } else if (view.client && typeof view.client.setThinkingLevel === "function") {
                   await view.client.setThinkingLevel(value);
-                }
-                if (view.footerEffortCurrent) {
-                  view.footerEffortCurrent.setText(view.getThinkingLevelLabel(value));
+                  if (view.footerEffortCurrent) {
+                    view.footerEffortCurrent.setText(view.getThinkingLevelLabel(value));
+                  }
                 }
               }
             }

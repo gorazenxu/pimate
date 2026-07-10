@@ -145,14 +145,39 @@ export interface RpcRequest {
   [key: string]: unknown;
 }
 
-export interface RpcResponse {
+export interface RpcResponse<T = unknown> {
   type: "response";
   id?: string;
   command: string;
   success: boolean;
   error?: string;
-  data?: unknown;
+  data?: T;
 }
+
+// ─── Pi model & state types ────────────────────────────────────────────────
+// Pi 返回的完整 model 元数据。Pimate 仅依赖 `reasoning` 与 `thinkingLevelMap`
+// 的键集来决定档位弹窗；`thinkingLevelMap` 的 value 类型由 Pi 内部约定，
+// UI 暂不解释，仅透传给 Pi。
+export interface PiModel {
+  id: string;
+  provider: string;
+  name?: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, unknown> | null;
+}
+
+export interface PiAgentState {
+  model?: PiModel;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  [key: string]: unknown;
+}
+
+export interface AvailableModelsResult {
+  models: PiModel[];
+}
+
+export type SetModelResult = PiModel;
 
 export interface RpcEvent {
   type: string;
@@ -420,9 +445,9 @@ export class PiAgentClient extends EventEmitter {
   /**
    * Send a command and wait for response
    */
-  private async sendCommand(
+  private async sendCommand<T = unknown>(
     command: RpcRequest
-  ): Promise<RpcResponse> {
+  ): Promise<RpcResponse<T>> {
     if (!this.process || this.process.killed) {
       throw new Error("Process not running");
     }
@@ -438,7 +463,11 @@ export class PiAgentClient extends EventEmitter {
         }
       }, 60_000);
 
-      this.pendingRequests.set(id, { resolve, reject, timeout });
+      this.pendingRequests.set(id, {
+        resolve: resolve as (value: RpcResponse<unknown>) => void,
+        reject,
+        timeout,
+      });
 
       const payload = JSON.stringify(command) + "\n";
       try {
@@ -525,9 +554,10 @@ export class PiAgentClient extends EventEmitter {
   }
 
   /**
-   * Get current session state
+   * Get full Pi agent state, including current model and thinkingLevel.
+   * This is the authoritative source for clamping / sync decisions.
    */
-  async getState(): Promise<RpcResponse> {
+  async getState(): Promise<RpcResponse<PiAgentState>> {
     return this.sendCommand({ type: "get_state" });
   }
 
@@ -539,23 +569,30 @@ export class PiAgentClient extends EventEmitter {
   }
 
   /**
-   * Set model
+   * Set model. Pi responds with the resolved model metadata
+   * (including `reasoning` and `thinkingLevelMap`), which the UI uses
+   * to derive the available thinking-level options.
    */
-  async setModel(provider: string, modelId: string): Promise<RpcResponse> {
+  async setModel(
+    provider: string,
+    modelId: string
+  ): Promise<RpcResponse<SetModelResult>> {
     return this.sendCommand({ type: "set_model", provider, modelId });
   }
 
   /**
-   * Set thinking level
+   * Set thinking level. Pi may clamp the requested level to what the
+   * current model supports; the authoritative result comes back via
+   * `thinking_level_changed` events and `getState`.
    */
   async setThinkingLevel(level: string): Promise<RpcResponse> {
     return this.sendCommand({ type: "set_thinking_level", level });
   }
 
   /**
-   * Get available models
+   * List currently-available models for the configured providers.
    */
-  async getAvailableModels(): Promise<RpcResponse> {
+  async getAvailableModels(): Promise<RpcResponse<AvailableModelsResult>> {
     return this.sendCommand({ type: "get_available_models" });
   }
 

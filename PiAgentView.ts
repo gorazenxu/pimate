@@ -22,17 +22,16 @@ import {
   type RpcEvent,
   type AssistantMessageEvent,
   type MessageContent,
+  type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
 
 export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
 
 // ─── Message Rendering Types ────────────────────────────────────────────
 
-interface PiModel {
-  id: string;
-  name?: string;
-  provider: string;
-}
+// Use Pi model metadata from the client (includes reasoning / thinkingLevelMap).
+// Re-exported here to keep local usage ergonomic.
+type PiModel = PiModelFromClient;
 
 interface PiCommand {
   name: string;
@@ -76,6 +75,12 @@ interface ChatTab {
   modelProvider?: string;
   modelId?: string;
   thinkingLevel?: string;
+  // Last known model metadata reported by Pi (only in memory; do not persist).
+  // Used to derive available thinking levels without re-querying every popup.
+  piModelMeta?: PiModel | null;
+  // Monotonic counter incremented before each Pi state sync; stale responses
+  // (older sequence) are discarded.
+  syncSeq?: number;
   speedStartedAt?: number | null;
   speedEstimatedTokens?: number;
   speedHideAt?: number | null;
@@ -637,7 +642,7 @@ export class PiAgentView extends ItemView {
     this.effortGearsEl.onclick = (e) => {
       e.stopPropagation();
       if (this.effortGearsEl) {
-        this.toggleEffortPopup(this.effortGearsEl);
+        this.runAsync(() => this.toggleEffortPopup(this.effortGearsEl!));
       }
     };
 
@@ -991,33 +996,196 @@ export class PiAgentView extends ItemView {
       }
     } catch (err) {
       console.warn("[pimate] failed to apply tab runtime preferences", err);
+    } finally {
+      // Pull authoritative state so any clamp by Pi overrides the
+      // persisted preference value (e.g. `xhigh` was saved but the
+      // resumed model only supports `high`).
+      await this.syncTabStateFromPi(tab);
     }
   }
 
   private async updateActiveTabModel(provider: string, modelId: string): Promise<void> {
     const tab = this.activeTab;
-    if (tab) {
-      tab.modelProvider = provider;
-      tab.modelId = modelId;
+    if (!tab?.client) {
+      // No active Pi client to talk to; fall back to plain settings update.
+      if (tab) {
+        tab.modelProvider = provider;
+        tab.modelId = modelId;
+      }
+      this.plugin.settings.provider = provider;
+      this.plugin.settings.modelId = modelId;
+      await this.plugin.saveSettings();
+      await this.persistSessionTabs();
+      this.updateModelDisplay(provider, modelId);
+      return;
     }
-    // Keep global defaults in sync so a newly created/restarted tab cannot
-    // accidentally start with an old provider and a new model id (for example
-    // openai-codex + MiniMax-M3).
-    this.plugin.settings.provider = provider;
-    this.plugin.settings.modelId = modelId;
-    await this.plugin.saveSettings();
-    await this.persistSessionTabs();
-    await this.client?.setModel(provider, modelId);
-    this.updateModelDisplay(provider, modelId);
+
+    let response;
+    try {
+      response = await tab.client.setModel(provider, modelId);
+    } catch (err) {
+      console.error("[pimate] setModel failed", err);
+      throw err;
+    }
+    if (!response?.success) {
+      throw new Error(response?.error || "setModel failed");
+    }
+
+    // Stash metadata returned by Pi so the effort popup can render correctly
+    // before the explicit getState() round-trip lands. Pi versions have
+    // returned both `data = model` and `data = { model }`; accept either.
+    tab.piModelMeta = this.extractPiModelFromRpcData(response.data);
+
+    // Now pull authoritative state from Pi — it may have clamped the
+    // current thinking level to a value the new model supports.
+    await this.syncTabStateFromPi(tab);
+
+    // The tab fields / global settings / footer / persistence are updated
+    // inside applyAuthoritativePiState when syncTabStateFromPi returns.
+
+    // If an effort popup is open, the displayed model just changed; close it
+    // so the user reopens with the new model's options.
+    if (this.effortPopupEl) this.closeEffortPopup();
   }
 
   private async updateActiveTabThinkingLevel(level: string): Promise<void> {
     const tab = this.activeTab;
-    if (tab) tab.thinkingLevel = level;
-    await this.persistSessionTabs();
-    if (this.client) await this.client.setThinkingLevel(level);
-    if (this.footerEffortCurrent) {
-      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+    if (!tab?.client) {
+      if (tab) tab.thinkingLevel = level;
+      await this.persistSessionTabs();
+      if (this.footerEffortCurrent) {
+        this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+      }
+      return;
+    }
+
+    let response;
+    try {
+      response = await tab.client.setThinkingLevel(level);
+    } catch (err) {
+      console.error("[pimate] setThinkingLevel failed", err);
+      throw err;
+    }
+    if (!response?.success) {
+      throw new Error(response?.error || "setThinkingLevel failed");
+    }
+
+    // Pi may clamp; let getState() be the authoritative source.
+    await this.syncTabStateFromPi(tab);
+  }
+
+  // ─── Pi authoritative state sync ───────────────────────────────────────────
+  //
+  // Pulls full state from Pi and reconciles it into the in-memory tab,
+  // global settings, footer display, and persisted session. A monotonic
+  // sequence plus client reference check guards against late responses that
+  // arrive after a tab has switched clients or moved on to another sync.
+
+  private extractPiModelFromRpcData(data: unknown): PiModel | null {
+    if (!data || typeof data !== "object") return null;
+
+    const maybeWrapped = data as { model?: unknown };
+    if (maybeWrapped.model && typeof maybeWrapped.model === "object") {
+      const model = maybeWrapped.model as Partial<PiModel>;
+      if (typeof model.id === "string" && typeof model.provider === "string") {
+        return model as PiModel;
+      }
+    }
+
+    const maybeModel = data as Partial<PiModel>;
+    if (typeof maybeModel.id === "string" && typeof maybeModel.provider === "string") {
+      return maybeModel as PiModel;
+    }
+
+    return null;
+  }
+
+  private async syncTabStateFromPi(tab: ChatTab): Promise<void> {
+    if (!tab.client) return;
+    const client = tab.client;
+    const seq = (tab.syncSeq ?? 0) + 1;
+    tab.syncSeq = seq;
+
+    let response;
+    try {
+      response = await client.getState();
+    } catch (err) {
+      console.warn("[pimate] getState failed", err);
+      return;
+    }
+
+    // Drop stale responses: tab moved on, or its client was swapped out.
+    if (tab.syncSeq !== seq) return;
+    if (tab.client !== client) return;
+    if (!response?.success || !response.data) return;
+
+    this.applyAuthoritativePiState(tab, response.data);
+  }
+
+  private applyAuthoritativePiState(
+    tab: ChatTab,
+    state: import("./PiAgentClient").PiAgentState
+  ): void {
+    const previousProvider = tab.modelProvider;
+    const previousModelId = tab.modelId;
+    const previousLevel = tab.thinkingLevel;
+
+    if (state.model) {
+      tab.piModelMeta = state.model;
+      tab.modelProvider = state.model.provider;
+      tab.modelId = state.model.id;
+    }
+    if (typeof state.thinkingLevel === "string") {
+      tab.thinkingLevel = state.thinkingLevel;
+    } else if (state.thinkingLevel == null && tab.piModelMeta?.reasoning === false) {
+      // Reasoning-off models may report no level at all; clear stale values.
+      tab.thinkingLevel = "";
+    }
+
+    const modelChanged =
+      previousProvider !== tab.modelProvider ||
+      previousModelId !== tab.modelId;
+    const levelChanged = previousLevel !== tab.thinkingLevel;
+    let settingsChanged = false;
+
+    // Reflect into global settings so newly created/restarted tabs inherit
+    // the Pi-confirmed pair (e.g. prevent openai-codex + MiniMax-M3 combos).
+    if (
+      modelChanged &&
+      tab.modelProvider &&
+      tab.modelId &&
+      tab === this.activeTab
+    ) {
+      this.plugin.settings.provider = tab.modelProvider;
+      this.plugin.settings.modelId = tab.modelId;
+      settingsChanged = true;
+    }
+    if (
+      levelChanged &&
+      tab.thinkingLevel !== undefined &&
+      tab === this.activeTab
+    ) {
+      this.plugin.settings.thinkingLevel = tab.thinkingLevel;
+      settingsChanged = true;
+    }
+
+    // Persist + notify footer only when something actually changed.
+    if (modelChanged || levelChanged) {
+      void this.persistSessionTabs();
+      if (settingsChanged) void this.plugin.saveSettings();
+      if (
+        modelChanged &&
+        tab.modelProvider &&
+        tab.modelId &&
+        tab === this.activeTab
+      ) {
+        this.updateModelDisplay(tab.modelProvider, tab.modelId);
+      }
+      if (levelChanged && tab === this.activeTab && this.footerEffortCurrent) {
+        this.footerEffortCurrent.setText(
+          this.getThinkingLevelLabel(tab.thinkingLevel ?? "")
+        );
+      }
     }
   }
 
@@ -1047,6 +1215,13 @@ export class PiAgentView extends ItemView {
         break;
       case "queue_update":
         tab.queueCount = this.getQueueTotal(event);
+        break;
+      case "thinking_level_changed":
+      case "model_changed":
+        // Authoritative state — pull full state from Pi to reconcile.
+        // The level / model fields on this event are advisory; getState()
+        // is the single source of truth for clamp results.
+        void this.syncTabStateFromPi(tab);
         break;
     }
   }
@@ -1125,6 +1300,15 @@ export class PiAgentView extends ItemView {
 
       case "queue_update":
         this.handleQueueUpdate(event);
+        break;
+
+      case "thinking_level_changed":
+      case "model_changed":
+        // Authority lives in Pi. recordTabRuntimeState() will fire
+        // syncTabStateFromPi() to reconcile this tab's state.
+        if (this.activeTab) {
+          this.recordTabRuntimeState(this.activeTab, event);
+        }
         break;
 
       case "compaction_start":
@@ -3037,12 +3221,19 @@ export class PiAgentView extends ItemView {
     }, 0);
   }
 
-  private toggleEffortPopup(anchorEl: HTMLElement): void {
+  private async toggleEffortPopup(anchorEl: HTMLElement): Promise<void> {
     if (this.effortPopupEl) {
       this.closeEffortPopup();
       return;
     }
     this.closeModelPopup();
+
+    // Pull latest Pi state so the popup renders against current model
+    // metadata (reasoning / thinkingLevelMap) instead of stale local data.
+    const tab = this.activeTab;
+    if (tab?.client) {
+      await this.syncTabStateFromPi(tab);
+    }
 
     this.renderEffortPopup(anchorEl);
   }
@@ -3058,51 +3249,148 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  // ─── Thinking level options derivation ────────────────────────────────────
+  //
+  // Pi advertises per-model thinking-level availability via
+  // `model.thinkingLevelMap`. We render the popup from that map's keys:
+  //   - `reasoning !== true`  → no clickable options, informational row.
+  //   - `thinkingLevelMap`    → only the keys Pi declared.
+  //   - reasoning without map → safe fallback: show current Pi level as a
+  //     read-only note (we do NOT invent a static list, because we have
+  //     no authoritative source for what the model supports).
+
+  private getStaticLevelDescription(
+    id: string,
+    isZh: boolean
+  ): { name: string; desc: string } {
+    const known: Record<string, { name: string; zh: string; en: string }> = {
+      off: { name: "off", zh: "关闭", en: "Reasoning Off" },
+      minimal: { name: "minimal", zh: "最低", en: "Minimal Reasoning" },
+      low: { name: "low", zh: "较低", en: "Low Reasoning" },
+      medium: { name: "medium", zh: "中等", en: "Medium Reasoning" },
+      high: { name: "high", zh: "较高", en: "High Reasoning" },
+      xhigh: { name: "xhigh", zh: "极高", en: "X-High Reasoning" },
+      max: { name: "max", zh: "极限", en: "Max Reasoning" },
+    };
+    const entry = known[id];
+    if (entry) return { name: entry.name, desc: isZh ? entry.zh : entry.en };
+    return {
+      name: id,
+      desc: isZh ? "当前 Pi 模型声明的档位" : "Declared by current Pi model",
+    };
+  }
+
+  private buildThinkingLevelOptions(tab: ChatTab | null | undefined): {
+    options: { id: string; name: string; desc: string }[];
+    note?: string;
+  } {
+    const isZh = this.plugin.settings.language === "zh";
+    const meta = tab?.piModelMeta;
+
+    if (!meta) {
+      return {
+        options: [],
+        note: isZh
+          ? "等待 Pi 返回当前模型能力"
+          : "Awaiting Pi model capabilities",
+      };
+    }
+
+    if (meta.reasoning !== true) {
+      return {
+        options: [],
+        note: isZh
+          ? "当前模型不支持可配置推理"
+          : "Current model does not expose configurable reasoning",
+      };
+    }
+
+    // Pi's thinkingLevelMap is an override/extension map, not a complete
+    // availability list. Reasoning models support the base levels; map keys
+    // add higher/provider-specific levels (e.g. xhigh/max) or remove a level
+    // when explicitly mapped to null.
+    const orderedKnownLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+    const ids = new Set<string>(["off", "minimal", "low", "medium", "high"]);
+    const map = meta.thinkingLevelMap;
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      for (const [id, mapped] of Object.entries(map as Record<string, unknown>)) {
+        if (mapped === null) {
+          ids.delete(id);
+        } else {
+          ids.add(id);
+        }
+      }
+    }
+
+    const ordered = [
+      ...orderedKnownLevels.filter((id) => ids.has(id)),
+      ...Array.from(ids).filter((id) => !orderedKnownLevels.includes(id)),
+    ];
+
+    return {
+      options: ordered.map((id) => ({
+        id,
+        ...this.getStaticLevelDescription(id, isZh),
+      })),
+    };
+  }
+
   private renderEffortPopup(anchorEl: HTMLElement): void {
     const parent = anchorEl.parentElement;
     if (!parent) return;
 
     const isZh = this.plugin.settings.language === "zh";
+    const tab = this.activeTab;
+    const { options, note } = this.buildThinkingLevelOptions(tab);
 
     this.effortPopupEl = parent.createDiv({ cls: "pi-agent-effort-popup" });
 
-    const options = [
-      { id: "", name: "auto", desc: isZh ? "沿用 pi 默认设置" : "Pi Default" },
-      { id: "off", name: "off", desc: isZh ? "关闭推理" : "Reasoning Off" },
-      { id: "minimal", name: "low (minimal)", desc: isZh ? "最少推理" : "Minimal Reasoning" },
-      { id: "low", name: "low", desc: isZh ? "低强度推理" : "Low Reasoning" },
-      { id: "medium", name: "medium", desc: isZh ? "中等推理" : "Medium Reasoning" },
-      { id: "high", name: "high", desc: isZh ? "高强度推理" : "High Reasoning" },
-      { id: "xhigh", name: "xhigh", desc: isZh ? "最高强度推理" : "Max Reasoning" }
-    ];
-
-    let currentLevel = this.activeTab?.thinkingLevel ?? this.plugin.settings.thinkingLevel ?? "";
-    if (currentLevel === "auto") currentLevel = "";
-
-    for (const option of options) {
-      const isCurrent = currentLevel === option.id;
-      const itemEl = this.effortPopupEl.createDiv({
-        cls: `pi-agent-effort-popup-item ${isCurrent ? "is-active" : ""}`
+    const currentLevel = tab?.thinkingLevel ?? "";
+    const renderItem = (
+      id: string,
+      name: string,
+      desc: string,
+      onClick?: () => void | Promise<void>
+    ) => {
+      const isCurrent = currentLevel === id;
+      const itemEl = this.effortPopupEl!.createDiv({
+        cls: `pi-agent-effort-popup-item ${isCurrent ? "is-active" : ""}`,
       });
 
-      // Left area: check mark + English name
       const leftEl = itemEl.createSpan({ cls: "pi-agent-effort-popup-left" });
       const checkEl = leftEl.createSpan({ cls: "pi-agent-effort-popup-item-check" });
       checkEl.setText("✓");
 
-      leftEl.createSpan({ text: option.name, cls: "pi-agent-effort-popup-item-name" });
+      leftEl.createSpan({ text: name, cls: "pi-agent-effort-popup-item-name" });
+      itemEl.createSpan({ text: desc, cls: "pi-agent-effort-popup-item-desc" });
 
-      // Right area: description
-      itemEl.createSpan({ text: option.desc, cls: "pi-agent-effort-popup-item-desc" });
+      if (onClick) {
+        itemEl.onclick = (e) => {
+          e.stopPropagation();
+          this.runAsync(async () => {
+            await onClick();
+            new Notice(isZh ? `思考强度已设为 ${name}` : `Thinking level set to ${name}`);
+            this.closeEffortPopup();
+          });
+        };
+      } else {
+        itemEl.addClass("is-disabled");
+      }
+    };
 
-      itemEl.onclick = (e) => {
-        e.stopPropagation();
-        this.runAsync(async () => {
+    if (options.length === 0) {
+      // Informational / safe-fallback row. Do not expose a clickable level
+      // when Pi has not declared any supported option for this model.
+      const noteEl = this.effortPopupEl.createDiv({
+        cls: "pi-agent-effort-popup-note",
+      });
+      noteEl.setText(note ?? "");
+    } else {
+      for (const option of options) {
+        renderItem(option.id, option.name, option.desc, async () => {
           await this.updateActiveTabThinkingLevel(option.id);
-          new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
-          this.closeEffortPopup();
         });
-      };
+      }
     }
 
     this.effortOutsideClickHandler = (e: MouseEvent) => {
@@ -4093,14 +4381,8 @@ export class PiAgentView extends ItemView {
   private async refreshStateDisplay(): Promise<void> {
     if (!this.client) return;
     try {
-      const result = await this.client.getState();
-      if (!result.success || !result.data) return;
-      const state = result.data as any;
-      if (state.model) {
-        this.updateModelDisplay(state.model.provider, state.model.id);
-      }
-      if (this.footerEffortCurrent) {
-        this.footerEffortCurrent.setText(this.getThinkingLevelLabel(state.thinkingLevel));
+      if (this.activeTab) {
+        await this.syncTabStateFromPi(this.activeTab);
       }
 
       await this.refreshContextUsageDisplay();
@@ -4108,7 +4390,7 @@ export class PiAgentView extends ItemView {
       // 预热可用模型列表缓存，确保点击弹出时能“秒开”且不阻塞用户
       this.client.getAvailableModels().then(res => {
         if (res.success && res.data) {
-          this.availableModelsCache = ((res.data as any).models || []) as PiModel[];
+          this.availableModelsCache = (res.data.models || []) as PiModel[];
         }
       }).catch(() => {});
     } catch {
@@ -5122,7 +5404,8 @@ export class PiAgentView extends ItemView {
   }
 
   private getThinkingLevelLabel(level: string): string {
-    switch (level?.toLowerCase() || "") {
+    const v = level?.toLowerCase() || "";
+    switch (v) {
       case "":
       case "auto":
         return "Auto";
@@ -5138,24 +5421,37 @@ export class PiAgentView extends ItemView {
         return "High";
       case "xhigh":
         return "XHigh";
+      case "max":
+        return "Max";
       default:
-        return "Auto";
+        // Unknown level from Pi — render the raw id so the user can see
+        // exactly what the model is using, instead of masking it as "Auto".
+        return level || "Auto";
     }
   }
 
-  private showThinkingLevelSelector(): void {
+  private async showThinkingLevelSelector(): Promise<void> {
     const isZh = this.plugin.settings.language === "zh";
-    const options: ThinkingLevelOption[] = [
-      { id: "", name: isZh ? "沿用 pi 默认设置 (auto)" : "Pi Default (auto)", desc: isZh ? "使用 Pi 配置文件中的默认思考强度" : "Use default thinking level from Pi configuration" },
-      { id: "off", name: isZh ? "关闭推理 (off)" : "Off (off)", desc: isZh ? "不启用推理/思考过程" : "Do not enable reasoning/thinking" },
-      { id: "minimal", name: isZh ? "最少推理 (low (minimal))" : "Minimal (low (minimal))", desc: isZh ? "极少的推理量" : "Minimal reasoning effort" },
-      { id: "low", name: isZh ? "低强度推理 (low)" : "Low (low)", desc: isZh ? "较低的推理量" : "Low reasoning effort" },
-      { id: "medium", name: isZh ? "中等推理 (medium)" : "Medium (medium)", desc: isZh ? "中等推理量" : "Medium reasoning effort" },
-      { id: "high", name: isZh ? "高强度推理 (high)" : "High (high)", desc: isZh ? "较高的推理量" : "High reasoning effort" },
-      { id: "xhigh", name: isZh ? "最高强度推理 (xhigh)" : "X-High (xhigh)", desc: isZh ? "最大的推理量" : "Maximum reasoning effort" }
-    ];
 
-    new ThinkingLevelSuggestModal(this.app, options, isZh, async (option) => {
+    const tab = this.activeTab;
+    if (tab?.client) {
+      await this.syncTabStateFromPi(tab);
+    }
+    const { options, note } = this.buildThinkingLevelOptions(tab);
+
+    let modalOptions: ThinkingLevelOption[];
+    if (options.length === 0) {
+      new Notice(note ?? (isZh ? "当前模型没有可选思考档位" : "No selectable thinking level for current model"));
+      return;
+    } else {
+      modalOptions = options.map((opt) => ({
+        id: opt.id,
+        name: `${opt.name} (${opt.id})`,
+        desc: opt.desc,
+      }));
+    }
+
+    new ThinkingLevelSuggestModal(this.app, modalOptions, isZh, async (option) => {
       await this.updateActiveTabThinkingLevel(option.id);
       new Notice(isZh ? `思考强度已设为 ${option.name}` : `Thinking level set to ${option.name}`);
     }).open();

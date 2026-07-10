@@ -16,6 +16,22 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.45 (unreleased)
+
+- 优(model-sync): 以 Pi getState() 作为权威数据源，思考档位弹窗按 thinkingLevelMap 动态渲染
+  - PiAgentClient 新增 PiModel/PiAgentState/AvailableModelsResult/SetModelResult 类型；sendCommand<T> 泛型化
+  - 新增 syncSeq 单调计数器，废弃过时 getState() 响应；废弃旧 piModelMeta local 类型，改用 Pi 返回的 PiModel
+  - updateActiveTabModel 改以 setModel RPC 响应中的 Pi 确认状态写入 tab/settings，避免 local 值与 Pi clamp 结果不一致
+  - 新增 syncTabStateFromPi() 统一同步入口，替代散落在各处的局部写入
+  - thinking_level_changed / model_changed 事件触发 syncTabStateFromPi() 权威同步
+  - 设置页 provider/model/effort 联动改走 updateActiveTabModel 统一入口，catch setModel 异常防崩溃
+  - 思考档位弹窗不再用静态硬编码列表，改为从 model.thinkingLevelMap keys 动态渲染；非推理模型显示 informational 行
+  - getStaticLevelDescription() 提供已知档位的中英文 label 映射
+  - **fix**：档位选项从已知基础档位出发再按 thinkingLevelMap 覆盖，避免空 map 时无选项；新增 max 档位；已知档位 label 更精确（最低/较低/中等/较高/极高/极限）
+  - **fix**：移除弹窗中的 auto 入口，简化为只列 Pi 实际支持的档位；getEffortPopupOptions 返回类型去 auto
+
+---
+
 ## 📦 v1.0.42 (unreleased)
 
 - 新：智能审核（Smart Review）—— Agent 长任务自检与自动继续
