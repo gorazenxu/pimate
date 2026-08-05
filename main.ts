@@ -518,7 +518,7 @@ export default class PiAgentPlugin extends Plugin {
         { id: "siliconflow", defaultModel: "deepseek-ai/DeepSeek-V3" },
         { id: "google", defaultModel: "gemini-2.5-flash" },
         { id: "anthropic", defaultModel: "claude-3-5-sonnet-latest" },
-        { id: "zhipu", defaultModel: "glm-5.2" }
+        { id: "zai", defaultModel: "glm-5.2" }
       ];
       
       for (const provider of apiProviders) {

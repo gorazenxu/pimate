@@ -322,7 +322,8 @@ export class PiAgentClient extends EventEmitter {
         // 判定为已配置，导致模型 picker 同时出现 MINIMAX 和 MINIMAX-CN 两组。
         "minimax-cn": "MINIMAX_CN_API_KEY",
         "siliconflow": "SILICONFLOW_API_KEY",
-        "zhipu": "ZHIPU_API_KEY",
+        "zai": "ZAI_API_KEY",
+        "zai-coding-cn": "ZAI_CODING_CN_API_KEY",
       };
       const envVar = keyMap[provider];
       if (envVar) {

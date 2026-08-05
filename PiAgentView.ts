@@ -147,12 +147,19 @@ export class PiAgentView extends ItemView {
   private smartReviewToggleEl: HTMLElement | null = null;
   private smartReviewContinues: number = 0;
   private smartReviewOriginalGoal: string | null = null;
+  // Tab ids for which automatic title generation has already been requested.
+  // A title is generated at most once per new tab, while manual titles remain
+  // authoritative in settings.sessionTitles.
+  private titleGenRequested = new Set<string>();
+  private pendingAutoTitles = new Map<string, string>();
   private renderedMessages: RenderedMessage[] = [];
   private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
   // History paging (used for fast file-based load of large sessions).
   private historyShownCount = 0;     // currently displayed
   private historyTotalCount = 0;     // total messages in file
   private historyBannerEl: HTMLElement | null = null;
+  private historyPrependAnchorEl: HTMLElement | null = null;
+  private historyPrependInsertIndex = 0;
   private tabs: ChatTab[] = [];
   private activeTabId: string | null = null;
   private historyPanelEl: HTMLElement | null = null;
@@ -958,7 +965,7 @@ export class PiAgentView extends ItemView {
       thinkingLevel,
       // 优先用当前 provider 在 auth.json 里的 key（面板"凭证配置区"填的），
       // 否则回退到全局 settings.apiKey。PiAgentClient 会按 provider 把它
-      // 注入对应环境变量（如 ZHIPU_API_KEY），让 pi 后端 models.json 的
+      // 注入对应环境变量（如 ZAI_API_KEY），让 pi 后端 models.json 的
       // "$XXX_API_KEY" 能解析成功。
       apiKey: this.readProviderApiKey(provider) || settings.apiKey,
       cwd: vaultBasePath,
@@ -1945,7 +1952,11 @@ export class PiAgentView extends ItemView {
 
   // ─── UI Rendering ─────────────────────────────────────────────────────
 
-  private addMessage(role: string, content: string): RenderedMessage {
+  private addMessage(
+    role: string,
+    content: string,
+    options: { prependHistory?: boolean } = {}
+  ): RenderedMessage {
     if (!this.chatContainer) {
       throw new Error("Chat container not initialized");
     }
@@ -1954,6 +1965,9 @@ export class PiAgentView extends ItemView {
     const msgEl = this.chatContainer.createDiv(
       `pi-agent-message pi-agent-message-${role}`
     );
+    if (options.prependHistory && this.historyPrependAnchorEl) {
+      this.chatContainer.insertBefore(msgEl, this.historyPrependAnchorEl);
+    }
 
     // Role badge
     const badge = msgEl.createDiv("pi-agent-message-badge");
@@ -2050,16 +2064,21 @@ export class PiAgentView extends ItemView {
       contentEl,
     };
 
-    this.renderedMessages.push(rendered);
-
-    // Limit displayed messages
-    const maxDisplay = this.plugin.settings.maxHistoryDisplay;
-    while (this.renderedMessages.length > maxDisplay) {
-      const oldest = this.renderedMessages.shift();
-      if (oldest) oldest.el.remove();
+    if (options.prependHistory) {
+      this.renderedMessages.splice(this.historyPrependInsertIndex++, 0, rendered);
+    } else {
+      this.renderedMessages.push(rendered);
     }
 
-    this.scrollToBottom(true, true);
+    // Limit displayed messages
+    if (!options.prependHistory) {
+      const maxDisplay = this.plugin.settings.maxHistoryDisplay;
+      while (this.renderedMessages.length > maxDisplay) {
+        const oldest = this.renderedMessages.shift();
+        if (oldest) oldest.el.remove();
+      }
+      this.scrollToBottom(true, true);
+    }
     return rendered;
   }
 
@@ -2074,11 +2093,15 @@ export class PiAgentView extends ItemView {
   private addCompactionSummaryMessage(
     summary: string,
     tokensBefore?: number,
-    title = "Context compacted"
+    title = "Context compacted",
+    options: { prependHistory?: boolean } = {}
   ): void {
     if (!this.chatContainer) return;
     this.clearEmptyState();
     const wrap = this.chatContainer.createDiv("pi-agent-compaction-summary");
+    if (options.prependHistory && this.historyPrependAnchorEl) {
+      this.chatContainer.insertBefore(wrap, this.historyPrependAnchorEl);
+    }
     const header = wrap.createDiv("pi-agent-compaction-header");
     header.setText(
       tokensBefore
@@ -2089,7 +2112,7 @@ export class PiAgentView extends ItemView {
       const body = wrap.createDiv("pi-agent-compaction-body markdown-preview-view markdown-rendered");
       void MarkdownRenderer.render(this.app, summary, body, "", this);
     }
-    this.scrollToBottom(true, true);
+    if (!options.prependHistory) this.scrollToBottom(true, true);
   }
 
   private renderEmptyState(): void {
@@ -2866,19 +2889,173 @@ export class PiAgentView extends ItemView {
         ].join("\n");
   }
 
-  private maybeTitleActiveTab(seed: string): void {
-    const tab = this.activeTab;
-    if (!tab || !/^\d+$/.test(tab.label)) return;
-    const title = seed
-      .replace(/@\S+/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 16);
-    if (title) {
-      tab.label = title;
-      this.renderTabs();
-      void this.persistSessionTabs();
+  private normalizeSessionTitleKey(sessionPath: string): string {
+    return sessionPath.replace(/\\/g, "/").toLowerCase();
+  }
+
+  private getSessionTitle(sessionPath: string): string | undefined {
+    const titles = this.plugin.settings.sessionTitles;
+    if (!titles) return undefined;
+    const key = this.normalizeSessionTitleKey(sessionPath);
+    const exact = titles[key] || titles[sessionPath];
+    if (exact?.trim()) return exact;
+    for (const [savedPath, title] of Object.entries(titles)) {
+      if (this.normalizeSessionTitleKey(savedPath) === key && title?.trim()) return title;
     }
+    return undefined;
+  }
+
+  private hasSessionTitle(sessionPath: string): boolean {
+    return !!this.getSessionTitle(sessionPath);
+  }
+
+  private deleteSessionTitle(sessionPath: string): boolean {
+    const titles = this.plugin.settings.sessionTitles;
+    if (!titles) return false;
+    const key = this.normalizeSessionTitleKey(sessionPath);
+    let deleted = false;
+    for (const savedPath of Object.keys(titles)) {
+      if (this.normalizeSessionTitleKey(savedPath) === key) {
+        delete titles[savedPath];
+        deleted = true;
+      }
+    }
+    return deleted;
+  }
+
+  private maybeTitleActiveTab(seed: string): void {
+    if (this.plugin.settings.autoNameSessions === false) return;
+    const tab = this.activeTab;
+    if (!tab || this.titleGenRequested.has(tab.id)) return;
+    if (tab.sessionFile && this.hasSessionTitle(tab.sessionFile)) return;
+    const cleanedSeed = seed
+      .replace(/@\S+/g, "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleanedSeed) return;
+    this.titleGenRequested.add(tab.id);
+    void this.generateTitleWithLLM(cleanedSeed, tab);
+  }
+
+  private async generateTitleWithLLM(seed: string, tab: ChatTab): Promise<void> {
+    const settings = this.plugin.settings;
+    const provider = tab.modelProvider || settings.provider || "";
+    const modelId = tab.modelId || settings.modelId || "";
+    if (!provider || !modelId) {
+      this.titleGenRequested.delete(tab.id);
+      return;
+    }
+
+    const oneOff = new PiAgentClient({
+      piPath: settings.piPath,
+      provider,
+      modelId,
+      thinkingLevel: tab.thinkingLevel || settings.thinkingLevel,
+      apiKey: this.readProviderApiKey(provider) || settings.apiKey,
+      // noSession=true keeps the title-generation prompt out of the user's
+      // main session jsonl — the prompt never lands in chat history.
+      noSession: true,
+    });
+
+    try {
+      await oneOff.start();
+      const prompt = this.buildTitlePrompt(seed);
+      const title = await this.raceTitleFetch(oneOff, prompt, 15_000);
+      const cleaned = this.cleanTitleOutput(title);
+      if (cleaned) await this.persistAutoSessionTitle(tab, cleaned);
+    } catch (err) {
+      console.warn("[pimate] auto-title LLM failed", err);
+    } finally {
+      try {
+        await oneOff.destroy();
+      } catch (destroyErr) {
+        console.warn("[pimate] one-off client destroy failed", destroyErr);
+      }
+    }
+  }
+
+  private async persistAutoSessionTitle(tab: ChatTab, title: string): Promise<void> {
+    if (!tab.sessionFile) {
+      this.pendingAutoTitles.set(tab.id, title);
+      return;
+    }
+    if (this.hasSessionTitle(tab.sessionFile)) return;
+    if (!this.plugin.settings.sessionTitles) this.plugin.settings.sessionTitles = {};
+    this.plugin.settings.sessionTitles[this.normalizeSessionTitleKey(tab.sessionFile)] = title;
+    await this.plugin.saveSettings();
+  }
+
+  private async raceTitleFetch(
+    client: PiAgentClient,
+    prompt: string,
+    timeoutMs: number
+  ): Promise<string> {
+    let timer: number | null = null;
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        timer = window.setTimeout(() => {
+          reject(new Error(`title gen timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        client
+          .promptAndWait(prompt)
+          .then((res) => {
+            const text =
+              ((res?.data as any)?.text as string | undefined) ??
+              ((res?.data as any) as string | undefined) ??
+              "";
+            resolve(typeof text === "string" ? text : "");
+          })
+          .catch(reject);
+      });
+    } finally {
+      if (timer !== null) window.clearTimeout(timer);
+    }
+  }
+
+  private buildTitlePrompt(seed: string): string {
+    const isZh = this.plugin.settings.language !== "en";
+    const snippet = seed.slice(0, 500);
+    return isZh
+      ? [
+          "你是一个会话标题生成器。",
+          "",
+          "用户输入是一条对话的首条消息，请输出 4-12 个字的简洁标题。",
+          "",
+          "要求：",
+          "- 仅输出一行",
+          "- 无引号、无前缀、无解释、无 emoji",
+          "- 用用户原文的语言",
+          '- 若无可概括内容，输出"对话"',
+          "",
+          `用户首条消息:<<<`,
+          snippet,
+          `>>>`,
+        ].join("\n")
+      : [
+          "You are a session title generator.",
+          "",
+          "Given the user's first message of a conversation, output a concise 3-8 word title.",
+          "",
+          "Requirements:",
+          "- Output exactly one line",
+          "- No quotes, no prefix, no explanation, no emoji",
+          "- Match the user's original language",
+          '- If there is nothing to summarize, output "Conversation"',
+          "",
+          `First user message: <<<`,
+          snippet,
+          `>>>`,
+        ].join("\n");
+  }
+
+  private cleanTitleOutput(raw: string): string {
+    return raw
+      .replace(/^[\s"'“”‘’「」『』]+|[\s"'“”‘’「」『』]+$/g, "")
+      .replace(/\n[\s\S]*/, "")
+      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+      .trim()
+      .slice(0, 30);
   }
 
   private abortAgent(): void {
@@ -3668,7 +3845,7 @@ export class PiAgentView extends ItemView {
 
   private async renameResumeSession(session: ResumeSessionItem): Promise<void> {
     const isZh = this.plugin.settings.language === "zh";
-    const current = this.plugin.settings.sessionTitles?.[session.path] || session.label || "";
+    const current = this.getSessionTitle(session.path) || session.label || "";
     const value = await new Promise<string | null>((resolve) => {
       new PiAgentEditorModal(
         this.app,
@@ -3681,10 +3858,10 @@ export class PiAgentView extends ItemView {
     const title = value.trim();
     if (!this.plugin.settings.sessionTitles) this.plugin.settings.sessionTitles = {};
     if (title) {
-      this.plugin.settings.sessionTitles[session.path] = title;
+      this.plugin.settings.sessionTitles[this.normalizeSessionTitleKey(session.path)] = title;
       session.label = title;
     } else {
-      delete this.plugin.settings.sessionTitles[session.path];
+      this.deleteSessionTitle(session.path);
     }
     await this.plugin.saveSettings();
     new Notice(isZh ? "会话已重命名" : "Session renamed");
@@ -3704,8 +3881,7 @@ export class PiAgentView extends ItemView {
     if (tab) await this.closeTab(tab.id);
     try {
       unlinkSync(session.path);
-      if (this.plugin.settings.sessionTitles?.[session.path]) {
-        delete this.plugin.settings.sessionTitles[session.path];
+      if (this.deleteSessionTitle(session.path)) {
         await this.plugin.saveSettings();
       }
       new Notice("Session deleted");
@@ -3772,7 +3948,7 @@ export class PiAgentView extends ItemView {
         const path = `${directory}/${name}`;
         const stat = statSync(path);
         const preview = this.readSessionPreview(path);
-        const customTitle = this.plugin.settings.sessionTitles?.[path];
+        const customTitle = this.getSessionTitle(path);
         return {
           path,
           label: customTitle || (preview ? preview.slice(0, 24) : basename(name, ".jsonl").slice(0, 12)),
@@ -4442,6 +4618,11 @@ export class PiAgentView extends ItemView {
     if (!tab || !data) return;
     if (typeof data.sessionFile === "string") tab.sessionFile = data.sessionFile;
     if (typeof data.sessionId === "string") tab.sessionId = data.sessionId;
+    const pendingTitle = this.pendingAutoTitles.get(tab.id);
+    if (pendingTitle && tab.sessionFile) {
+      this.pendingAutoTitles.delete(tab.id);
+      void this.persistAutoSessionTitle(tab, pendingTitle);
+    }
     const maybeName = data.name || data.sessionName || data.title;
     if (typeof maybeName === "string" && maybeName.trim()) {
       tab.label = maybeName.trim().slice(0, 24);
@@ -4611,20 +4792,28 @@ export class PiAgentView extends ItemView {
       new Notice("No more messages to load");
       return;
     }
-    const newOnes = fileResult.messages.slice(this.historyShownCount);
-    // Preserve scroll position roughly: remember old scrollHeight
+    const newOnes = fileResult.messages.slice(
+      0,
+      fileResult.messages.length - this.historyShownCount
+    );
     const chat = this.chatContainer;
     const oldScrollHeight = chat?.scrollHeight || 0;
-    for (const msg of newOnes) {
-      this.renderMessageFromHistory(msg);
+    const oldScrollTop = chat?.scrollTop || 0;
+    this.historyPrependAnchorEl = this.historyBannerEl?.nextElementSibling as HTMLElement | null;
+    this.historyPrependInsertIndex = 0;
+    try {
+      for (const msg of newOnes) {
+        this.renderMessageFromHistory(msg, { prependHistory: true });
+      }
+    } finally {
+      this.historyPrependAnchorEl = null;
+      this.historyPrependInsertIndex = 0;
     }
     this.historyShownCount = fileResult.messages.length;
     this.historyTotalCount = fileResult.total;
     this.renderHistoryBanner();
     if (chat) {
-      // Keep the user's view stable after prepending.
-      const newScrollHeight = chat.scrollHeight;
-      chat.scrollTop = newScrollHeight - oldScrollHeight + (chat.scrollTop || 0);
+      chat.scrollTop = oldScrollTop + (chat.scrollHeight - oldScrollHeight);
     }
   }
 
@@ -4694,7 +4883,10 @@ export class PiAgentView extends ItemView {
   }
 
   /** Render a single message from a history payload (file or RPC). */
-  private renderMessageFromHistory(msg: any): void {
+  private renderMessageFromHistory(
+    msg: any,
+    options: { prependHistory?: boolean } = {}
+  ): void {
     if (msg.role === "user") {
       const content =
         typeof msg.content === "string"
@@ -4702,11 +4894,11 @@ export class PiAgentView extends ItemView {
           : Array.isArray(msg.content)
             ? msg.content.map((c: any) => c.text || "").join("")
             : "";
-      this.addMessage("user", this.stripRecentContextGuard(content));
+      this.addMessage("user", this.stripRecentContextGuard(content), options);
     } else if (msg.role === "compactionSummary") {
-      this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore);
+      this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore, "Context compacted", options);
     } else if (msg.role === "branchSummary") {
-      this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary");
+      this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary", options);
     } else if (msg.role === "assistant") {
       const blocks = Array.isArray(msg.content) ? msg.content : [];
       const hasVisibleText = blocks.some((block: any) => block.type === "text" && String(block.text || "").trim());
@@ -4714,7 +4906,7 @@ export class PiAgentView extends ItemView {
       const hasToolCall = blocks.some((block: any) => block.type === "toolCall");
       if (!hasVisibleText && !hasVisibleThinking && !hasToolCall) return;
 
-      const rendered = this.addMessage("assistant", "");
+      const rendered = this.addMessage("assistant", "", options);
       this.currentAssistantMsg = rendered;
       if (blocks.length > 0) {
         for (const block of blocks) {

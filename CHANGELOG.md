@@ -16,6 +16,17 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.46 (unreleased)
+
+- 新：新建会话首次发送消息后可自动生成标题
+  - 设置页新增「自动起标题」开关，默认开启
+  - 通过独立的无会话 Pi 请求生成简短标题，不写入主会话历史
+  - 手动标题始终优先；统一规范化会话路径，兼容 Windows 路径大小写与分隔符差异
+- 修：加载更早历史消息时按时间顺序前插，并保持当前阅读位置稳定
+- 修：Z.ai 国内 Coding Plan provider 改用 `zai-coding-cn` 与专用 `ZAI_CODING_CN_API_KEY`，避免与通用 Z.ai provider 混用
+
+---
+
 ## 📦 v1.0.45 (unreleased)
 
 - 优(model-sync): 以 Pi getState() 作为权威数据源，思考档位弹窗按 thinkingLevelMap 动态渲染

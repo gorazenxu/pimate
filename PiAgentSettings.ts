@@ -73,6 +73,7 @@ export interface PiAgentSettings {
   showThinking: boolean;
   smartReviewEnabled: boolean;
   smartReviewMaxContinues: number;
+  autoNameSessions: boolean;
   maxHistoryDisplay: number;
   sessionTabs: PersistedSessionTab[];
   activeSessionFile: string;
@@ -96,6 +97,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   showThinking: true,
   smartReviewEnabled: false,
   smartReviewMaxContinues: 3,
+  autoNameSessions: true,
   maxHistoryDisplay: 100,
   sessionTabs: [],
   activeSessionFile: "",
@@ -549,11 +551,18 @@ export class PiAgentSettingTab extends PluginSettingTab {
         desc: isZh ? "推荐: gemini-2.5-flash, gemini-2.5-pro" : "Recommended: gemini-2.5-flash, gemini-2.5-pro",
         placeholder: "gemini-2.5-flash"
       },
-      "zhipu": {
+      "zai": {
         model: "glm-5.2",
         desc: isZh
           ? "推荐: glm-5.2（Z.ai 旗舰, 1M 上下文）。GLM Coding Plan 套餐须走专属端点 https://open.bigmodel.cn/api/coding/paas/v4 —— 通用端点 /api/paas/v4 不抵扣套餐、按量扣费（会报 429 余额不足）。"
           : "Recommended: glm-5.2 (Z.ai flagship, 1M context). GLM Coding Plan MUST use https://open.bigmodel.cn/api/coding/paas/v4 — the generic /api/paas/v4 bypasses the plan and bills per-token (causes 429 balance errors).",
+        placeholder: "glm-5.2"
+      },
+      "zai-coding-cn": {
+        model: "glm-5.2",
+        desc: isZh
+          ? "推荐: glm-5.2。该 provider 使用智谱 Coding Plan 国内套餐专属端点。"
+          : "Recommended: glm-5.2. This provider uses the Z.AI Coding Plan China endpoint.",
         placeholder: "glm-5.2"
       }
     };
@@ -989,6 +998,22 @@ export class PiAgentSettingTab extends PluginSettingTab {
               this.plugin.settings.smartReviewMaxContinues = num;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName(isZh ? "自动起标题" : "Auto-name sessions")
+      .setDesc(
+        isZh
+          ? "开启后，用户首次发送消息时自动用 LLM 为当前 Tab 起一个 4-12 字的标题（不污染主会话历史）。失败时降级为首条消息截断。"
+          : "When enabled, the plugin auto-generates a 4-12 char title for the current tab on first user message (without polluting the main session). Falls back to first-message truncation on failure."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoNameSessions !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.autoNameSessions = value;
+            await this.plugin.saveSettings();
           })
       );
 
