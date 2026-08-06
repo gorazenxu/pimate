@@ -1,6 +1,6 @@
 {
   "name": "pimate",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "description": "Embeds Pi Coding Agent as an AI collaborator for your vault.",
   "main": "main.js",
   "scripts": {
