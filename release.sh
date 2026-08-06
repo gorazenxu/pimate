@@ -78,6 +78,7 @@ fi
 echo "== Releasing v$VER =="
 echo "Step 1/3: bump version + commit"
 npm version patch --no-git-tag-version
+npm install --package-lock-only --ignore-scripts
 npm run version
 git add manifest.json package.json package-lock.json versions.json
 git commit -m "Bump to v$VER"

@@ -16,6 +16,13 @@ _当前没有未提交的修改。_
 
 ---
 
+## 📦 v1.0.47 (unreleased)
+
+- 修：同步 npm `package-lock.json`，修复 Obsidian Community 审核的 lockfile 过期与依赖安装失败
+- 配：发布脚本在版本递增后自动同步 npm lockfile，避免后续发版再次失配
+
+---
+
 ## 📦 v1.0.46 (unreleased)
 
 - 新：新建会话首次发送消息后可自动生成标题
