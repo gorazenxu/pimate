@@ -8,3 +8,4 @@ pnpm-workspace.yaml
 
 # Local working notes (not part of the plugin release)
 docs/thinking-issue-summary.md
+.gstack/

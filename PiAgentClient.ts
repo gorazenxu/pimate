@@ -154,6 +154,35 @@ export interface RpcResponse<T = unknown> {
   data?: T;
 }
 
+export interface ForkMessage {
+  entryId: string;
+  text: string;
+}
+
+export interface ForkMessagesResult {
+  messages: ForkMessage[];
+}
+
+/**
+ * Session entries returned by Pi's `get_entries` RPC.  Keep the payload
+ * intentionally open-ended because Pi adds entry-specific fields (for
+ * example `tokensBefore` on compaction entries) over time.
+ */
+export interface SessionEntry {
+  id: string;
+  parentId?: string | null;
+  type: string;
+  message?: Message;
+  summary?: string;
+  tokensBefore?: number;
+  [key: string]: unknown;
+}
+
+export interface SessionEntriesResult {
+  entries: SessionEntry[];
+  leafId?: string | null;
+}
+
 // ─── Pi model & state types ────────────────────────────────────────────────
 // Pi 返回的完整 model 元数据。Pimate 仅依赖 `reasoning` 与 `thinkingLevelMap`
 // 的键集来决定档位弹窗；`thinkingLevelMap` 的 value 类型由 Pi 内部约定，
@@ -170,6 +199,9 @@ export interface PiAgentState {
   model?: PiModel;
   thinkingLevel?: string;
   isStreaming?: boolean;
+  sessionFile?: string;
+  sessionId?: string;
+  sessionName?: string;
   [key: string]: unknown;
 }
 
@@ -548,10 +580,14 @@ export class PiAgentClient extends EventEmitter {
   }
 
   /**
-   * Abort current agent operation
+   * Abort the current agent operation.
+   *
+   * The RPC server responds only after Pi reaches an idle state.  Callers
+   * that need to start a replacement prompt must await this acknowledgement;
+   * otherwise the next prompt is merely placed in Pi's streaming queue.
    */
-  abort(): void {
-    this.sendFireAndForget({ type: "abort" });
+  async abort(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "abort" });
   }
 
   /**
@@ -630,8 +666,17 @@ export class PiAgentClient extends EventEmitter {
     return this.sendCommand({ type: "get_last_assistant_text" });
   }
 
-  async getForkMessages(): Promise<RpcResponse> {
+  async getForkMessages(): Promise<RpcResponse<ForkMessagesResult>> {
     return this.sendCommand({ type: "get_fork_messages" });
+  }
+
+  /**
+   * Get the persisted session tree and the currently selected leaf.  Unlike
+   * `get_messages`, this preserves entry ids and lets the UI reconstruct only
+   * the active branch instead of flattening abandoned branches into history.
+   */
+  async getEntries(): Promise<RpcResponse<SessionEntriesResult>> {
+    return this.sendCommand({ type: "get_entries" });
   }
 
   async fork(entryId: string): Promise<RpcResponse> {
@@ -642,19 +687,23 @@ export class PiAgentClient extends EventEmitter {
     return this.sendCommand({ type: "clone" });
   }
 
-  async promptAndWait(message: string): Promise<RpcResponse> {
-    await this.prompt(message);
-    return this.waitForAgentEnd().then(() => this.getLastAssistantText());
+  async reload(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "reload" });
   }
 
-  private waitForAgentEnd(timeoutMs = 120_000): Promise<void> {
+  async promptAndWait(message: string): Promise<RpcResponse> {
+    await this.prompt(message);
+    return this.waitForAgentSettled().then(() => this.getLastAssistantText());
+  }
+
+  private waitForAgentSettled(timeoutMs = 120_000): Promise<void> {
     return new Promise((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.off("event", onEvent);
         reject(new Error("Timed out waiting for assistant response"));
       }, timeoutMs);
       const onEvent = (event: RpcEvent) => {
-        if (event.type === "agent_end") {
+        if (event.type === "agent_settled") {
           window.clearTimeout(timeout);
           this.off("event", onEvent);
           resolve();

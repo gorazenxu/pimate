@@ -1579,6 +1579,26 @@
   font-size: 14px;
 }
 
+.pi-agent-steer-btn {
+  width: auto;
+  gap: 4px;
+  padding: 0 8px;
+  color: var(--pi-brand);
+  font-size: 12px;
+}
+
+.pi-agent-steer-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.pi-agent-steer-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  border-color: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
 /* Suggest / editor modal helpers */
 .pi-agent-suggestion-title { font-weight: 600; color: var(--text-normal); }
 .pi-agent-suggestion-note {
@@ -1736,8 +1756,28 @@
 }
 
 .pi-agent-message-user .pi-agent-msg-actions {
-  right: auto;
-  left: 12px;
+  /* User bubbles are right-aligned.  Keep the action strip anchored to the
+     bubble's right edge so the last action cannot overflow the chat viewport
+     and disappear behind `overflow-x: hidden` on narrow sidebars. */
+  right: 12px;
+  left: auto;
+}
+
+.pi-agent-message-user.is-queued {
+  border-color: var(--pi-brand);
+  box-shadow: 0 0 0 1px rgba(var(--pi-brand-rgb), 0.12);
+}
+
+.pi-agent-message-steer-btn {
+  gap: 4px;
+  padding-inline: 7px;
+  color: var(--pi-brand);
+  white-space: nowrap;
+}
+
+.pi-agent-message-steer-btn svg {
+  width: 13px;
+  height: 13px;
 }
 
 .pi-agent-action-btn {
@@ -2745,4 +2785,71 @@ summary.pi-agent-history-group-title:hover {
   margin-top: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--background-modifier-border);
+}
+
+/* ─── Fork History Modal ──────────────────────────────────────────────── */
+.pimate-session-tree-modal {
+  max-width: 640px;
+}
+.pimate-modal-header {
+  margin-bottom: 8px;
+}
+.pimate-modal-header h3 {
+  margin: 0;
+  font-size: 1.2em;
+  color: var(--text-normal);
+}
+.pimate-modal-desc {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.pimate-tree-list-container {
+  max-height: 380px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+.pimate-tree-node-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.pimate-tree-node-item:hover {
+  border-color: var(--interactive-accent);
+  background-color: var(--background-secondary-alt);
+}
+.pimate-tree-node-icon {
+  display: flex;
+  align-items: center;
+  color: var(--interactive-accent);
+}
+.pimate-tree-node-info {
+  flex: 1;
+  min-width: 0;
+}
+.pimate-tree-node-title {
+  font-weight: 500;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pimate-tree-node-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.pimate-tree-node-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
 }

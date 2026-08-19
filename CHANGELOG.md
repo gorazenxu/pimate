@@ -12,7 +12,21 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ## 🛠 Working / Uncommitted
 
-_当前没有未提交的修改。_
+- _当前没有未提交的修改。_
+
+---
+
+## 📦 v1.0.48
+
+- 新：深度集成 Pi (earendil-works/pi) 原生核心实用功能
+  - 新增可 Fork 的历史节点列表 Modal (`SessionTreeModal`) 与消息卡片 `🌿 Fork` 分支按钮
+  - 修：消息卡片 Fork 仅对 Pi `get_fork_messages` 确认的非空 User 提问启用；Assistant 回复、思考过程、工具消息与摘要不提供标准 RPC Fork
+  - 修：区分 Fork 成功、Pi 拒绝、扩展取消与通信异常；历史节点列表仅在 Fork 成功后关闭
+  - 改：Streaming 时点击「调整方向」会先中断当前回复，再立即按所选消息转向；普通 Enter 发送仍进入 Pi follow-up queue
+  - 增加 Header 顶部菜单 `重载扩展与技能 (/reload)` 项，免重启即时刷新本地 extensions 与 skills
+  - 优：斜杠 `/` 选单统一展示扩展、Skill 与 Pi 内建 RPC 操作（如 `/compact`、`/model`、`/fork`、`/tree`、`/reload`、`/export`），并支持直接执行
+  - 新增对话记录一键导出为 Obsidian Vault Markdown 笔记 (`Pimate Export YYYY-MM-DD HH-MM-SS.md`)
+  - 详细说明文档参见 `docs/RELEASE_NOTES_PI_INTEGRATION.md`
 
 ---
 

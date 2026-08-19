@@ -22,8 +22,11 @@ import {
   type RpcEvent,
   type AssistantMessageEvent,
   type MessageContent,
+  type ForkMessage,
+  type SessionEntry,
   type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
+import { SessionTreeModal } from "./SessionTreeModal";
 
 export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
 
@@ -40,10 +43,22 @@ interface PiCommand {
   path?: string;
 }
 
-interface ForkMessage {
-  entryId: string;
-  text: string;
-}
+// Pi's `get_commands` RPC intentionally returns only extension commands,
+// prompt templates, and skills. These operations exist on the RPC protocol
+// itself, so Pimate supplies them to the same slash-command picker and
+// dispatches them directly instead of sending literal `/compact` text to a
+// model.
+const PIMATE_BUILTIN_COMMANDS: readonly PiCommand[] = [
+  { name: "compact", description: "Compress the current conversation context", source: "pimate" },
+  { name: "model", description: "Choose the active model", source: "pimate" },
+  { name: "fork", description: "Fork from an earlier user prompt", source: "pimate" },
+  { name: "tree", description: "Open the current session tree", source: "pimate" },
+  { name: "reload", description: "Reload Pi extensions, prompts, and skills", source: "pimate" },
+  { name: "export", description: "Export the session (use `html` for HTML)", source: "pimate" },
+  { name: "new", description: "Start a new conversation", source: "pimate" },
+  { name: "clone", description: "Clone the current branch", source: "pimate" },
+  { name: "stats", description: "Show current session statistics", source: "pimate" },
+];
 
 interface ResumeSessionItem {
   path: string;
@@ -72,6 +87,8 @@ interface ChatTab {
   client: PiAgentClient | null;
   isStreaming: boolean;
   queueCount?: number;
+  steeringCount?: number;
+  followUpCount?: number;
   modelProvider?: string;
   modelId?: string;
   thinkingLevel?: string;
@@ -87,6 +104,9 @@ interface ChatTab {
   sessionFile?: string;
   sessionId?: string;
   restored?: boolean;
+  // True only when get_entries found entries outside the active leaf path.
+  // Such sessions must keep using branch-aware RPC reloads after each turn.
+  requiresBranchHistoryRpc?: boolean;
 }
 
 interface InlineEditReviewResult {
@@ -96,14 +116,24 @@ interface InlineEditReviewResult {
 
 interface RenderedMessage {
   id: string;
+  entryId?: string;
   role: string;
   el: HTMLElement;
   contentEl: HTMLElement;
+  forkBtn?: HTMLButtonElement;
+  steerBtn?: HTMLButtonElement;
   // For streaming assistant messages
   textBlock?: HTMLElement;
   thinkingBlock?: HTMLElement;
   thinkingContent?: HTMLElement;
   toolBlocks?: Map<string, HTMLElement>;
+}
+
+interface PendingQueuedMessage {
+  rendered: RenderedMessage;
+  rpcMessage: string;
+  userInput: string;
+  images: Array<{ data: string; mimeType: string }>;
 }
 
 interface MentionEntry {
@@ -128,6 +158,7 @@ export class PiAgentView extends ItemView {
   private imagePreviewEl: HTMLElement | null = null;
   private widgetEl: HTMLElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
+  private steerBtn: HTMLButtonElement | null = null;
   private statusBar: HTMLElement | null = null;
   private speedEl: HTMLElement | null = null;
   private speedStartedAt: number | null = null;
@@ -160,6 +191,9 @@ export class PiAgentView extends ItemView {
   private historyBannerEl: HTMLElement | null = null;
   private historyPrependAnchorEl: HTMLElement | null = null;
   private historyPrependInsertIndex = 0;
+  // When history comes from Pi's session tree, retain the complete active
+  // branch so paging never falls back to a flattened JSONL file.
+  private activeBranchHistory: any[] | null = null;
   private tabs: ChatTab[] = [];
   private activeTabId: string | null = null;
   private historyPanelEl: HTMLElement | null = null;
@@ -169,6 +203,11 @@ export class PiAgentView extends ItemView {
   private nextTabNumber = 1;
   private contextItems: ContextItem[] = [];
   private isStreaming = false;
+  // A hard steer is intentionally different from Pi's native `steer`: it
+  // first aborts the current stream, then starts a replacement prompt.
+  private hardSteerInFlight = false;
+  private abortInFlight = false;
+  private pendingQueuedMessages: PendingQueuedMessage[] = [];
   private currentAssistantMsg: RenderedMessage | null = null;
   private currentTextBlock: HTMLElement | null = null;
   private currentThinkingBlock: HTMLElement | null = null;
@@ -177,6 +216,9 @@ export class PiAgentView extends ItemView {
   private thinkingTimer: number | null = null;
   private shouldAutoScroll = true;
   private pendingUIRequests = new Map<string, (value: unknown) => void>();
+  // Pi get_fork_messages is the sole authority for card-level Fork actions.
+  private forkMessagesByEntryId = new Map<string, ForkMessage>();
+  private forkScopeVersion = 0;
 
   // ─── Stream Render Helper States ────────────────────────────────────
   private lastRenderTime = 0;
@@ -195,7 +237,10 @@ export class PiAgentView extends ItemView {
   private filteredCommands: PiCommand[] = [];
   private activeCommandIndex = 0;
   private commandQueryStart = -1;
-  private availableCommands: PiCommand[] = [];
+  private availableCommands: PiCommand[] = [...PIMATE_BUILTIN_COMMANDS];
+  private commandLoadPromise: Promise<void> | null = null;
+  private commandLoadClient: PiAgentClient | null = null;
+  private commandCatalogClient: PiAgentClient | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: PiAgentPlugin) {
     super(leaf);
@@ -420,6 +465,7 @@ export class PiAgentView extends ItemView {
                 t.sessionFile = undefined;
                 t.sessionId = undefined;
                 t.restored = false;
+                t.requiresBranchHistoryRpc = false;
                 t.label = t.id.split("-").pop() || "Tab";
               }
               if (this.chatContainer) this.chatContainer.empty();
@@ -563,6 +609,15 @@ export class PiAgentView extends ItemView {
           return;
         } else if (e.key === "Enter") {
           e.preventDefault();
+          // A complete Pimate built-in command should run on the first Enter;
+          // otherwise `/compact` would only be reinserted as `/compact ` and
+          // look as if it had no effect.
+          const builtin = this.parsePimateBuiltinCommand(this.inputEl?.value || "");
+          if (builtin && !builtin.args) {
+            this.closeCommandDropdown();
+            this.runAsync(() => this.sendMessage());
+            return;
+          }
           this.insertCommandSelection();
           return;
         } else if (e.key === "Escape") {
@@ -575,8 +630,6 @@ export class PiAgentView extends ItemView {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         this.runAsync(() => this.sendMessage());
-      } else if (e.key === "/" && this.inputEl?.selectionStart === 0 && !this.inputEl.value) {
-        window.setTimeout(() => this.runAsync(() => this.showCommandSelector()), 0);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         this.runAsync(() => this.showCommandSelector());
@@ -619,6 +672,7 @@ export class PiAgentView extends ItemView {
       this.handleMentionInput();
       this.handleCommandInput();
       this.resizeInputEl();
+      this.updateButtons();
     });
 
     const footer = inputArea.createDiv("pi-agent-input-footer");
@@ -702,6 +756,20 @@ export class PiAgentView extends ItemView {
     };
     this.updateSmartReviewToggleUI();
 
+    // While Pi is generating, ordinary sends are queued as follow-ups. This
+    // one-shot action explicitly stops the current run and starts the typed
+    // message as the new direction.
+    this.steerBtn = footerRight.createEl("button", {
+      cls: "pi-agent-footer-btn pi-agent-steer-btn pi-agent-hidden",
+      attr: {
+        title: isZh ? "中断当前回复并按输入调整" : "Stop current response and redirect",
+        "aria-label": isZh ? "中断当前回复并按输入调整" : "Stop current response and redirect",
+      },
+    });
+    setIcon(this.steerBtn, "corner-up-right");
+    this.steerBtn.createSpan({ text: isZh ? "调整方向" : "Steer" });
+    this.steerBtn.onclick = () => this.runAsync(() => this.sendMessage("steer"));
+
     this.abortBtn = footerRight.createEl("button", {
       text: "×",
       cls: "pi-agent-footer-btn pi-agent-abort-btn",
@@ -741,6 +809,7 @@ export class PiAgentView extends ItemView {
         sessionFile: pTab?.sessionFile,
         sessionId: pTab?.sessionId,
         restored: !!pTab?.sessionFile,
+        requiresBranchHistoryRpc: false,
       });
     }
 
@@ -765,6 +834,7 @@ export class PiAgentView extends ItemView {
       modelProvider: this.plugin.settings.provider,
       modelId: this.plugin.settings.modelId,
       thinkingLevel: this.plugin.settings.thinkingLevel,
+      requiresBranchHistoryRpc: false,
     };
     this.tabs.push(tab);
     this.activeTabId = tab.id;
@@ -810,11 +880,13 @@ export class PiAgentView extends ItemView {
     tab.sessionFile = undefined;
     tab.sessionId = undefined;
     tab.restored = false;
+    tab.requiresBranchHistoryRpc = false;
     tab.label = tab.id.split("-").pop() || "Tab";
     
     if (tab.id === this.activeTabId) {
       if (this.chatContainer) this.chatContainer.empty();
       this.renderedMessages = [];
+      this.pendingQueuedMessages = [];
       this.renderEmptyState();
       await this.ensureTabClient(tab);
       this.client = tab.client;
@@ -832,11 +904,17 @@ export class PiAgentView extends ItemView {
     if (!tab) return;
     this.activeTabId = tab.id;
     this.client = tab.client;
+    this.forkMessagesByEntryId.clear();
+    this.forkScopeVersion++;
+    this.pendingQueuedMessages = [];
+    this.availableCommands = [...PIMATE_BUILTIN_COMMANDS];
+    this.commandCatalogClient = null;
     this.isStreaming = tab.isStreaming;
     this.renderTabs();
     this.resetActiveRenderState();
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
+    this.activeBranchHistory = null;
     this.historyShownCount = 0;
     this.historyTotalCount = 0;
     this.historyBannerEl = null;
@@ -850,7 +928,10 @@ export class PiAgentView extends ItemView {
     // Each call sets a different part of the UI and they don't depend on each other.
     void this.refreshStateDisplay();
     void this.loadAvailableCommands();
-    await this.loadMessages();
+    // A tab switch may restore a session that already contains sibling
+    // branches, so calibrate once against Pi's authoritative active leaf.
+    await this.loadMessages({ forceRpc: true });
+    void this.refreshForkMessages();
     this.renderActiveTabRuntimeStatus();
     this.renderActiveTabSpeed();
     this.renderActiveTabModelAndEffort();
@@ -896,6 +977,7 @@ export class PiAgentView extends ItemView {
       tab.sessionFile = undefined;
       tab.sessionId = undefined;
       tab.restored = false;
+      tab.requiresBranchHistoryRpc = false;
     }
 
     if (tab.client?.isRunning()) {
@@ -1142,11 +1224,24 @@ export class PiAgentView extends ItemView {
       tab.modelProvider = state.model.provider;
       tab.modelId = state.model.id;
     }
+    // Pi's get_state already carries the authoritative session binding. Keep
+    // this independent of the context-meter UI/get_session_stats path so a
+    // fork or clone cannot leave the tab pointing at its previous file.
+    if (typeof state.sessionFile === "string") tab.sessionFile = state.sessionFile;
+    if (typeof state.sessionId === "string") tab.sessionId = state.sessionId;
     if (typeof state.thinkingLevel === "string") {
       tab.thinkingLevel = state.thinkingLevel;
     } else if (state.thinkingLevel == null && tab.piModelMeta?.reasoning === false) {
       // Reasoning-off models may report no level at all; clear stale values.
       tab.thinkingLevel = "";
+    }
+    if (typeof state.isStreaming === "boolean") {
+      tab.isStreaming = state.isStreaming;
+      if (tab === this.activeTab) {
+        this.isStreaming = state.isStreaming;
+        this.updateButtons();
+        this.renderActiveTabRuntimeStatus();
+      }
     }
 
     const modelChanged =
@@ -1206,10 +1301,13 @@ export class PiAgentView extends ItemView {
 
   // ─── Event Handling ───────────────────────────────────────────────────
 
-  private getQueueTotal(event: RpcEvent): number {
+  private getQueueCounts(event: RpcEvent): { steering: number; followUp: number } {
     const steering = event.steering as string[] | undefined;
     const followUp = event.followUp as string[] | undefined;
-    return (steering?.length || 0) + (followUp?.length || 0);
+    return {
+      steering: steering?.length || 0,
+      followUp: followUp?.length || 0,
+    };
   }
 
   private recordTabRuntimeState(tab: ChatTab, event: RpcEvent): void {
@@ -1218,11 +1316,19 @@ export class PiAgentView extends ItemView {
         tab.isStreaming = true;
         break;
       case "agent_end":
+        // A run can end while another queued run is about to start. Pi only
+        // becomes fully idle at agent_settled.
+        break;
+      case "agent_settled":
         tab.isStreaming = false;
         break;
-      case "queue_update":
-        tab.queueCount = this.getQueueTotal(event);
+      case "queue_update": {
+        const counts = this.getQueueCounts(event);
+        tab.steeringCount = counts.steering;
+        tab.followUpCount = counts.followUp;
+        tab.queueCount = counts.steering + counts.followUp;
         break;
+      }
       case "thinking_level_changed":
       case "model_changed":
         // Authoritative state — pull full state from Pi to reconcile.
@@ -1241,7 +1347,19 @@ export class PiAgentView extends ItemView {
     }
     const queueCount = tab.queueCount || 0;
     if (queueCount > 0) {
-      this.setStatus(`📋 ${queueCount} queued message(s)`, "thinking");
+      const steering = tab.steeringCount || 0;
+      const followUp = tab.followUpCount || 0;
+      const isZh = this.plugin.settings.language !== "en";
+      const queueLabel = isZh
+        ? [
+            steering > 0 ? `转向 ${steering}` : "",
+            followUp > 0 ? `排队 ${followUp}` : "",
+          ].filter(Boolean).join(" · ")
+        : [
+            steering > 0 ? `steer ${steering}` : "",
+            followUp > 0 ? `follow-up ${followUp}` : "",
+          ].filter(Boolean).join(" · ");
+      this.setStatus(`📋 ${queueLabel || `${queueCount} queued`}`, "thinking");
     } else if (tab.isStreaming) {
       this.setStatus("🤔 Thinking...", "thinking");
     } else {
@@ -1260,17 +1378,30 @@ export class PiAgentView extends ItemView {
         break;
 
       case "agent_end":
+        // End of one run is not the end of the queue. Keep the generating UI
+        // active until Pi emits agent_settled.
+        this.resetActiveRenderState();
+        this.renderActiveTabRuntimeStatus();
+        break;
+
+      case "agent_settled":
         this.isStreaming = false;
         if (this.activeTab) this.activeTab.isStreaming = false;
-        this.currentAssistantMsg = null;
-        this.currentTextBlock = null;
-        this.currentThinkingBlock = null;
-        this.currentThinkingContent = null;
+        for (const pending of this.pendingQueuedMessages) {
+          pending.rendered.el.removeClass("is-queued");
+        }
+        this.pendingQueuedMessages = [];
+        this.resetActiveRenderState();
         this.stopSpeedIndicator();
         this.updateButtons();
         this.renderActiveTabRuntimeStatus();
-        void this.refreshStateDisplay();
-        void this.maybeAutoContinueSmartReview();
+        // A hard steer immediately follows this settled event with a fresh
+        // prompt. Reloading history or starting Smart Review in between would
+        // race that replacement prompt and can revive the old direction.
+        if (!this.hardSteerInFlight) {
+          void this.refreshForkMessagesAndReloadHistory();
+          void this.maybeAutoContinueSmartReview();
+        }
         break;
 
       case "message_start":
@@ -1352,6 +1483,18 @@ export class PiAgentView extends ItemView {
           : message.content
               ?.map((c) => c.text || c.thinking || "")
               .join("") || "";
+      const pendingIndex = this.findPendingQueuedMessage(content);
+      if (pendingIndex !== -1) {
+        const [pending] = this.pendingQueuedMessages.splice(pendingIndex, 1);
+        pending.rendered.el.removeClass("is-queued");
+        pending.rendered.el.setAttribute("data-rpc-message", content);
+        if (this.pendingUserImages.length > 0) {
+          this.pendingUserImages = [];
+        }
+        this.updateButtons();
+        return;
+      }
+
       const rendered = this.addMessage("user", this.stripRecentContextGuard(content));
       // Attach any images that were sent with this message to the bubble.
       if (this.pendingUserImages.length > 0) {
@@ -1885,8 +2028,13 @@ export class PiAgentView extends ItemView {
   }
 
   private handleQueueUpdate(event: RpcEvent): void {
-    const total = this.getQueueTotal(event);
-    if (this.activeTab) this.activeTab.queueCount = total;
+    const counts = this.getQueueCounts(event);
+    const total = counts.steering + counts.followUp;
+    if (this.activeTab) {
+      this.activeTab.steeringCount = counts.steering;
+      this.activeTab.followUpCount = counts.followUp;
+      this.activeTab.queueCount = total;
+    }
     this.renderActiveTabRuntimeStatus();
   }
 
@@ -1952,10 +2100,76 @@ export class PiAgentView extends ItemView {
 
   // ─── UI Rendering ─────────────────────────────────────────────────────
 
+  private async refreshForkMessages(): Promise<boolean> {
+    const tab = this.activeTab;
+    const client = this.client;
+    const scopeVersion = this.forkScopeVersion;
+    if (!tab || !client) return false;
+
+    try {
+      const result = await client.getForkMessages();
+      if (
+        this.activeTab !== tab ||
+        this.client !== client ||
+        this.forkScopeVersion !== scopeVersion ||
+        !result.success
+      ) {
+        return false;
+      }
+
+      this.forkMessagesByEntryId = new Map(
+        (result.data?.messages || [])
+          .filter((message) => message.entryId && message.text)
+          .map((message) => [message.entryId, message])
+      );
+      for (const message of this.renderedMessages) {
+        if (message.role !== "user" || !message.entryId) continue;
+        const forkMessage = this.forkMessagesByEntryId.get(message.entryId);
+        if (forkMessage) this.bindForkEntry(message, forkMessage);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async refreshForkMessagesAndReloadHistory(): Promise<void> {
+    const tab = this.activeTab;
+    const scopeVersion = this.forkScopeVersion;
+    // Session files are created lazily on the first completed response. Sync
+    // the path before deciding between file history and branch-aware RPC.
+    await this.refreshStateDisplay();
+    if (
+      this.activeTab !== tab ||
+      this.forkScopeVersion !== scopeVersion ||
+      this.activeTab?.isStreaming
+    ) {
+      return;
+    }
+    // Fork-button metadata is optional. Linear sessions can use the fast file
+    // path; only sessions known to contain off-path entries need get_entries.
+    await this.refreshForkMessages();
+    if (
+      this.activeTab !== tab ||
+      this.forkScopeVersion !== scopeVersion ||
+      this.activeTab?.isStreaming
+    ) {
+      return;
+    }
+    await this.reloadMessagesFromClient({
+      forceRpc: tab?.requiresBranchHistoryRpc === true,
+    });
+  }
+
   private addMessage(
     role: string,
     content: string,
-    options: { prependHistory?: boolean } = {}
+    options: {
+      prependHistory?: boolean;
+      entryId?: string;
+      userInput?: string;
+      queued?: boolean;
+    } = {}
   ): RenderedMessage {
     if (!this.chatContainer) {
       throw new Error("Chat container not initialized");
@@ -1992,7 +2206,16 @@ export class PiAgentView extends ItemView {
       const visibleContent = this.stripRecentContextGuard(content);
       contentEl.createSpan({ text: visibleContent });
       msgEl.setAttribute("data-raw-content", visibleContent);
+      if (options.userInput) {
+        msgEl.setAttribute("data-user-input", options.userInput);
+      }
+      if (options.queued) {
+        msgEl.addClass("is-queued");
+      }
     }
+
+    let forkBtn: HTMLButtonElement | undefined;
+    let steerBtn: HTMLButtonElement | undefined;
 
     // Add floating hover actions
     if (role === "user" || role === "assistant") {
@@ -2035,8 +2258,37 @@ export class PiAgentView extends ItemView {
         };
       }
 
-      // 3. Edit / Reuse (user only)
+      // 3. Fork & Edit / Reuse (user only)
       if (role === "user") {
+        // While a run is active, a sent/queued user message can be sent
+        // immediately as a one-shot steering instruction.
+        steerBtn = actionsEl.createEl("button", {
+          cls: "pi-agent-action-btn pi-agent-message-steer-btn pi-agent-hidden",
+          attr: {
+            title: "中断当前回复并按此消息调整",
+            "aria-label": "中断当前回复并按此消息调整",
+          },
+        });
+        setIcon(steerBtn, "corner-up-right");
+        steerBtn.createSpan({ text: "调整方向" });
+        steerBtn.onclick = (e) => {
+          e.stopPropagation();
+          this.runAsync(() => this.steerExistingMessage(msgEl, steerBtn));
+        };
+
+        // Fork button
+        forkBtn = actionsEl.createEl("button", {
+          cls: "pi-agent-action-btn",
+          attr: { title: "Fork 从此提问分支 (Fork from this prompt)" },
+        });
+        forkBtn.setText("🌿");
+        if (!options.entryId) {
+          forkBtn.disabled = true;
+          forkBtn.setAttribute("aria-label", "该提问暂不能 Fork");
+          forkBtn.setAttribute("title", "该提问尚未写入会话，暂不能 Fork");
+        }
+
+        // Reuse button
         const reuseBtn = actionsEl.createEl("button", {
           cls: "pi-agent-action-btn",
           attr: { title: "Reuse and edit message" },
@@ -2059,10 +2311,17 @@ export class PiAgentView extends ItemView {
 
     const rendered: RenderedMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      entryId: options.entryId,
       role,
       el: msgEl,
       contentEl,
+      forkBtn,
+      steerBtn,
     };
+    if (options.entryId) {
+      const forkMessage = this.forkMessagesByEntryId.get(options.entryId);
+      if (forkMessage) this.bindForkEntry(rendered, forkMessage);
+    }
 
     if (options.prependHistory) {
       this.renderedMessages.splice(this.historyPrependInsertIndex++, 0, rendered);
@@ -2080,6 +2339,221 @@ export class PiAgentView extends ItemView {
       this.scrollToBottom(true, true);
     }
     return rendered;
+  }
+
+  private async steerExistingMessage(
+    messageEl: HTMLElement,
+    steerBtn?: HTMLButtonElement
+  ): Promise<void> {
+    const userInput = (
+      messageEl.getAttribute("data-user-input") ||
+      messageEl.getAttribute("data-raw-content") ||
+      ""
+    ).trim();
+    if (!userInput) {
+      new Notice("这条消息没有可调整的文字");
+      return;
+    }
+
+    // A queued bubble already carries the exact RPC payload (including any
+    // Pimate system prompt). Reuse it when possible; older history falls back
+    // to the visible user text with the current system prompt applied.
+    const queuedRpcMessage =
+      messageEl.getAttribute("data-queue-rpc-message") ||
+      messageEl.getAttribute("data-rpc-message");
+    const message = queuedRpcMessage || this.applySystemPrompt(userInput);
+    await this.hardSteerMessage(message, {
+      steerBtn,
+      userGoal: userInput,
+    });
+  }
+
+  /**
+   * Pi's native `steer` command is deliberately soft: it waits for the
+   * current assistant turn to finish. Pimate's "调整方向" action promises a
+   * user-visible direction change now, so it aborts first and then sends a
+   * normal prompt once Pi has acknowledged that it is idle.
+   */
+  private async hardSteerMessage(
+    message: string,
+    options: {
+      steerBtn?: HTMLButtonElement;
+      userGoal?: string;
+      images?: Array<{ type: string; data: string; mimeType: string }>;
+    } = {}
+  ): Promise<boolean> {
+    const initialClient = this.client;
+    const tab = this.activeTab;
+    const isZh = this.plugin.settings.language !== "en";
+    if (!initialClient || !tab || !this.isStreaming) {
+      new Notice(isZh ? "当前没有正在生成的任务" : "There is no active response to redirect");
+      return false;
+    }
+    if (this.hardSteerInFlight || this.abortInFlight) {
+      new Notice(isZh ? "正在调整方向，请稍候" : "Redirecting the current response…");
+      return false;
+    }
+
+    // Pi 0.84 does not expose a clear-queue RPC. If follow-ups already exist,
+    // a short RPC-process restart after abort is the only safe way to ensure
+    // they cannot run after the selected redirect message.
+    const queuedBeforeAbort = [...this.pendingQueuedMessages];
+    const hasQueuedMessages =
+      queuedBeforeAbort.length > 0 || (tab.queueCount || 0) > 0;
+
+    this.hardSteerInFlight = true;
+    this.smartReviewContinues = 0;
+    this.smartReviewOriginalGoal = null;
+    if (options.steerBtn) options.steerBtn.disabled = true;
+    this.setStatus(isZh ? "↪ 正在中断并调整方向…" : "↪ Stopping and redirecting…", "thinking");
+    this.updateButtons();
+
+    try {
+      const abortResponse = await initialClient.abort();
+      if (!abortResponse.success) {
+        throw new Error(abortResponse.error || "Pi did not stop the current response");
+      }
+
+      let client = initialClient;
+      if (hasQueuedMessages) {
+        client = await this.restartClientAfterHardSteer(tab, initialClient);
+        this.discardQueuedMessageBubbles(queuedBeforeAbort);
+      }
+
+      const response = await client.prompt(message, { images: options.images });
+      if (!response.success) {
+        throw new Error(response.error || "Pi did not accept the redirect message");
+      }
+
+      this.smartReviewOriginalGoal = options.userGoal || message;
+      if (this.activeTab === tab) {
+        new Notice(isZh ? "已中断当前回复并调整方向" : "Current response stopped and redirected");
+        this.setStatus(isZh ? "↪ 正在按新方向继续…" : "↪ Continuing in the new direction…", "thinking");
+      }
+      return true;
+    } catch (err) {
+      if (options.images?.length) this.pendingUserImages = [];
+      new Notice(`❌ ${isZh ? "调整方向失败：" : "Could not redirect: "}${(err as Error).message}`);
+      return false;
+    } finally {
+      this.hardSteerInFlight = false;
+      this.updateButtons();
+    }
+  }
+
+  /** Remove optimistic bubbles whose server-side queue is being discarded. */
+  private discardQueuedMessageBubbles(messages: PendingQueuedMessage[]): void {
+    if (messages.length === 0) return;
+    const rendered = new Set(messages.map((message) => message.rendered));
+    for (const message of rendered) message.el.remove();
+    this.renderedMessages = this.renderedMessages.filter(
+      (message) => !rendered.has(message)
+    );
+    this.pendingQueuedMessages = this.pendingQueuedMessages.filter(
+      (message) => !rendered.has(message.rendered)
+    );
+  }
+
+  /**
+   * Restart only when a hard redirect must discard Pi's already-submitted
+   * follow-up queue. Pi keeps that queue in memory and exposes no RPC command
+   * to remove individual items.
+   */
+  private async restartClientAfterHardSteer(
+    tab: ChatTab,
+    previousClient: PiAgentClient
+  ): Promise<PiAgentClient> {
+    await this.syncTabStateFromPi(tab);
+    if (tab.client !== previousClient) {
+      throw new Error("The conversation changed while redirecting");
+    }
+    if (!tab.sessionFile) {
+      throw new Error("Pi did not provide the current session to resume");
+    }
+
+    await previousClient.destroy();
+    if (tab.client === previousClient) tab.client = null;
+    // The discarded queue existed only in the process we just stopped; do not
+    // let its last queue_update keep the fresh client marked as queued.
+    tab.queueCount = 0;
+    tab.steeringCount = 0;
+    tab.followUpCount = 0;
+    if (this.client === previousClient) this.client = null;
+
+    await this.ensureTabClient(tab);
+    if (!tab.client) throw new Error("Could not restart Pi for the redirect");
+
+    if (this.activeTab === tab) {
+      this.client = tab.client;
+      this.isStreaming = false;
+      this.renderActiveTabRuntimeStatus();
+    }
+    return tab.client;
+  }
+
+  private normalizeQueuedMessage(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  private findPendingQueuedMessage(content: string): number {
+    const normalized = this.normalizeQueuedMessage(content);
+    if (!normalized) return -1;
+    return this.pendingQueuedMessages.findIndex((pending) => {
+      const rpcMessage = this.normalizeQueuedMessage(pending.rpcMessage);
+      const userInput = this.normalizeQueuedMessage(pending.userInput);
+      return (
+        rpcMessage === normalized ||
+        (userInput.length > 0 && userInput === normalized) ||
+        rpcMessage.endsWith(normalized) ||
+        (userInput.length > 0 && normalized.endsWith(userInput))
+      );
+    });
+  }
+
+  private addOptimisticQueuedMessage(
+    rpcMessage: string,
+    userInput: string,
+    images: Array<{ data: string; mimeType: string }>
+  ): void {
+    const displayText = userInput || rpcMessage;
+    const rendered = this.addMessage("user", displayText, {
+      userInput: userInput || displayText,
+      queued: true,
+    });
+    rendered.el.setAttribute("data-queue-rpc-message", rpcMessage);
+    if (images.length > 0) {
+      this.renderUserMessageImages(rendered, images);
+    }
+    this.pendingQueuedMessages.push({ rendered, rpcMessage, userInput, images });
+    this.updateButtons();
+  }
+
+  private removePendingQueuedMessage(rpcMessage: string): void {
+    const index = this.pendingQueuedMessages.findIndex(
+      (pending) => pending.rpcMessage === rpcMessage
+    );
+    if (index === -1) return;
+    const [pending] = this.pendingQueuedMessages.splice(index, 1);
+    pending.rendered.el.remove();
+    const renderedIndex = this.renderedMessages.indexOf(pending.rendered);
+    if (renderedIndex !== -1) this.renderedMessages.splice(renderedIndex, 1);
+  }
+
+  private bindForkEntry(message: RenderedMessage, forkMessage: ForkMessage): void {
+    if (!message.forkBtn || !forkMessage.entryId) return;
+    message.entryId = forkMessage.entryId;
+    const { forkBtn } = message;
+    forkBtn.disabled = false;
+    forkBtn.removeAttribute("aria-label");
+    const isZh = this.plugin.settings.language === "zh";
+    forkBtn.setAttribute("title", isZh ? "Fork 从此提问分支" : "Fork from this prompt");
+    forkBtn.onclick = (e) => {
+      e.stopPropagation();
+      const fallbackText = message.el.getAttribute("data-raw-content") || "";
+      this.runAsync(async () => {
+        await this.forkFromEntry(forkMessage.entryId, fallbackText);
+      });
+    };
   }
 
   private addSystemMessage(text: string): void {
@@ -2561,6 +3035,12 @@ export class PiAgentView extends ItemView {
     );
     menu.addItem((item) =>
       item
+        .setTitle(isZh ? "可 Fork 的历史节点..." : "Forkable history…")
+        .setIcon("git-branch")
+        .onClick(() => this.showForkHistoryModal())
+    );
+    menu.addItem((item) =>
+      item
         .setTitle(isZh ? "从提示词分叉..." : "Fork from prompt…")
         .setIcon("git-fork")
         .onClick(() => this.showForkSelector())
@@ -2571,12 +3051,24 @@ export class PiAgentView extends ItemView {
         .setIcon("copy")
         .onClick(() => this.cloneCurrentBranch())
     );
+    menu.addItem((item) =>
+      item
+        .setTitle(isZh ? "重载扩展与技能 (/reload)" : "Reload extensions & skills (/reload)")
+        .setIcon("refresh-cw")
+        .onClick(() => this.runAsync(() => this.reloadExtensions()))
+    );
     menu.addSeparator();
     menu.addItem((item) =>
       item
         .setTitle(isZh ? "压缩上下文" : "Compact context")
         .setIcon("archive")
         .onClick(() => this.runAsync(() => this.compactSession()))
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(isZh ? "导出为 Vault 笔记" : "Export to Vault Note")
+        .setIcon("file-output")
+        .onClick(() => this.runAsync(() => this.exportSessionToVaultNote()))
     );
     menu.addItem((item) =>
       item
@@ -2663,20 +3155,49 @@ export class PiAgentView extends ItemView {
     if (!this.inputEl) return;
     const isBash = this.inputEl.value.trimStart().startsWith("!");
     this.inputEl.toggleClass("is-bash-mode", isBash);
-    this.inputEl.setAttribute("placeholder", isBash ? "Bash mode — command will run locally" : "How can I help you today?");
+    this.inputEl.setAttribute(
+      "placeholder",
+      isBash
+        ? "Bash mode — command will run locally"
+        : "How can I help you today?"
+    );
     this.statusBar?.toggleClass("is-bash-mode", isBash);
     if (isBash && this.statusBar) this.statusBar.setText("Bash mode");
   }
 
-  private async sendMessage(): Promise<void> {
+  private async sendMessage(streamingBehavior?: "steer" | "followUp"): Promise<void> {
     if (!this.client || !this.inputEl) return;
     const rawMessage = this.inputEl.value.trim();
     const contextPrefix = this.buildContextPrefix();
     const images = this.getImagePayloads();
     const userMessage = rawMessage || (images.length ? "Please analyze the attached image(s)." : "");
     const baseMessage = `${contextPrefix}${userMessage}`.trim();
-    if (!baseMessage && images.length === 0) return;
+    if (!baseMessage && images.length === 0) {
+      if (streamingBehavior === "steer") {
+        this.inputEl.focus();
+        new Notice("请先输入调整内容，再点击“调整方向”");
+      }
+      return;
+    }
+
+    const builtinCommand = this.parsePimateBuiltinCommand(rawMessage);
+    if (builtinCommand) {
+      this.inputEl.value = "";
+      this.inputEl.setCssProps({ height: "auto" });
+      this.updateInputModeState();
+      this.closeCommandDropdown();
+      this.clearContextItems();
+      this.pendingUserImages = [];
+      if (images.length > 0) {
+        new Notice("Pimate 内建命令不会使用附加图片");
+      }
+      await this.executePimateBuiltinCommand(builtinCommand.name, builtinCommand.args);
+      return;
+    }
+
     const message = this.applySystemPrompt(baseMessage);
+    const shouldQueue = this.isStreaming && !message.startsWith("!");
+    const shouldHardSteer = shouldQueue && streamingBehavior === "steer";
 
     this.maybeTitleActiveTab(rawMessage || message);
 
@@ -2684,8 +3205,17 @@ export class PiAgentView extends ItemView {
     // message_start) can show the attached images at the top, like Claudian.
     this.pendingUserImages = images.map((i) => ({ data: i.data, mimeType: i.mimeType }));
 
-    // Pi RPC emits the accepted user message via message_start.
-    // Do not render optimistically here, otherwise the message appears twice.
+    // Queued prompts do not always emit message_start until Pi begins the next
+    // turn. Render a temporary user bubble now, then reconcile it when the
+    // authoritative event arrives.
+    if (shouldQueue && !shouldHardSteer) {
+      this.addOptimisticQueuedMessage(
+        message,
+        rawMessage || userMessage,
+        images.map((i) => ({ data: i.data, mimeType: i.mimeType }))
+      );
+      this.pendingUserImages = [];
+    }
 
     // Clear input
     this.inputEl.value = "";
@@ -2702,13 +3232,31 @@ export class PiAgentView extends ItemView {
       if (message.startsWith("!")) {
         this.smartReviewOriginalGoal = null;
         await this.runBashMode(message);
-      } else if (this.isStreaming) {
-        // Queue as steer message
-        await this.client.steer(message, { images });
+      } else if (shouldHardSteer) {
+        // This is deliberately not Pi's native `steer`: the action promises
+        // to stop the current output before starting this input as a fresh
+        // direction.
+        await this.hardSteerMessage(message, {
+          images,
+          userGoal: rawMessage || userMessage,
+        });
+      } else if (shouldQueue) {
+        // Normal Enter remains a non-destructive follow-up queue.
+        const response = await this.client.prompt(message, {
+          streamingBehavior: "followUp",
+          images,
+        });
+        if (!response.success) {
+          throw new Error(response.error || "Pi did not accept the queued message");
+        }
       } else {
-        await this.client.prompt(message, { images });
+        const response = await this.client.prompt(message, { images });
+        if (!response.success) {
+          throw new Error(response.error || "Pi did not accept the message");
+        }
       }
     } catch (err) {
+      if (shouldQueue && !shouldHardSteer) this.removePendingQueuedMessage(message);
       this.addSystemMessage(
         `❌ Failed to send: ${(err as Error).message}`
       );
@@ -3059,14 +3607,31 @@ export class PiAgentView extends ItemView {
   }
 
   private abortAgent(): void {
-    this.client?.abort();
-    this.isStreaming = false;
-    if (this.activeTab) this.activeTab.isStreaming = false;
-    this.stopSpeedIndicator();
-    this.updateButtons();
+    const client = this.client;
+    const isZh = this.plugin.settings.language !== "en";
+    if (!client || !this.isStreaming || this.abortInFlight || this.hardSteerInFlight) {
+      return;
+    }
+
+    this.abortInFlight = true;
     this.smartReviewContinues = 0;
     this.smartReviewOriginalGoal = null;
-    this.setStatus("⏹ Aborted", "warning");
+    this.setStatus(isZh ? "⏹ 正在停止…" : "⏹ Stopping…", "warning");
+    this.updateButtons();
+
+    this.runAsync(async () => {
+      try {
+        const response = await client.abort();
+        if (!response.success) {
+          throw new Error(response.error || "Pi did not stop the current response");
+        }
+      } catch (err) {
+        new Notice(`❌ ${isZh ? "停止失败：" : "Could not stop: "}${(err as Error).message}`);
+      } finally {
+        this.abortInFlight = false;
+        this.updateButtons();
+      }
+    });
   }
 
   private async newSession(): Promise<void> {
@@ -3077,12 +3642,15 @@ export class PiAgentView extends ItemView {
     tab.sessionFile = undefined;
     tab.sessionId = undefined;
     tab.restored = false;
+    tab.requiresBranchHistoryRpc = false;
     tab.client = null;
     tab.isStreaming = false;
 
     // 清除聊天框 DOM 状态
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
+    this.pendingQueuedMessages = [];
+    this.activeBranchHistory = null;
     this.renderEmptyState();
     this.updateWidget("tasks", undefined);
 
@@ -3098,7 +3666,67 @@ export class PiAgentView extends ItemView {
     new Notice(isZh ? "已重置并开启新会话" : "Session reset and new chat started");
   }
 
-  private async compactSession(): Promise<void> {
+  private parsePimateBuiltinCommand(
+    rawMessage: string
+  ): { name: string; args: string } | null {
+    const match = rawMessage.trim().match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/);
+    if (!match) return null;
+    const name = match[1].toLowerCase();
+    if (!PIMATE_BUILTIN_COMMANDS.some((command) => command.name === name)) {
+      return null;
+    }
+    return { name, args: (match[2] || "").trim() };
+  }
+
+  /** Execute the Pimate-side half of the unified slash-command catalog. */
+  private async executePimateBuiltinCommand(
+    name: string,
+    args: string
+  ): Promise<void> {
+    const isZh = this.plugin.settings.language !== "en";
+    switch (name) {
+      case "compact":
+        if (this.isStreaming) {
+          new Notice(isZh ? "请先等待当前回复结束或停止，再压缩上下文" : "Wait for the current response to finish or stop it before compacting");
+          return;
+        }
+        await this.compactSession(args || undefined);
+        return;
+      case "model":
+        if (args) {
+          new Notice(isZh ? "请在弹出的列表中选择模型" : "Choose a model from the selector");
+        }
+        await this.showModelSelector();
+        return;
+      case "fork":
+        await this.showForkSelector();
+        return;
+      case "tree":
+        this.showForkHistoryModal();
+        return;
+      case "reload":
+        await this.reloadExtensions();
+        return;
+      case "export":
+        if (args.toLowerCase() === "html") {
+          await this.exportSessionHtml();
+        } else {
+          await this.exportSessionToVaultNote();
+        }
+        return;
+      case "new":
+        await this.newSession();
+        return;
+      case "clone":
+        await this.cloneCurrentBranch();
+        return;
+      case "stats":
+        await this.showStats();
+        return;
+    }
+  }
+
+  private async compactSession(customInstructions?: string): Promise<void> {
     if (!this.client) return;
     const isZh = this.plugin.settings.language === "zh";
     // 保险：60 秒后还在 thinking 就强制重置（防止事件丢失导致水印死转）
@@ -3106,7 +3734,7 @@ export class PiAgentView extends ItemView {
       this.setStatus("⚠️ Compaction stuck (no event)", "warning");
     }, 60_000);
     try {
-      const result = await this.client.compact();
+      const result = await this.client.compact(customInstructions?.trim() || undefined);
       // 响应回来后强制重置状态，不管 compaction_end 事件是否被正确处理
       window.clearTimeout(safetyTimer);
       this.setStatus("✅ Ready", "ok");
@@ -3150,6 +3778,91 @@ export class PiAgentView extends ItemView {
       }
     } catch (err) {
       new Notice(`Failed: ${(err as Error).message}`);
+    }
+  }
+
+  private showForkHistoryModal(): void {
+    const client = this.client;
+    const scopeVersion = this.forkScopeVersion;
+    if (!client) {
+      new Notice("Pi Agent 客户端尚未就绪");
+      return;
+    }
+    new SessionTreeModal(this.app, client, async (node) => {
+      if (this.client !== client || this.forkScopeVersion !== scopeVersion) {
+        new Notice("当前会话已切换，请重新选择历史节点");
+        return false;
+      }
+      return this.forkFromEntry(node.entryId, node.text);
+    }).open();
+  }
+
+  private async reloadExtensions(): Promise<void> {
+    if (!this.client) {
+      new Notice("Pi 进程未运行");
+      return;
+    }
+    try {
+      const res = await this.client.reload();
+      if (res.success) {
+        new Notice("✅ 已重新加载 Pi 扩展、技能与提示词模板 (/reload)");
+        this.commandCatalogClient = null;
+        await this.loadAvailableCommands();
+      } else {
+        new Notice(`重载失败: ${res.error || "未知错误"}`);
+      }
+    } catch (err) {
+      new Notice(`重载扩展失败: ${(err as Error).message}`);
+    }
+  }
+
+  private async exportSessionToVaultNote(): Promise<void> {
+    if (!this.client) return;
+    try {
+      const res = await this.client.getMessages();
+      if (!res.success || !res.data) {
+        new Notice("无法获取当前会话消息记录");
+        return;
+      }
+      const rawMessages = ((res.data as any).messages || []) as any[];
+      if (rawMessages.length === 0) {
+        new Notice("当前会话暂无可导出的消息");
+        return;
+      }
+
+      const now = new Date();
+      const dateStr = now.toISOString().slice(0, 10);
+      const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "-");
+      const fileName = `Pimate Export ${dateStr} ${timeStr}.md`;
+
+      let mdContent = `# Pimate 对话记录 — ${dateStr}\n\n`;
+      mdContent += `> 导出时间: ${now.toLocaleString()}\n\n---\n\n`;
+
+      for (const msg of rawMessages) {
+        const roleStr = msg.role === "user" ? "👤 User" : msg.role === "assistant" ? "🤖 Pi Agent" : msg.role;
+        mdContent += `### ${roleStr}\n\n`;
+        if (typeof msg.content === "string") {
+          mdContent += `${msg.content}\n\n`;
+        } else if (Array.isArray(msg.content)) {
+          for (const item of msg.content) {
+            if (item.type === "text" && item.text) {
+              mdContent += `${item.text}\n\n`;
+            } else if (item.type === "thinking" && item.thinking) {
+              mdContent += `> [!note] 思考过程\n> ${item.thinking.replace(/\n/g, "\n> ")}\n\n`;
+            } else if (item.type === "tool_call") {
+              mdContent += `> [!info] 工具调用: \`${item.name}\`\n\n`;
+            }
+          }
+        }
+        mdContent += `---\n\n`;
+      }
+
+      const createdFile = await this.app.vault.create(fileName, mdContent);
+      const leaf = this.app.workspace.getLeaf(true);
+      await leaf.openFile(createdFile);
+      new Notice(`已导出笔记: ${fileName}`);
+    } catch (err) {
+      new Notice(`导出笔记失败: ${(err as Error).message}`);
     }
   }
 
@@ -3227,12 +3940,7 @@ export class PiAgentView extends ItemView {
 
         await this.applyTabRuntimePreferences(active);
 
-        this.resetActiveRenderState();
-        if (this.chatContainer) this.chatContainer.empty();
-        this.renderedMessages = [];
-
-        await this.loadMessages();
-        await this.refreshStateDisplay();
+        await this.reloadAfterSessionRebind();
         this.setStatus("Ready", "ok");
         this.updateButtons();
         await this.persistSessionTabs();
@@ -3983,8 +4691,118 @@ export class PiAgentView extends ItemView {
   }
 
   /**
-   * Read the last N message entries from a jsonl session file directly.
-   * Returns { messages, total } where total is the count of all message entries.
+   * Convert one Pi session-tree entry into the history payload understood by
+   * renderMessageFromHistory.  Non-renderable metadata entries are skipped.
+   */
+  private sessionEntryToHistoryMessage(entry: SessionEntry): any | null {
+    if (!entry?.id) return null;
+    if (entry.type === "message" && entry.message) {
+      return { ...entry.message, entryId: entry.id };
+    }
+    if (entry.type === "compaction") {
+      return {
+        role: "compactionSummary",
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        tokensBefore: entry.tokensBefore,
+        entryId: entry.id,
+      };
+    }
+    if (entry.type === "branch_summary") {
+      return {
+        role: "branchSummary",
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        entryId: entry.id,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Follow parentId from Pi's active leaf instead of treating every JSONL
+   * entry as part of the conversation.  A session file can contain abandoned
+   * branches after /tree or fork operations; only this path is renderable.
+   */
+  private buildActiveBranchHistory(
+    entries: SessionEntry[],
+    leafId?: string | null
+  ): { messages: any[]; activeEntryCount: number } {
+    if (!entries.length || leafId === null) {
+      return { messages: [], activeEntryCount: 0 };
+    }
+
+    const byId = new Map<string, SessionEntry>();
+    for (const entry of entries) {
+      if (entry?.id) byId.set(entry.id, entry);
+    }
+
+    // `null` is an authoritative Pi state meaning "before the first entry".
+    // Only undefined (older/partial payloads) may fall back to the last entry.
+    let cursor = leafId ?? entries[entries.length - 1]?.id ?? "";
+    const path: SessionEntry[] = [];
+    const visited = new Set<string>();
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      const entry = byId.get(cursor);
+      if (!entry) break;
+      path.push(entry);
+      cursor = typeof entry.parentId === "string" ? entry.parentId : "";
+    }
+
+    path.reverse();
+    const messages = path
+      .map((entry) => this.sessionEntryToHistoryMessage(entry))
+      .filter((message): message is any => !!message);
+    return { messages, activeEntryCount: path.length };
+  }
+
+  /**
+   * Read the active branch through Pi.  `get_entries` is preferred because it
+   * carries entry ids (needed by Fork buttons) and the selected leaf.  Older
+   * Pi builds can fall back to `get_messages`, which still keeps the UI
+   * usable, albeit without entry ids for those messages.
+   */
+  private async readActiveBranchFromPi(): Promise<any[]> {
+    const tab = this.activeTab;
+    const client = this.client;
+    if (!client) return [];
+
+    try {
+      const entriesResult = await client.getEntries();
+      const data = entriesResult.data as any;
+      if (entriesResult.success && Array.isArray(data?.entries)) {
+        const entries = data.entries as SessionEntry[];
+        const branch = this.buildActiveBranchHistory(entries, data.leafId);
+        if (tab && this.activeTab === tab && this.client === client) {
+          // A linear persisted fork has every entry on the active path and can
+          // return to fast JSONL reloads. Sessions with off-path entries must
+          // keep asking Pi for its authoritative leaf after each turn.
+          tab.requiresBranchHistoryRpc = branch.activeEntryCount !== entries.length;
+        }
+        // A successful get_entries response is authoritative even when the
+        // active branch currently has no renderable messages. Falling back to
+        // get_messages here could reintroduce the very branch flattening this
+        // path is meant to prevent.
+        return branch.messages;
+      }
+    } catch {
+      // Fall back below for Pi versions without get_entries.
+    }
+
+    try {
+      const result = await client.getMessages();
+      if (!result.success) return [];
+      const messages = Array.isArray((result.data as any)?.messages)
+        ? (result.data as any).messages
+        : [];
+      return messages;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Read the last N renderable history entries from a JSONL session file.
+   * Returns { messages, total } where total matches the UI history count.
    *
    * This bypasses the Pi RPC roundtrip which would otherwise serialize the
    * whole session.messages to JSON and pipe it back. For multi-MB sessions
@@ -4004,10 +4822,9 @@ export class PiAgentView extends ItemView {
       for (const line of text.split(/\r?\n/)) {
         if (!line.trim()) continue;
         try {
-          const e = JSON.parse(line);
-          if (e?.type === "message" && e.message) {
-            messageLines.push(e.message);
-          }
+          const entry = JSON.parse(line) as SessionEntry;
+          const historyMessage = this.sessionEntryToHistoryMessage(entry);
+          if (historyMessage) messageLines.push(historyMessage);
         } catch {
           // skip malformed
         }
@@ -4021,50 +4838,129 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  /**
+   * A successful fork/clone/resume replaces Pi's active runtime. Reconcile the
+   * tab metadata first, then rebuild the visible history from Pi's selected
+   * leaf exactly once and refresh the entry-id map used by Fork buttons.
+   */
+  private async reloadAfterSessionRebind(): Promise<void> {
+    const tab = this.activeTab;
+    const client = this.client;
+    if (!tab || !client) return;
+
+    this.forkMessagesByEntryId.clear();
+    const scopeVersion = ++this.forkScopeVersion;
+    await this.refreshStateDisplay();
+    if (
+      this.activeTab !== tab ||
+      this.client !== client ||
+      this.forkScopeVersion !== scopeVersion
+    ) {
+      return;
+    }
+    await this.persistSessionTabs();
+
+    this.resetActiveRenderState();
+    if (this.chatContainer) this.chatContainer.empty();
+    this.renderedMessages = [];
+    this.activeBranchHistory = null;
+    await this.loadMessages({ forceRpc: true });
+    if (
+      this.activeTab !== tab ||
+      this.client !== client ||
+      this.forkScopeVersion !== scopeVersion
+    ) {
+      return;
+    }
+    await this.refreshForkMessages();
+  }
+
+  private async forkFromEntry(entryId: string, fallbackText: string): Promise<boolean> {
+    if (!this.client) return false;
+    const isZh = this.plugin.settings.language === "zh";
+
+    try {
+      const forked = await this.client.fork(entryId);
+      if (!forked.success) {
+        new Notice(
+          isZh
+            ? `Fork 失败: ${forked.error || "未知原因"}`
+            : `Fork failed: ${forked.error || "Unknown error"}`
+        );
+        return false;
+      }
+      if ((forked.data as any)?.cancelled) {
+        new Notice(isZh ? "已取消 Fork" : "Fork cancelled");
+        return false;
+      }
+
+      this.setInputText(((forked.data as any)?.text || fallbackText).trim());
+      await this.reloadAfterSessionRebind();
+      new Notice(isZh ? "分支已创建" : "Fork created");
+      return true;
+    } catch (err) {
+      new Notice(
+        isZh
+          ? `Fork 失败: ${(err as Error).message}`
+          : `Fork failed: ${(err as Error).message}`
+      );
+      return false;
+    }
+  }
+
   private async showForkSelector(): Promise<void> {
     if (!this.client) return;
+    const isZh = this.plugin.settings.language === "zh";
     try {
       const result = await this.client.getForkMessages();
-      const messages = (((result.data as any)?.messages || []) as ForkMessage[]).filter(
+      const messages = (result.data?.messages || []).filter(
         (item) => item.entryId && item.text
       );
       if (!result.success || messages.length === 0) {
-        new Notice("No previous user prompts available to fork");
+        new Notice(
+          isZh
+            ? "当前没有可用于分支的历史提问节点"
+            : "No previous user prompts available to fork"
+        );
         return;
       }
-      new ForkMessageSuggestModal(this.app, messages, async (message) => {
-        const forked = await this.client?.fork(message.entryId);
-        if (!forked?.success || (forked.data as any)?.cancelled) {
-          new Notice("Fork cancelled");
-          return;
-        }
-        this.setInputText(((forked.data as any)?.text || message.text).trim());
-        this.resetActiveRenderState();
-        if (this.chatContainer) this.chatContainer.empty();
-        this.renderedMessages = [];
-        await this.loadMessages();
-        new Notice("Fork created");
-      }).open();
+      new ForkMessageSuggestModal(this.app, messages, (message) =>
+        this.forkFromEntry(message.entryId, message.text)
+      ).open();
     } catch (err) {
-      new Notice(`Fork failed: ${(err as Error).message}`);
+      new Notice(
+        isZh
+          ? `获取历史节点失败: ${(err as Error).message}`
+          : `Fork failed: ${(err as Error).message}`
+      );
     }
   }
 
   private async cloneCurrentBranch(): Promise<void> {
     if (!this.client) return;
+    const isZh = this.plugin.settings.language === "zh";
     try {
       const result = await this.client.clone();
-      if (!result.success || (result.data as any)?.cancelled) {
-        new Notice("Clone cancelled");
+      if (!result.success) {
+        new Notice(
+          isZh
+            ? `克隆分支失败: ${result.error || "未知原因"}`
+            : `Clone failed: ${result.error || "Unknown error"}`
+        );
         return;
       }
-      this.resetActiveRenderState();
-      if (this.chatContainer) this.chatContainer.empty();
-      this.renderedMessages = [];
-      await this.loadMessages();
-      new Notice("Current branch cloned");
+      if ((result.data as any)?.cancelled) {
+        new Notice(isZh ? "已取消克隆" : "Clone cancelled");
+        return;
+      }
+      await this.reloadAfterSessionRebind();
+      new Notice(isZh ? "当前分支已克隆" : "Current branch cloned");
     } catch (err) {
-      new Notice(`Clone failed: ${(err as Error).message}`);
+      new Notice(
+        isZh
+          ? `克隆分支失败: ${(err as Error).message}`
+          : `Clone failed: ${(err as Error).message}`
+      );
     }
   }
 
@@ -4141,8 +5037,10 @@ export class PiAgentView extends ItemView {
     if (!this.client) return;
     try {
       const result = await this.client.getCommands();
-      if (!result.success || !result.data) return;
-      const commands = ((result.data as any).commands || []) as PiCommand[];
+      const piCommands = result.success && result.data
+        ? ((result.data as any).commands || []) as PiCommand[]
+        : [];
+      const commands = this.mergePimateCommands(piCommands);
       if (!commands.length) {
         new Notice("No Pi commands or skills available");
         return;
@@ -4722,19 +5620,24 @@ export class PiAgentView extends ItemView {
     await this.reloadMessagesFromClient();
   }
 
-  private async reloadMessagesFromClient(): Promise<void> {
+  private async reloadMessagesFromClient(
+    options: { forceRpc?: boolean } = {}
+  ): Promise<void> {
     if (this.chatContainer) {
       this.chatContainer.empty();
     }
     this.renderedMessages = [];
+    this.activeBranchHistory = null;
     this.historyShownCount = 0;
     this.historyTotalCount = 0;
     this.historyBannerEl = null;
     this.renderEmptyState();
-    await this.loadMessages();
+    await this.loadMessages(options);
   }
 
-  private async loadMessages(): Promise<void> {
+  private async loadMessages(
+    options: { forceRpc?: boolean } = {}
+  ): Promise<void> {
     if (!this.client) return;
 
     // Decide source: prefer direct file read (fast, paginated) when we
@@ -4747,11 +5650,22 @@ export class PiAgentView extends ItemView {
     let total = 0;
     let usedFile = false;
 
+    // A normal session load is allowed to use the fast JSONL path; do not let
+    // a branch cache from the previously active tab leak into its pager.
+    if (!options.forceRpc) this.activeBranchHistory = null;
+
+    if (options.forceRpc) {
+      const branchMessages = await this.readActiveBranchFromPi();
+      this.activeBranchHistory = branchMessages;
+      total = branchMessages.length;
+      messages = limit > 0 ? branchMessages.slice(-limit) : branchMessages;
+    }
+
     // Prefer direct jsonl reads when possible. During streaming, RPC getMessages
     // can contend with live generation on the same subprocess and make large
     // model replies feel slower; missed live deltas are recovered by
     // ensureAssistantStreamMessage().
-    if (filePath) {
+    if (!options.forceRpc && filePath) {
       const fileResult = this.readLastMessagesFromFile(filePath, limit);
       if (fileResult.total > 0) {
         messages = fileResult.messages;
@@ -4759,7 +5673,7 @@ export class PiAgentView extends ItemView {
         usedFile = true;
       }
     }
-    if (!usedFile) {
+    if (!options.forceRpc && !usedFile) {
       try {
         const result = await this.client.getMessages();
         if (result.success && result.data) {
@@ -4785,16 +5699,30 @@ export class PiAgentView extends ItemView {
   /** Append more history (e.g. when user clicks "Load earlier"). */
   private async loadMoreHistory(moreBy: number): Promise<void> {
     const tab = this.activeTab;
-    if (!tab?.sessionFile) return;
     const newLimit = this.historyShownCount + moreBy;
-    const fileResult = this.readLastMessagesFromFile(tab.sessionFile, newLimit);
-    if (fileResult.messages.length <= this.historyShownCount) {
+    let allMessages: any[];
+    let total: number;
+
+    if (this.activeBranchHistory !== null) {
+      allMessages = this.activeBranchHistory;
+      total = allMessages.length;
+    } else {
+      if (!tab?.sessionFile) return;
+      const fileResult = this.readLastMessagesFromFile(tab.sessionFile, newLimit);
+      allMessages = fileResult.messages;
+      total = fileResult.total;
+    }
+
+    const visibleMessages = this.activeBranchHistory !== null
+      ? (newLimit > 0 ? allMessages.slice(-newLimit) : allMessages)
+      : allMessages;
+    if (visibleMessages.length <= this.historyShownCount) {
       new Notice("No more messages to load");
       return;
     }
-    const newOnes = fileResult.messages.slice(
+    const newOnes = visibleMessages.slice(
       0,
-      fileResult.messages.length - this.historyShownCount
+      visibleMessages.length - this.historyShownCount
     );
     const chat = this.chatContainer;
     const oldScrollHeight = chat?.scrollHeight || 0;
@@ -4809,8 +5737,8 @@ export class PiAgentView extends ItemView {
       this.historyPrependAnchorEl = null;
       this.historyPrependInsertIndex = 0;
     }
-    this.historyShownCount = fileResult.messages.length;
-    this.historyTotalCount = fileResult.total;
+    this.historyShownCount = visibleMessages.length;
+    this.historyTotalCount = total;
     this.renderHistoryBanner();
     if (chat) {
       chat.scrollTop = oldScrollTop + (chat.scrollHeight - oldScrollHeight);
@@ -4887,6 +5815,7 @@ export class PiAgentView extends ItemView {
     msg: any,
     options: { prependHistory?: boolean } = {}
   ): void {
+    const messageOptions = { ...options, entryId: msg.entryId };
     if (msg.role === "user") {
       const content =
         typeof msg.content === "string"
@@ -4894,7 +5823,7 @@ export class PiAgentView extends ItemView {
           : Array.isArray(msg.content)
             ? msg.content.map((c: any) => c.text || "").join("")
             : "";
-      this.addMessage("user", this.stripRecentContextGuard(content), options);
+      this.addMessage("user", this.stripRecentContextGuard(content), messageOptions);
     } else if (msg.role === "compactionSummary") {
       this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore, "Context compacted", options);
     } else if (msg.role === "branchSummary") {
@@ -4906,7 +5835,7 @@ export class PiAgentView extends ItemView {
       const hasToolCall = blocks.some((block: any) => block.type === "toolCall");
       if (!hasVisibleText && !hasVisibleThinking && !hasToolCall) return;
 
-      const rendered = this.addMessage("assistant", "", options);
+      const rendered = this.addMessage("assistant", "", messageOptions);
       this.currentAssistantMsg = rendered;
       if (blocks.length > 0) {
         for (const block of blocks) {
@@ -4954,12 +5883,39 @@ export class PiAgentView extends ItemView {
   }
 
   private updateButtons(): void {
+    const redirectBusy = this.hardSteerInFlight || this.abortInFlight;
+    const latestUserMessage = [...this.renderedMessages]
+      .reverse()
+      .find((message) => message.role === "user");
+    for (const message of this.renderedMessages) {
+      if (!message.steerBtn) continue;
+      const canSteer =
+        this.isStreaming &&
+        (message.el.hasClass("is-queued") || message === latestUserMessage);
+      if (canSteer) {
+        message.steerBtn.removeClass("pi-agent-hidden");
+        message.steerBtn.disabled = redirectBusy;
+      } else {
+        message.steerBtn.addClass("pi-agent-hidden");
+        message.steerBtn.disabled = true;
+      }
+    }
+    if (this.steerBtn) {
+      if (this.isStreaming) {
+        this.steerBtn.removeClass("pi-agent-hidden");
+        this.steerBtn.disabled = redirectBusy;
+      } else {
+        this.steerBtn.addClass("pi-agent-hidden");
+        this.steerBtn.disabled = redirectBusy;
+      }
+    }
     if (this.abortBtn) {
       if (this.isStreaming) {
         this.abortBtn.removeClass("pi-agent-hidden");
       } else {
         this.abortBtn.addClass("pi-agent-hidden");
       }
+      this.abortBtn.disabled = redirectBusy;
     }
     this.containerEl.toggleClass("is-generating", this.isStreaming);
   }
@@ -5490,25 +6446,88 @@ export class PiAgentView extends ItemView {
 
   // ─── Autocomplete Slash Command Methods ─────────────────────────────
 
+  /** Add direct RPC operations that Pi intentionally omits from get_commands. */
+  private mergePimateCommands(piCommands: PiCommand[]): PiCommand[] {
+    const seen = new Set<string>();
+    return [...PIMATE_BUILTIN_COMMANDS, ...piCommands].filter((command) => {
+      const name = command?.name?.trim();
+      if (!name) return false;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
   private async loadAvailableCommands(): Promise<void> {
-    if (!this.client) return;
+    const client = this.client;
+    if (!client) return;
+
+    if (this.commandCatalogClient === client) return;
+
+    if (this.commandLoadPromise && this.commandLoadClient === client) {
+      await this.commandLoadPromise;
+      return;
+    }
+
+    const request = (async () => {
+      try {
+        const res = await client.getCommands();
+        // A tab switch can replace the active client while the RPC is in
+        // flight. Do not leak the previous tab's command list into the new
+        // composer.
+        if (this.client !== client || this.activeTab?.client !== client) return;
+        const piCommands = res.success && res.data
+          ? ((res.data as any).commands || []) as PiCommand[]
+          : [];
+        this.availableCommands = this.mergePimateCommands(piCommands);
+        this.commandCatalogClient = client;
+      } catch {}
+    })();
+
+    this.commandLoadClient = client;
+    this.commandLoadPromise = request;
     try {
-      const res = await this.client.getCommands();
-      if (res.success && res.data) {
-        this.availableCommands = ((res.data as any).commands || []) as PiCommand[];
+      await request;
+    } finally {
+      if (this.commandLoadPromise === request) {
+        this.commandLoadPromise = null;
+        this.commandLoadClient = null;
       }
-    } catch {}
+    }
+  }
+
+  private getSlashCommandQuery(): string | null {
+    if (!this.inputEl) return null;
+    const value = this.inputEl.value;
+    const caretPos = this.inputEl.selectionStart;
+    if (value.startsWith("/") && caretPos > 0 && !value.slice(0, caretPos).includes(" ")) {
+      return value.slice(1, caretPos).toLowerCase();
+    }
+    return null;
   }
 
   private handleCommandInput(): void {
     if (!this.inputEl) return;
-    const value = this.inputEl.value;
-    const caretPos = this.inputEl.selectionStart;
+    const query = this.getSlashCommandQuery();
 
-    if (value.startsWith("/") && caretPos > 0 && !value.slice(0, caretPos).includes(" ")) {
-      const query = value.slice(1, caretPos).toLowerCase();
+    if (query !== null) {
       this.commandQueryStart = 0;
       this.showCommandDropdown(query);
+
+      // Command loading is intentionally fire-and-forget during tab startup.
+      // If the user types `/` before that RPC completes, retry the render as
+      // soon as the authoritative list arrives instead of leaving an empty
+      // inline dropdown.
+      if (this.commandCatalogClient !== this.client) {
+        void this.loadAvailableCommands().then(() => {
+          const refreshedQuery = this.getSlashCommandQuery();
+          if (refreshedQuery !== null) {
+            this.commandQueryStart = 0;
+            this.showCommandDropdown(refreshedQuery);
+          }
+        });
+      }
     } else {
       this.closeCommandDropdown();
     }
@@ -5840,7 +6859,7 @@ class ForkMessageSuggestModal extends SuggestModal<ForkMessage> {
   constructor(
     app: App,
     private readonly messages: ForkMessage[],
-    private readonly onChoose: (message: ForkMessage) => void | Promise<void>
+    private readonly onChoose: (message: ForkMessage) => void | Promise<unknown>
   ) {
     super(app);
     this.setPlaceholder("Fork from which previous prompt?");
