@@ -3,6 +3,10 @@ import { StringDecoder } from "string_decoder";
 import { EventEmitter } from "events";
 import * as path from "path";
 import * as fs from "fs";
+import {
+  isPiCommandFromPath,
+  type PiCommandInfo,
+} from "./PiCommandUtils";
 
 // ─── Windows pi resolution ──────────────────────────────────────────────────
 // On Windows, `pi` is a .cmd shim that calls `node cli.js`.
@@ -199,6 +203,8 @@ export interface PiAgentState {
   model?: PiModel;
   thinkingLevel?: string;
   isStreaming?: boolean;
+  isCompacting?: boolean;
+  pendingMessageCount?: number;
   sessionFile?: string;
   sessionId?: string;
   sessionName?: string;
@@ -282,6 +288,13 @@ export interface PiAgentClientOptions {
   cwd?: string;
   noSession?: boolean;
   tools?: string[];
+  extensionPaths?: string[];
+}
+
+export interface ReloadExtensionsResult {
+  success: boolean;
+  fallbackToRestart?: boolean;
+  error?: string;
 }
 
 
@@ -328,6 +341,9 @@ export class PiAgentClient extends EventEmitter {
     }
     if (this.options.tools?.length) {
       args.push("--tools", this.options.tools.join(","));
+    }
+    for (const extensionPath of this.options.extensionPaths || []) {
+      args.push("--extension", extensionPath);
     }
 
     const env: Record<string, string> = { ...process.env } as Record<
@@ -687,8 +703,61 @@ export class PiAgentClient extends EventEmitter {
     return this.sendCommand({ type: "clone" });
   }
 
-  async reload(): Promise<RpcResponse> {
-    return this.sendCommand({ type: "reload" });
+  /**
+   * Invoke Pimate's private extension command. Pi has no `reload` RPC command;
+   * extension commands are the supported RPC route to ExtensionContext.reload().
+   */
+  async reloadExtensionsViaBridge(
+    bridgePath: string
+  ): Promise<ReloadExtensionsResult> {
+    const commandsResponse = await this.getCommands();
+    if (!commandsResponse.success || !commandsResponse.data) {
+      return {
+        success: false,
+        error: commandsResponse.error || "Could not query Pi extension commands",
+      };
+    }
+
+    const commands = ((commandsResponse.data as any).commands || []) as PiCommandInfo[];
+    const bridgeCommand = commands.find((command) =>
+      isPiCommandFromPath(command, bridgePath, this.options.cwd || process.cwd())
+    );
+    if (!bridgeCommand?.name) {
+      return {
+        success: false,
+        fallbackToRestart: true,
+        error: "Pi did not load Pimate's reload bridge",
+      };
+    }
+
+    let commandError: string | undefined;
+    const onEvent = (event: RpcEvent) => {
+      if (
+        event.type === "extension_error" &&
+        event.event === "command" &&
+        event.extensionPath === `command:${bridgeCommand.name}`
+      ) {
+        commandError = String(event.error || "Reload bridge failed");
+      }
+    };
+
+    this.on("event", onEvent);
+    try {
+      const response = await this.prompt(`/${bridgeCommand.name}`);
+      if (!response.success) {
+        return { success: false, error: response.error };
+      }
+      if (commandError) {
+        return { success: false, error: commandError };
+      }
+
+      // A successful extension-command response means ctx.reload() completed.
+      // The view refreshes the command catalog afterward; a transient catalog
+      // read must not turn a completed reload into a destructive restart.
+      return { success: true };
+    } finally {
+      this.off("event", onEvent);
+    }
   }
 
   async promptAndWait(message: string): Promise<RpcResponse> {

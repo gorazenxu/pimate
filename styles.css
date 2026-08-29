@@ -315,6 +315,66 @@
   font-size: var(--font-ui-small);
 }
 
+/* Skill commands are expanded by Pi into a large user prompt. Keep the
+   default bubble compact while retaining the full text behind a native
+   details disclosure for inspection/debugging. */
+.pi-agent-message-user.pi-agent-message-skill {
+  min-width: 180px;
+  max-width: min(85%, 520px);
+}
+
+.pi-agent-skill-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.pi-agent-skill-command {
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.pi-agent-skill-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+details.pi-agent-skill-details {
+  margin-top: 6px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+summary.pi-agent-skill-details-summary {
+  padding-top: 5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  user-select: none;
+}
+
+summary.pi-agent-skill-details-summary:hover {
+  color: var(--text-accent);
+}
+
+.pi-agent-skill-details-body {
+  max-height: 280px;
+  margin: 6px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Image attachments inside a user message bubble (mirrors Claudian). */
 .pi-agent-message-attachments {
   display: flex;

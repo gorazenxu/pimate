@@ -10,6 +10,7 @@ import {
   Menu,
   addIcon,
   ItemView,
+  FileSystemAdapter,
 } from "obsidian";
 import {
   PiAgentView,
@@ -23,9 +24,11 @@ import {
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { ensurePiReloadBridge } from "./PiReloadBridge";
 
 export default class PiAgentPlugin extends Plugin {
   declare settings: PiAgentSettings;
+  piReloadBridgePath: string | undefined;
 
   constructor(app: App, manifest: PluginManifest) {
     super(app, manifest);
@@ -174,6 +177,19 @@ export default class PiAgentPlugin extends Plugin {
     );
 
     await this.loadSettings();
+
+    try {
+      const adapter = this.app.vault.adapter;
+      if (adapter instanceof FileSystemAdapter) {
+        this.piReloadBridgePath = ensurePiReloadBridge(
+          adapter.getBasePath(),
+          this.manifest.dir
+        );
+      }
+    } catch (err) {
+      console.warn("[pimate] Could not prepare Pi reload bridge", err);
+      this.piReloadBridgePath = undefined;
+    }
 
     // Register the custom view
     this.registerView(

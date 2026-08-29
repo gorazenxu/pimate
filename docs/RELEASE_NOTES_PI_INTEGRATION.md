@@ -17,9 +17,10 @@
 ### 2. ⚡ 生成中实时转向与追问 (Steering & Follow-up Queue)
 - **调整方向 (Hard Steer)**：当 AI 处于 Streaming（回答中）状态时，点击消息卡片或底部的「调整方向」，系统会先中断当前回复，再立即按所选消息重新发起；普通 Enter 发送仍按 Pi follow-up queue 排队。
 
-### 3. 🔄 扩展与技能一键热重载 (`/reload`)
-- **免重启热重载**：在 Header 顶部菜单中新增 **“重载扩展与技能 (/reload)”** 项。
-- **即时生效**：开发或修改位于 `~/.pi/agent/extensions/` 或 Obsidian Vault 根目录 `.pi/extensions/` 里的自定义 TypeScript 扩展或 Skill 后，只需点击此按钮或在输入框触发 `/reload`，即可直接使新扩展与工具在当前 Pi 进程中生效。
+### 3. 🔄 Pi 资源一键热重载 (`/reload`)
+- **会话内热重载**：在 Header 顶部菜单中新增 **“重载扩展与技能 (/reload)”** 项。Pimate 通过随插件加载的私有 Pi 扩展命令调用 `ctx.reload()`，不会发送 Pi RPC 协议并不存在的 `{ type: "reload" }`。
+- **即时生效**：修改本地扩展、Skill、prompt、theme 或 context file 后，可点击此按钮或在输入框触发 `/reload`，让 Pi 在当前会话中重新加载相关资源。
+- **安全兼容回退**：如果私有热重载 bridge 无法加载，Pimate 仅在确认已有可恢复 session file 后重启 Pi 并恢复同一会话；无法保证恢复时不会销毁当前进程。
 
 ### 4. ⚡ 增强型 Slash Command 选单补全 (`/` Trigger)
 - **斜杠智能悬浮窗**：在侧栏聊天输入框中输入 `/` 时，将自动弹出匹配下拉选单。
@@ -45,7 +46,8 @@
 
 ## 🔧 技术实现与核心代码改动
 
-- **[PiAgentClient.ts](file:///d:/00AIProject/06演示/00mindppt/obsidian-pi-agent/PiAgentClient.ts)**: 新增 `reload()` 方法，向后端 RPC 进程透传 `{ type: "reload" }` 命令。
-- **[SessionTreeModal.ts](file:///d:/00AIProject/06演示/00mindppt/obsidian-pi-agent/SessionTreeModal.ts)**: 新建可 Fork 历史节点列表 Modal 组件，展示 `getForkMessages()` 返回的节点。
-- **[PiAgentView.ts](file:///d:/00AIProject/06演示/00mindppt/obsidian-pi-agent/PiAgentView.ts)**: 添加历史节点列表弹窗调起、`/reload` 响应、Markdown 格式化导出 (`exportSessionToVaultNote`) 及直接绑定历史节点的消息工具栏 Fork 按钮。
-- **[styles.css](file:///d:/00AIProject/06演示/00mindppt/obsidian-pi-agent/styles.css)**: 补充历史节点列表、状态标签与按钮的 Claudian 风格 CSS。
+- **[PiAgentClient.ts](../PiAgentClient.ts)**: 为持久 Pi RPC 进程加载 Pimate 私有 extension，并通过受支持的 `get_commands` + extension-command `prompt` 路径调用 `ctx.reload()`；不再发送不存在的 `reload` RPC。
+- **[PiReloadBridge.ts](../PiReloadBridge.ts)**: 内嵌并安装 Pimate 私有 reload bridge；bridge 不可用时由 View 使用 session-preserving restart/resume 回退。
+- **[SessionTreeModal.ts](../SessionTreeModal.ts)**: 新建可 Fork 历史节点列表 Modal 组件，展示 `getForkMessages()` 返回的节点。
+- **[PiAgentView.ts](../PiAgentView.ts)**: 添加历史节点列表弹窗调起、`/reload` 响应、Markdown 格式化导出 (`exportSessionToVaultNote`) 及直接绑定历史节点的消息工具栏 Fork 按钮。
+- **[styles.css](../styles.css)**: 补充历史节点列表、状态标签与按钮的 Claudian 风格 CSS。

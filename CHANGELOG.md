@@ -16,6 +16,26 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
+## 📦 v1.0.49
+
+- 优：`/skill:name` 展开消息改为紧凑显示
+  - 对话气泡只显示技能命令与“已加载技能”状态
+  - 完整 `SKILL.md` 内容移入可展开详情，保留检查能力
+  - 不改变发送给 Pi 的原始 prompt 与 session 内容
+- 优：Slash Command / Skill 补全仅在消息开头的 `/` 触发，确保所选命令会被 Pi 实际执行
+- 修：`/reload` 不再发送 Pi 不支持的 `{ type: "reload" }` RPC
+  - 通过 Pimate 私有扩展命令调用 Pi 的 `ctx.reload()`，保留当前进程与会话
+  - bridge 不可用时安全重启 Pi 并恢复原 session；无法保证恢复时不会销毁当前会话
+- 优：Pi session 历史列表不再限制前 200 条
+  - session 预览只读取 JSONL 文件前 128KB，并按文件修改时间/大小缓存
+  - 恢复会话弹窗取消前 80 条限制
+- 修：多会话 tab 输入串台
+  - 每个 tab 独立保存草稿、上下文、图片和智能审核状态
+  - 发送时锁定当前 tab 对应的 Pi client
+  - 异步切换采用最新请求优先，过期切换不会覆盖当前会话状态
+
+---
+
 ## 📦 v1.0.48
 
 - 新：深度集成 Pi (earendil-works/pi) 原生核心实用功能

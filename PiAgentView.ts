@@ -13,7 +13,17 @@ import {
   Menu,
   setIcon,
 } from "obsidian";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { basename, dirname, join, relative } from "path";
 import { homedir } from "os";
 import type PiAgentPlugin from "./main";
@@ -26,6 +36,10 @@ import {
   type SessionEntry,
   type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
+import {
+  isPiCommandFromPath,
+  type PiCommandInfo,
+} from "./PiCommandUtils";
 import { SessionTreeModal } from "./SessionTreeModal";
 
 export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
@@ -36,11 +50,11 @@ export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
 // Re-exported here to keep local usage ergonomic.
 type PiModel = PiModelFromClient;
 
-interface PiCommand {
+interface ExpandedSkillMessage {
   name: string;
-  description?: string;
-  source?: string;
-  path?: string;
+  location: string;
+  content: string;
+  args: string;
 }
 
 // Pi's `get_commands` RPC intentionally returns only extension commands,
@@ -48,7 +62,7 @@ interface PiCommand {
 // itself, so Pimate supplies them to the same slash-command picker and
 // dispatches them directly instead of sending literal `/compact` text to a
 // model.
-const PIMATE_BUILTIN_COMMANDS: readonly PiCommand[] = [
+const PIMATE_BUILTIN_COMMANDS: readonly PiCommandInfo[] = [
   { name: "compact", description: "Compress the current conversation context", source: "pimate" },
   { name: "model", description: "Choose the active model", source: "pimate" },
   { name: "fork", description: "Fork from an earlier user prompt", source: "pimate" },
@@ -66,6 +80,14 @@ interface ResumeSessionItem {
   mtime: number;
   preview?: string;
 }
+
+interface ResumeSessionPreviewCacheEntry {
+  mtimeMs: number;
+  size: number;
+  preview: string;
+}
+
+const SESSION_PREVIEW_MAX_BYTES = 128 * 1024;
 
 interface ParsedSnippet {
   title: string;
@@ -107,6 +129,15 @@ interface ChatTab {
   // True only when get_entries found entries outside the active leaf path.
   // Such sessions must keep using branch-aware RPC reloads after each turn.
   requiresBranchHistoryRpc?: boolean;
+  isCompacting?: boolean;
+  reloadInFlight?: boolean;
+  // Composer state belongs to the tab even though the view reuses one visible
+  // textarea and context row for the active tab.
+  draft?: string;
+  contextItems?: ContextItem[];
+  pendingUserImages?: Array<{ data: string; mimeType: string }>;
+  smartReviewContinues?: number;
+  smartReviewOriginalGoal?: string | null;
 }
 
 interface InlineEditReviewResult {
@@ -176,15 +207,12 @@ export class PiAgentView extends ItemView {
   private footerContextFillEl: SVGCircleElement | null = null;
   private footerContextPercentEl: HTMLElement | null = null;
   private smartReviewToggleEl: HTMLElement | null = null;
-  private smartReviewContinues: number = 0;
-  private smartReviewOriginalGoal: string | null = null;
   // Tab ids for which automatic title generation has already been requested.
   // A title is generated at most once per new tab, while manual titles remain
   // authoritative in settings.sessionTitles.
   private titleGenRequested = new Set<string>();
   private pendingAutoTitles = new Map<string, string>();
   private renderedMessages: RenderedMessage[] = [];
-  private pendingUserImages: Array<{ data: string; mimeType: string }> = [];
   // History paging (used for fast file-based load of large sessions).
   private historyShownCount = 0;     // currently displayed
   private historyTotalCount = 0;     // total messages in file
@@ -194,8 +222,17 @@ export class PiAgentView extends ItemView {
   // When history comes from Pi's session tree, retain the complete active
   // branch so paging never falls back to a flattened JSONL file.
   private activeBranchHistory: any[] | null = null;
+  // Session previews only need the beginning of each JSONL file. Cache them
+  // until the file changes so opening/closing the history panel is cheap.
+  private readonly resumeSessionPreviewCache = new Map<
+    string,
+    ResumeSessionPreviewCacheEntry
+  >();
   private tabs: ChatTab[] = [];
   private activeTabId: string | null = null;
+  // A tab switch can involve several async RPCs. Only the newest switch is
+  // allowed to publish its client/history back into the shared view state.
+  private tabSwitchSeq = 0;
   private historyPanelEl: HTMLElement | null = null;
   private modelPopupEl: HTMLElement | null = null;
   private effortPopupEl: HTMLElement | null = null;
@@ -234,10 +271,10 @@ export class PiAgentView extends ItemView {
 
   // ─── Autocomplete Slash Command Helper States ───────────────────────
   private commandDropdown: HTMLElement | null = null;
-  private filteredCommands: PiCommand[] = [];
+  private filteredCommands: PiCommandInfo[] = [];
   private activeCommandIndex = 0;
   private commandQueryStart = -1;
-  private availableCommands: PiCommand[] = [...PIMATE_BUILTIN_COMMANDS];
+  private availableCommands: PiCommandInfo[] = [...PIMATE_BUILTIN_COMMANDS];
   private commandLoadPromise: Promise<void> | null = null;
   private commandLoadClient: PiAgentClient | null = null;
   private commandCatalogClient: PiAgentClient | null = null;
@@ -668,6 +705,7 @@ export class PiAgentView extends ItemView {
       this.runAsync(() => this.handleDrop(e));
     });
     this.inputEl.addEventListener("input", () => {
+      if (this.activeTab) this.activeTab.draft = this.inputEl?.value || "";
       this.updateInputModeState();
       this.handleMentionInput();
       this.handleCommandInput();
@@ -788,6 +826,25 @@ export class PiAgentView extends ItemView {
     return this.tabs.find((tab) => tab.id === this.activeTabId) ?? null;
   }
 
+  private saveActiveComposerState(): void {
+    const tab = this.activeTab;
+    if (!tab) return;
+    if (this.inputEl) tab.draft = this.inputEl.value;
+    tab.contextItems = this.contextItems.map((item) => ({ ...item }));
+  }
+
+  private restoreComposerState(tab: ChatTab): void {
+    if (this.inputEl) {
+      this.inputEl.value = tab.draft || "";
+      this.resizeInputEl();
+    }
+    this.contextItems = (tab.contextItems || []).map((item) => ({ ...item }));
+    this.renderContextItems();
+    this.updateInputModeState();
+    this.closeMentionDropdown();
+    this.closeCommandDropdown();
+  }
+
   private async restoreOrCreateInitialTab(): Promise<void> {
     const maxTabs = this.plugin.settings.maxTabs || 3;
     const persisted = this.plugin.settings.sessionTabs || [];
@@ -836,6 +893,7 @@ export class PiAgentView extends ItemView {
       thinkingLevel: this.plugin.settings.thinkingLevel,
       requiresBranchHistoryRpc: false,
     };
+    this.saveActiveComposerState();
     this.tabs.push(tab);
     this.activeTabId = tab.id;
     this.renderTabs();
@@ -902,8 +960,11 @@ export class PiAgentView extends ItemView {
   private async switchToTab(tabId: string): Promise<void> {
     const tab = this.tabs.find((item) => item.id === tabId);
     if (!tab) return;
+    this.saveActiveComposerState();
+    const switchSeq = ++this.tabSwitchSeq;
     this.activeTabId = tab.id;
     this.client = tab.client;
+    this.restoreComposerState(tab);
     this.forkMessagesByEntryId.clear();
     this.forkScopeVersion++;
     this.pendingQueuedMessages = [];
@@ -921,16 +982,25 @@ export class PiAgentView extends ItemView {
     this.renderEmptyState();
     this.updateWidget("tasks", undefined);
     await this.ensureTabClient(tab);
-    this.client = tab.client;
+    if (this.tabSwitchSeq !== switchSeq || this.activeTab !== tab) return;
+
+    const client = tab.client;
+    this.client = client;
     this.renderActiveTabRuntimeStatus();
     this.renderActiveTabSpeed();
     // Parallelize non-blocking post-start calls so the UI feels snappy.
     // Each call sets a different part of the UI and they don't depend on each other.
-    void this.refreshStateDisplay();
-    void this.loadAvailableCommands();
+    void this.refreshStateDisplay(tab, client);
+    void this.loadAvailableCommands(client);
     // A tab switch may restore a session that already contains sibling
     // branches, so calibrate once against Pi's authoritative active leaf.
-    await this.loadMessages({ forceRpc: true });
+    await this.loadMessages({
+      forceRpc: true,
+      expectedTab: tab,
+      expectedClient: client,
+      expectedSwitchSeq: switchSeq,
+    });
+    if (this.tabSwitchSeq !== switchSeq || this.activeTab !== tab || this.client !== client) return;
     void this.refreshForkMessages();
     this.renderActiveTabRuntimeStatus();
     this.renderActiveTabSpeed();
@@ -971,7 +1041,10 @@ export class PiAgentView extends ItemView {
     return pathLower.includes(`/sessions/${encodedDirName}/`);
   }
 
-  private async ensureTabClient(tab: ChatTab): Promise<void> {
+  private async ensureTabClient(
+    tab: ChatTab,
+    options: { requireSessionRestore?: boolean } = {}
+  ): Promise<void> {
     if (tab.sessionFile && !this.isSessionFileInCurrentWorkspace(tab.sessionFile)) {
       console.log(`[pi-agent] SessionFile ${tab.sessionFile} belongs to another workspace, unbinding to start fresh.`);
       tab.sessionFile = undefined;
@@ -991,7 +1064,7 @@ export class PiAgentView extends ItemView {
     client.on("event", (event: RpcEvent) => {
       this.recordTabRuntimeState(tab, event);
       if (this.activeTabId !== tab.id) return;
-      this.handleEvent(event);
+      this.handleEvent(event, tab);
     });
 
     client.on("error", (err: Error) => {
@@ -1012,7 +1085,9 @@ export class PiAgentView extends ItemView {
       if (tab.sessionFile) {
         const result = await client.switchSession(tab.sessionFile);
         if (!result.success || (result.data as any)?.cancelled) {
-          new Notice(`Failed to restore session: ${tab.label}`);
+          const restoreError = result.error || `Failed to restore session: ${tab.label}`;
+          if (options.requireSessionRestore) throw new Error(restoreError);
+          new Notice(restoreError);
         }
       }
       await this.applyTabRuntimePreferences(tab);
@@ -1026,6 +1101,11 @@ export class PiAgentView extends ItemView {
           `❌ Failed to start pi: ${(err as Error).message}`,
           "error"
         );
+      }
+      if (options.requireSessionRestore) {
+        await client.destroy().catch(() => undefined);
+        if (tab.client === client) tab.client = null;
+        throw err;
       }
     }
   }
@@ -1052,6 +1132,9 @@ export class PiAgentView extends ItemView {
       apiKey: this.readProviderApiKey(provider) || settings.apiKey,
       cwd: vaultBasePath,
       noSession: false,
+      extensionPaths: this.plugin.piReloadBridgePath
+        ? [this.plugin.piReloadBridgePath]
+        : undefined,
     });
   }
 
@@ -1189,8 +1272,8 @@ export class PiAgentView extends ItemView {
     return null;
   }
 
-  private async syncTabStateFromPi(tab: ChatTab): Promise<void> {
-    if (!tab.client) return;
+  private async syncTabStateFromPi(tab: ChatTab): Promise<boolean> {
+    if (!tab.client) return false;
     const client = tab.client;
     const seq = (tab.syncSeq ?? 0) + 1;
     tab.syncSeq = seq;
@@ -1200,15 +1283,16 @@ export class PiAgentView extends ItemView {
       response = await client.getState();
     } catch (err) {
       console.warn("[pimate] getState failed", err);
-      return;
+      return false;
     }
 
     // Drop stale responses: tab moved on, or its client was swapped out.
-    if (tab.syncSeq !== seq) return;
-    if (tab.client !== client) return;
-    if (!response?.success || !response.data) return;
+    if (tab.syncSeq !== seq) return false;
+    if (tab.client !== client) return false;
+    if (!response?.success || !response.data) return false;
 
     this.applyAuthoritativePiState(tab, response.data);
+    return true;
   }
 
   private applyAuthoritativePiState(
@@ -1223,6 +1307,9 @@ export class PiAgentView extends ItemView {
       tab.piModelMeta = state.model;
       tab.modelProvider = state.model.provider;
       tab.modelId = state.model.id;
+    }
+    if (typeof state.isCompacting === "boolean") {
+      tab.isCompacting = state.isCompacting;
     }
     // Pi's get_state already carries the authoritative session binding. Keep
     // this independent of the context-meter UI/get_session_stats path so a
@@ -1322,6 +1409,12 @@ export class PiAgentView extends ItemView {
       case "agent_settled":
         tab.isStreaming = false;
         break;
+      case "compaction_start":
+        tab.isCompacting = true;
+        break;
+      case "compaction_end":
+        tab.isCompacting = false;
+        break;
       case "queue_update": {
         const counts = this.getQueueCounts(event);
         tab.steeringCount = counts.steering;
@@ -1367,11 +1460,12 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private handleEvent(event: RpcEvent): void {
+  private handleEvent(event: RpcEvent, sourceTab?: ChatTab | null): void {
+    const tab = sourceTab || this.activeTab;
     switch (event.type) {
       case "agent_start":
         this.isStreaming = true;
-        if (this.activeTab) this.activeTab.isStreaming = true;
+        if (tab) tab.isStreaming = true;
         this.startSpeedIndicator();
         this.updateButtons();
         this.setStatus("🤔 Thinking...", "thinking");
@@ -1386,7 +1480,7 @@ export class PiAgentView extends ItemView {
 
       case "agent_settled":
         this.isStreaming = false;
-        if (this.activeTab) this.activeTab.isStreaming = false;
+        if (tab) tab.isStreaming = false;
         for (const pending of this.pendingQueuedMessages) {
           pending.rendered.el.removeClass("is-queued");
         }
@@ -1400,12 +1494,12 @@ export class PiAgentView extends ItemView {
         // race that replacement prompt and can revive the old direction.
         if (!this.hardSteerInFlight) {
           void this.refreshForkMessagesAndReloadHistory();
-          void this.maybeAutoContinueSmartReview();
+          void this.maybeAutoContinueSmartReview(tab || undefined);
         }
         break;
 
       case "message_start":
-        this.handleMessageStart(event);
+        this.handleMessageStart(event, tab);
         break;
 
       case "message_update":
@@ -1437,7 +1531,7 @@ export class PiAgentView extends ItemView {
         break;
 
       case "queue_update":
-        this.handleQueueUpdate(event);
+        this.handleQueueUpdate(event, tab);
         break;
 
       case "thinking_level_changed":
@@ -1458,6 +1552,13 @@ export class PiAgentView extends ItemView {
         this.setStatus("✅ Compaction complete", "ok");
         break;
 
+      case "extension_error":
+        console.error("[pi-agent] Extension error", event);
+        if (event.event !== "command") {
+          new Notice(`Pi 扩展错误: ${String(event.error || "未知错误")}`);
+        }
+        break;
+
       case "extension_ui_request":
         // Handle extension UI requests from pi extensions
         this.handleExtensionUIRequest(event);
@@ -1469,12 +1570,13 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private handleMessageStart(event: RpcEvent): void {
+  private handleMessageStart(event: RpcEvent, sourceTab?: ChatTab | null): void {
     const message = event.message as {
       role: string;
       content?: string | MessageContent[];
     };
     if (!message) return;
+    const tab = sourceTab || this.activeTab;
 
     if (message.role === "user") {
       const content =
@@ -1487,19 +1589,20 @@ export class PiAgentView extends ItemView {
       if (pendingIndex !== -1) {
         const [pending] = this.pendingQueuedMessages.splice(pendingIndex, 1);
         pending.rendered.el.removeClass("is-queued");
-        pending.rendered.el.setAttribute("data-rpc-message", content);
-        if (this.pendingUserImages.length > 0) {
-          this.pendingUserImages = [];
+        if (this.parseExpandedSkillMessage(content)) {
+          this.renderUserMessageContent(pending.rendered.el, pending.rendered.contentEl, content);
         }
+        pending.rendered.el.setAttribute("data-rpc-message", content);
+        if (tab) tab.pendingUserImages = [];
         this.updateButtons();
         return;
       }
 
       const rendered = this.addMessage("user", this.stripRecentContextGuard(content));
       // Attach any images that were sent with this message to the bubble.
-      if (this.pendingUserImages.length > 0) {
-        this.renderUserMessageImages(rendered, this.pendingUserImages);
-        this.pendingUserImages = [];
+      if (tab?.pendingUserImages?.length) {
+        this.renderUserMessageImages(rendered, tab.pendingUserImages);
+        tab.pendingUserImages = [];
       }
     } else if (message.role === "assistant") {
       this.currentAssistantMsg = this.addMessage("assistant", "");
@@ -2027,13 +2130,14 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private handleQueueUpdate(event: RpcEvent): void {
+  private handleQueueUpdate(event: RpcEvent, sourceTab?: ChatTab | null): void {
     const counts = this.getQueueCounts(event);
     const total = counts.steering + counts.followUp;
-    if (this.activeTab) {
-      this.activeTab.steeringCount = counts.steering;
-      this.activeTab.followUpCount = counts.followUp;
-      this.activeTab.queueCount = total;
+    const tab = sourceTab || this.activeTab;
+    if (tab) {
+      tab.steeringCount = counts.steering;
+      tab.followUpCount = counts.followUp;
+      tab.queueCount = total;
     }
     this.renderActiveTabRuntimeStatus();
   }
@@ -2203,9 +2307,7 @@ export class PiAgentView extends ItemView {
     const contentEl = msgEl.createDiv("pi-agent-message-content");
 
     if (role === "user" && content) {
-      const visibleContent = this.stripRecentContextGuard(content);
-      contentEl.createSpan({ text: visibleContent });
-      msgEl.setAttribute("data-raw-content", visibleContent);
+      this.renderUserMessageContent(msgEl, contentEl, content);
       if (options.userInput) {
         msgEl.setAttribute("data-user-input", options.userInput);
       }
@@ -2341,6 +2443,95 @@ export class PiAgentView extends ItemView {
     return rendered;
   }
 
+  /**
+   * Pi expands `/skill:name` into a full `<skill ...>...</skill>` user message
+   * before emitting it over RPC. Keep the original prompt in the session, but
+   * make the chat bubble readable and let users inspect the expanded content
+   * on demand.
+   */
+  private parseExpandedSkillMessage(content: string): ExpandedSkillMessage | null {
+    const opening = content.match(/^\s*<skill\b([^>]*)>\s*/i);
+    if (!opening) return null;
+
+    const name = opening[1].match(/\bname\s*=\s*["']([^"']+)["']/i)?.[1]?.trim();
+    const location = opening[1]
+      .match(/\blocation\s*=\s*["']([^"']+)["']/i)?.[1]
+      ?.trim();
+    if (!name || !location || !/(?:^|[\\/])SKILL\.md$/i.test(location)) return null;
+
+    const closingIndex = content.toLowerCase().lastIndexOf("</skill>");
+    if (closingIndex < opening[0].length) return null;
+    const expandedContent = content.slice(opening[0].length, closingIndex).trim();
+    const args = content.slice(closingIndex + "</skill>".length).trim();
+    if (!expandedContent) return null;
+
+    return { name, location, content: expandedContent, args };
+  }
+
+  private getExpandedSkillCommand(content: string): string | null {
+    const skill = this.parseExpandedSkillMessage(content);
+    if (!skill) return null;
+    return [`/skill:${skill.name}`, skill.args].filter(Boolean).join(" ");
+  }
+
+  private renderExpandedSkillMessage(
+    messageEl: HTMLElement,
+    contentEl: HTMLElement,
+    skill: ExpandedSkillMessage
+  ): string {
+    const isZh = this.plugin.settings.language !== "en";
+    const command = [`/skill:${skill.name}`, skill.args].filter(Boolean).join(" ");
+
+    messageEl.addClass("pi-agent-message-skill");
+    messageEl.setAttribute("data-raw-content", command);
+
+    const summaryRow = contentEl.createDiv("pi-agent-skill-summary");
+    summaryRow.createSpan({ text: command, cls: "pi-agent-skill-command" });
+    summaryRow.createSpan({
+      text: isZh ? "已加载技能" : "Skill loaded",
+      cls: "pi-agent-skill-status",
+    });
+
+    const details = contentEl.createEl("details", {
+      cls: "pi-agent-skill-details",
+    });
+    const detailsSummary = details.createEl("summary", {
+      cls: "pi-agent-skill-details-summary",
+    });
+    detailsSummary.setText(isZh ? "查看完整技能内容" : "View expanded skill content");
+    details.createEl("pre", {
+      cls: "pi-agent-skill-details-body",
+      text: skill.content,
+    });
+
+    return command;
+  }
+
+  private renderUserMessageContent(
+    messageEl: HTMLElement,
+    contentEl: HTMLElement,
+    content: string
+  ): string {
+    // Queued messages may already contain image attachments. Replace only the
+    // text/details portion so an authoritative message_start event keeps them.
+    for (const child of Array.from(contentEl.children)) {
+      if (!(child as HTMLElement).classList.contains("pi-agent-message-attachments")) {
+        child.remove();
+      }
+    }
+    messageEl.removeClass("pi-agent-message-skill");
+
+    const expandedSkill = this.parseExpandedSkillMessage(content);
+    if (expandedSkill) {
+      return this.renderExpandedSkillMessage(messageEl, contentEl, expandedSkill);
+    }
+
+    const visibleContent = this.stripRecentContextGuard(content);
+    if (visibleContent) contentEl.createSpan({ text: visibleContent });
+    messageEl.setAttribute("data-raw-content", visibleContent);
+    return visibleContent;
+  }
+
   private async steerExistingMessage(
     messageEl: HTMLElement,
     steerBtn?: HTMLButtonElement
@@ -2380,12 +2571,14 @@ export class PiAgentView extends ItemView {
       steerBtn?: HTMLButtonElement;
       userGoal?: string;
       images?: Array<{ type: string; data: string; mimeType: string }>;
+      tab?: ChatTab;
+      client?: PiAgentClient;
     } = {}
   ): Promise<boolean> {
-    const initialClient = this.client;
-    const tab = this.activeTab;
+    const tab = options.tab || this.activeTab;
+    const initialClient = options.client || tab?.client || this.client;
     const isZh = this.plugin.settings.language !== "en";
-    if (!initialClient || !tab || !this.isStreaming) {
+    if (!initialClient || !tab || !tab.isStreaming) {
       new Notice(isZh ? "当前没有正在生成的任务" : "There is no active response to redirect");
       return false;
     }
@@ -2402,8 +2595,8 @@ export class PiAgentView extends ItemView {
       queuedBeforeAbort.length > 0 || (tab.queueCount || 0) > 0;
 
     this.hardSteerInFlight = true;
-    this.smartReviewContinues = 0;
-    this.smartReviewOriginalGoal = null;
+    tab.smartReviewContinues = 0;
+    tab.smartReviewOriginalGoal = null;
     if (options.steerBtn) options.steerBtn.disabled = true;
     this.setStatus(isZh ? "↪ 正在中断并调整方向…" : "↪ Stopping and redirecting…", "thinking");
     this.updateButtons();
@@ -2425,14 +2618,14 @@ export class PiAgentView extends ItemView {
         throw new Error(response.error || "Pi did not accept the redirect message");
       }
 
-      this.smartReviewOriginalGoal = options.userGoal || message;
+      tab.smartReviewOriginalGoal = options.userGoal || message;
       if (this.activeTab === tab) {
         new Notice(isZh ? "已中断当前回复并调整方向" : "Current response stopped and redirected");
         this.setStatus(isZh ? "↪ 正在按新方向继续…" : "↪ Continuing in the new direction…", "thinking");
       }
       return true;
     } catch (err) {
-      if (options.images?.length) this.pendingUserImages = [];
+      if (options.images?.length && tab) tab.pendingUserImages = [];
       new Notice(`❌ ${isZh ? "调整方向失败：" : "Could not redirect: "}${(err as Error).message}`);
       return false;
     } finally {
@@ -2463,25 +2656,50 @@ export class PiAgentView extends ItemView {
     tab: ChatTab,
     previousClient: PiAgentClient
   ): Promise<PiAgentClient> {
-    await this.syncTabStateFromPi(tab);
+    return this.restartTabClient(tab, previousClient, {
+      clearQueuedState: true,
+      missingSessionError: "Pi did not provide the current session to resume",
+      restartError: "Could not restart Pi for the redirect",
+    });
+  }
+
+  private async restartTabClient(
+    tab: ChatTab,
+    previousClient: PiAgentClient,
+    options: {
+      clearQueuedState: boolean;
+      missingSessionError: string;
+      restartError: string;
+    }
+  ): Promise<PiAgentClient> {
+    const synchronized = await this.syncTabStateFromPi(tab);
+    if (!synchronized) {
+      throw new Error("Could not verify the current session before restarting Pi");
+    }
     if (tab.client !== previousClient) {
-      throw new Error("The conversation changed while redirecting");
+      throw new Error("The conversation changed while restarting Pi");
     }
     if (!tab.sessionFile) {
-      throw new Error("Pi did not provide the current session to resume");
+      throw new Error(options.missingSessionError);
     }
 
+    const sessionFile = tab.sessionFile;
+    const sessionId = tab.sessionId;
     await previousClient.destroy();
     if (tab.client === previousClient) tab.client = null;
-    // The discarded queue existed only in the process we just stopped; do not
-    // let its last queue_update keep the fresh client marked as queued.
-    tab.queueCount = 0;
-    tab.steeringCount = 0;
-    tab.followUpCount = 0;
+    if (options.clearQueuedState) {
+      tab.queueCount = 0;
+      tab.steeringCount = 0;
+      tab.followUpCount = 0;
+    }
     if (this.client === previousClient) this.client = null;
 
-    await this.ensureTabClient(tab);
-    if (!tab.client) throw new Error("Could not restart Pi for the redirect");
+    // Preserve the authoritative binding even if startup fails, so a later
+    // retry can still resume the user's conversation.
+    tab.sessionFile = sessionFile;
+    tab.sessionId = sessionId;
+    await this.ensureTabClient(tab, { requireSessionRestore: true });
+    if (!tab.client?.isRunning()) throw new Error(options.restartError);
 
     if (this.activeTab === tab) {
       this.client = tab.client;
@@ -2492,6 +2710,8 @@ export class PiAgentView extends ItemView {
   }
 
   private normalizeQueuedMessage(text: string): string {
+    const skillCommand = this.getExpandedSkillCommand(text);
+    if (skillCommand) return skillCommand;
     return text.replace(/\s+/g, " ").trim();
   }
 
@@ -3166,7 +3386,26 @@ export class PiAgentView extends ItemView {
   }
 
   private async sendMessage(streamingBehavior?: "steer" | "followUp"): Promise<void> {
-    if (!this.client || !this.inputEl) return;
+    const tab = this.activeTab;
+    const client = tab?.client;
+    if (!tab || !client || !client.isRunning() || !this.inputEl) {
+      if (tab) new Notice("当前对话正在切换或尚未就绪，请稍后再发送");
+      return;
+    }
+    // The visible composer belongs to the tab selected at the instant Enter
+    // was pressed. Repair the legacy shared pointer if an older async tab
+    // switch left it pointing at another client, but never use that pointer as
+    // the send target below.
+    if (this.client !== client) {
+      console.warn("[pimate] repaired stale active client pointer before send", {
+        tabId: tab.id,
+      });
+      this.client = client;
+    }
+    if (tab.reloadInFlight) {
+      new Notice("Pi 正在重新加载资源，请稍候");
+      return;
+    }
     const rawMessage = this.inputEl.value.trim();
     const contextPrefix = this.buildContextPrefix();
     const images = this.getImagePayloads();
@@ -3187,7 +3426,7 @@ export class PiAgentView extends ItemView {
       this.updateInputModeState();
       this.closeCommandDropdown();
       this.clearContextItems();
-      this.pendingUserImages = [];
+      tab.pendingUserImages = [];
       if (images.length > 0) {
         new Notice("Pimate 内建命令不会使用附加图片");
       }
@@ -3196,14 +3435,14 @@ export class PiAgentView extends ItemView {
     }
 
     const message = this.applySystemPrompt(baseMessage);
-    const shouldQueue = this.isStreaming && !message.startsWith("!");
+    const shouldQueue = tab.isStreaming && !message.startsWith("!");
     const shouldHardSteer = shouldQueue && streamingBehavior === "steer";
 
     this.maybeTitleActiveTab(rawMessage || message);
 
     // Stash images so the user-message bubble (rendered when Pi echoes via
     // message_start) can show the attached images at the top, like Claudian.
-    this.pendingUserImages = images.map((i) => ({ data: i.data, mimeType: i.mimeType }));
+    tab.pendingUserImages = images.map((i) => ({ data: i.data, mimeType: i.mimeType }));
 
     // Queued prompts do not always emit message_start until Pi begins the next
     // turn. Render a temporary user bubble now, then reconcile it when the
@@ -3214,7 +3453,7 @@ export class PiAgentView extends ItemView {
         rawMessage || userMessage,
         images.map((i) => ({ data: i.data, mimeType: i.mimeType }))
       );
-      this.pendingUserImages = [];
+      tab.pendingUserImages = [];
     }
 
     // Clear input
@@ -3225,13 +3464,15 @@ export class PiAgentView extends ItemView {
 
     // Reset smart-review counter for fresh user goals so the auto-continue
     // loop only runs within the same goal.
-    this.smartReviewContinues = 0;
-    this.smartReviewOriginalGoal = rawMessage || message;
+    tab.smartReviewContinues = 0;
+    tab.smartReviewOriginalGoal = rawMessage || message;
+    tab.draft = "";
+    tab.contextItems = [];
 
     try {
       if (message.startsWith("!")) {
-        this.smartReviewOriginalGoal = null;
-        await this.runBashMode(message);
+        tab.smartReviewOriginalGoal = null;
+        await this.runBashMode(message, client);
       } else if (shouldHardSteer) {
         // This is deliberately not Pi's native `steer`: the action promises
         // to stop the current output before starting this input as a fresh
@@ -3239,10 +3480,12 @@ export class PiAgentView extends ItemView {
         await this.hardSteerMessage(message, {
           images,
           userGoal: rawMessage || userMessage,
+          tab,
+          client,
         });
       } else if (shouldQueue) {
         // Normal Enter remains a non-destructive follow-up queue.
-        const response = await this.client.prompt(message, {
+        const response = await client.prompt(message, {
           streamingBehavior: "followUp",
           images,
         });
@@ -3250,21 +3493,26 @@ export class PiAgentView extends ItemView {
           throw new Error(response.error || "Pi did not accept the queued message");
         }
       } else {
-        const response = await this.client.prompt(message, { images });
+        const response = await client.prompt(message, { images });
         if (!response.success) {
           throw new Error(response.error || "Pi did not accept the message");
         }
       }
     } catch (err) {
       if (shouldQueue && !shouldHardSteer) this.removePendingQueuedMessage(message);
-      this.addSystemMessage(
-        `❌ Failed to send: ${(err as Error).message}`
-      );
+      if (this.activeTab === tab) {
+        this.addSystemMessage(`❌ Failed to send: ${(err as Error).message}`);
+      } else {
+        new Notice(`❌ Failed to send: ${(err as Error).message}`);
+      }
     }
   }
 
   private applySystemPrompt(message: string): string {
-    if (message.startsWith("!")) return message;
+    // Pi only dispatches extension commands, skills, and prompt templates when
+    // the slash command is the leading message token. Wrapping it in prose
+    // would turn it into an ordinary model prompt.
+    if (message.startsWith("!") || message.startsWith("/")) return message;
 
     const systemInstructions: string[] = [];
     const systemPrompt = (this.plugin.settings.systemPrompt || "").trim();
@@ -3358,63 +3606,68 @@ export class PiAgentView extends ItemView {
     return Math.max(1, Math.min(10, Math.floor(raw)));
   }
 
-  private async maybeAutoContinueSmartReview(): Promise<void> {
+  private async maybeAutoContinueSmartReview(expectedTab?: ChatTab): Promise<void> {
+    const tab = expectedTab || this.activeTab;
+    const client = tab?.client;
     if (this.plugin.settings.smartReviewEnabled !== true) return;
-    if (!this.client) return;
-    if (this.isStreaming) return;
-    if (this.smartReviewOriginalGoal == null) return;
+    if (!tab || !client) return;
+    if (tab.isStreaming) return;
+    if (tab.smartReviewOriginalGoal == null) return;
 
     const max = this.getSmartReviewMaxContinues();
-    if (this.smartReviewContinues >= max) {
+    const continues = tab.smartReviewContinues || 0;
+    if (continues >= max) {
       this.setStatus(
-        `✅ Smart review limit reached (${this.smartReviewContinues}/${max})`,
+        `✅ Smart review limit reached (${continues}/${max})`,
         "ok",
       );
-      this.smartReviewOriginalGoal = null;
+      tab.smartReviewOriginalGoal = null;
       return;
     }
 
     let result;
     try {
-      result = await this.client.getLastAssistantText();
+      result = await client.getLastAssistantText();
     } catch (err) {
       console.warn("[pimate] smart review: failed to fetch last assistant text", err);
       return;
     }
+    if (!this.isCurrentTabClient(tab, client)) return;
     if (!result.success) return;
     const text = ((result.data as any)?.text as string | null | undefined) ?? "";
     if (!text.trim()) return;
 
     if (!this.shouldAutoContinueFromAssistantText(text)) {
-      this.smartReviewOriginalGoal = null;
+      tab.smartReviewOriginalGoal = null;
       return;
     }
 
-    this.smartReviewContinues += 1;
-    const continuePrompt = this.buildSmartReviewContinuePrompt();
+    tab.smartReviewContinues = continues + 1;
+    const continuePrompt = this.buildSmartReviewContinuePrompt(tab.smartReviewOriginalGoal);
     this.setStatus(
-      `🔁 Smart review continue ${this.smartReviewContinues}/${max}`,
+      `🔁 Smart review continue ${tab.smartReviewContinues}/${max}`,
       "thinking",
     );
-    this.addSystemMessage(`🔁 Smart review auto-continue (${this.smartReviewContinues}/${max})`);
+    this.addSystemMessage(`🔁 Smart review auto-continue (${tab.smartReviewContinues}/${max})`);
 
     try {
-      if (this.isStreaming) {
-        await this.client.steer(continuePrompt);
+      if (!this.isCurrentTabClient(tab, client)) return;
+      if (tab.isStreaming) {
+        await client.steer(continuePrompt);
       } else {
-        await this.client.prompt(continuePrompt);
+        await client.prompt(continuePrompt);
       }
     } catch (err) {
       this.addSystemMessage(
         `❌ Smart review continue failed: ${(err as Error).message}`,
       );
-      this.smartReviewOriginalGoal = null;
+      tab.smartReviewOriginalGoal = null;
     }
   }
 
-  private buildSmartReviewContinuePrompt(): string {
+  private buildSmartReviewContinuePrompt(goalOverride?: string | null): string {
     const isZh = this.plugin.settings.language !== "en";
-    const goal = (this.smartReviewOriginalGoal || "").trim();
+    const goal = (goalOverride || "").trim();
     const goalSnippet = goal
       ? `${isZh ? "原始目标" : "Original goal"}: ${goal.slice(0, 400)}\n\n`
       : "";
@@ -3607,15 +3860,16 @@ export class PiAgentView extends ItemView {
   }
 
   private abortAgent(): void {
-    const client = this.client;
+    const tab = this.activeTab;
+    const client = tab?.client;
     const isZh = this.plugin.settings.language !== "en";
-    if (!client || !this.isStreaming || this.abortInFlight || this.hardSteerInFlight) {
+    if (!tab || !client || !tab.isStreaming || this.abortInFlight || this.hardSteerInFlight) {
       return;
     }
 
     this.abortInFlight = true;
-    this.smartReviewContinues = 0;
-    this.smartReviewOriginalGoal = null;
+    tab.smartReviewContinues = 0;
+    tab.smartReviewOriginalGoal = null;
     this.setStatus(isZh ? "⏹ 正在停止…" : "⏹ Stopping…", "warning");
     this.updateButtons();
 
@@ -3637,12 +3891,18 @@ export class PiAgentView extends ItemView {
   private async newSession(): Promise<void> {
     const tab = this.activeTab;
     if (!tab) return;
+    const operationSeq = this.tabSwitchSeq;
 
     // 清空当前 Tab 绑定的会话参数
     tab.sessionFile = undefined;
     tab.sessionId = undefined;
     tab.restored = false;
     tab.requiresBranchHistoryRpc = false;
+    tab.draft = "";
+    tab.contextItems = [];
+    tab.pendingUserImages = [];
+    tab.smartReviewContinues = 0;
+    tab.smartReviewOriginalGoal = null;
     tab.client = null;
     tab.isStreaming = false;
 
@@ -3651,11 +3911,21 @@ export class PiAgentView extends ItemView {
     this.renderedMessages = [];
     this.pendingQueuedMessages = [];
     this.activeBranchHistory = null;
+    if (this.inputEl) {
+      this.inputEl.value = "";
+      this.resizeInputEl();
+    }
+    this.contextItems = [];
+    this.renderContextItems();
     this.renderEmptyState();
     this.updateWidget("tasks", undefined);
 
     // 重新实例化并同步空白客户端
     await this.ensureTabClient(tab);
+    if (this.activeTab !== tab || this.tabSwitchSeq !== operationSeq) {
+      await this.persistSessionTabs();
+      return;
+    }
     this.client = tab.client;
     await this.refreshStateDisplay();
     await this.loadAvailableCommands();
@@ -3727,14 +3997,21 @@ export class PiAgentView extends ItemView {
   }
 
   private async compactSession(customInstructions?: string): Promise<void> {
-    if (!this.client) return;
+    const tab = this.activeTab;
+    const client = tab?.client;
+    if (!tab || !client) return;
     const isZh = this.plugin.settings.language === "zh";
+    if (tab.reloadInFlight) {
+      new Notice(isZh ? "Pi 正在重新加载资源，请稍候" : "Pi resources are reloading");
+      return;
+    }
+    tab.isCompacting = true;
     // 保险：60 秒后还在 thinking 就强制重置（防止事件丢失导致水印死转）
     const safetyTimer = window.setTimeout(() => {
       this.setStatus("⚠️ Compaction stuck (no event)", "warning");
     }, 60_000);
     try {
-      const result = await this.client.compact(customInstructions?.trim() || undefined);
+      const result = await client.compact(customInstructions?.trim() || undefined);
       // 响应回来后强制重置状态，不管 compaction_end 事件是否被正确处理
       window.clearTimeout(safetyTimer);
       this.setStatus("✅ Ready", "ok");
@@ -3750,6 +4027,8 @@ export class PiAgentView extends ItemView {
       window.clearTimeout(safetyTimer);
       this.setStatus("✅ Ready", "ok");
       new Notice(`Compaction failed: ${(err as Error).message}`);
+    } finally {
+      tab.isCompacting = false;
     }
   }
 
@@ -3798,21 +4077,115 @@ export class PiAgentView extends ItemView {
   }
 
   private async reloadExtensions(): Promise<void> {
-    if (!this.client) {
-      new Notice("Pi 进程未运行");
+    const tab = this.activeTab;
+    const client = tab?.client;
+    const isZh = this.plugin.settings.language !== "en";
+    if (!tab || !client) {
+      new Notice(isZh ? "Pi 进程未运行" : "Pi is not running");
       return;
     }
+    if (tab.reloadInFlight) {
+      new Notice(isZh ? "Pi 正在重新加载资源" : "Pi resources are already reloading");
+      return;
+    }
+    if (
+      tab.isStreaming ||
+      tab.isCompacting ||
+      this.hardSteerInFlight ||
+      this.abortInFlight ||
+      (tab.queueCount || 0) > 0
+    ) {
+      new Notice(
+        isZh
+          ? "请等待当前回复、压缩或排队消息处理完毕后再重载"
+          : "Wait for the current response, compaction, and queued messages before reloading"
+      );
+      return;
+    }
+
+    tab.reloadInFlight = true;
+    this.setStatus(isZh ? "🔄 正在重新加载 Pi 资源..." : "🔄 Reloading Pi resources...", "thinking");
     try {
-      const res = await this.client.reload();
-      if (res.success) {
-        new Notice("✅ 已重新加载 Pi 扩展、技能与提示词模板 (/reload)");
-        this.commandCatalogClient = null;
-        await this.loadAvailableCommands();
-      } else {
-        new Notice(`重载失败: ${res.error || "未知错误"}`);
+      const stateResponse = await client.getState();
+      if (tab.client !== client) throw new Error("The conversation changed while reloading");
+      if (!stateResponse.success || !stateResponse.data) {
+        throw new Error(
+          stateResponse.error ||
+            (isZh
+              ? "无法确认 Pi 当前状态，请稍后重试"
+              : "Could not verify Pi's current state; try again shortly")
+        );
       }
+      const state = stateResponse.data;
+      if (
+        state?.isStreaming ||
+        state?.isCompacting ||
+        (state?.pendingMessageCount || 0) > 0
+      ) {
+        throw new Error(
+          isZh ? "Pi 当前不空闲，请稍后重试" : "Pi is not idle; try again shortly"
+        );
+      }
+      if (state) this.applyAuthoritativePiState(tab, state);
+
+      let reloadedInProcess = false;
+      let fallbackToRestart = !this.plugin.piReloadBridgePath;
+      let bridgeError = "Pimate reload bridge is unavailable";
+      const bridgePath = this.plugin.piReloadBridgePath;
+      if (bridgePath) {
+        const result = await client.reloadExtensionsViaBridge(bridgePath);
+        reloadedInProcess = result.success;
+        fallbackToRestart = result.fallbackToRestart === true;
+        bridgeError = result.error || bridgeError;
+      }
+
+      if (!reloadedInProcess) {
+        if (!fallbackToRestart) throw new Error(bridgeError);
+        console.warn(`[pimate] In-process reload unavailable: ${bridgeError}`);
+        await this.restartTabClient(tab, client, {
+          clearQueuedState: false,
+          missingSessionError: isZh
+            ? `热重载失败（${bridgeError}），且当前会话尚无可恢复的 session file；为防止丢失内容，未重启 Pi`
+            : `Hot reload failed (${bridgeError}), and this conversation has no resumable session file; Pi was not restarted`,
+          restartError: isZh
+            ? "重启 Pi 后未能恢复当前会话"
+            : "Could not restore the current session after restarting Pi",
+        });
+      }
+
+      if (reloadedInProcess && tab.client !== client) {
+        throw new Error("The conversation changed while reloading");
+      }
+      if (this.activeTab === tab) {
+        this.client = tab.client;
+        this.commandCatalogClient = null;
+        this.commandLoadClient = null;
+        await this.syncTabStateFromPi(tab);
+        await this.loadAvailableCommands();
+        this.renderActiveTabModelAndEffort();
+        this.renderActiveTabRuntimeStatus();
+      }
+      await this.persistSessionTabs();
+
+      new Notice(
+        reloadedInProcess
+          ? (isZh
+              ? "✅ 已重新加载 Pi 扩展、技能、提示词及相关资源"
+              : "✅ Reloaded Pi extensions, skills, prompts, and related resources")
+          : (isZh
+              ? "✅ 已重启 Pi 并恢复当前会话，资源已重新加载"
+              : "✅ Restarted Pi, restored this session, and reloaded resources")
+      );
     } catch (err) {
-      new Notice(`重载扩展失败: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      new Notice(`${isZh ? "重载扩展失败" : "Could not reload Pi resources"}: ${message}`);
+      if (this.activeTab === tab) this.setStatus(`❌ ${message}`, "error");
+    } finally {
+      tab.reloadInFlight = false;
+      if (this.activeTab === tab && tab.client?.isRunning()) {
+        this.renderActiveTabRuntimeStatus();
+      }
+      this.updateButtons();
     }
   }
 
@@ -4650,30 +5023,66 @@ export class PiAgentView extends ItemView {
   }
 
   private listResumeSessions(directory: string): ResumeSessionItem[] {
-    return readdirSync(directory)
-      .filter((name) => name.endsWith(".jsonl"))
-      .map((name) => {
-        const path = `${directory}/${name}`;
+    const files: Array<{ name: string; path: string; mtimeMs: number; size: number }> = [];
+
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith(".jsonl")) continue;
+
+      const path = join(directory, name);
+      try {
         const stat = statSync(path);
-        const preview = this.readSessionPreview(path);
-        const customTitle = this.getSessionTitle(path);
-        return {
-          path,
-          label: customTitle || (preview ? preview.slice(0, 24) : basename(name, ".jsonl").slice(0, 12)),
-          mtime: stat.mtimeMs,
-          preview,
-        };
-      })
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 200);
+        if (!stat.isFile()) continue;
+        files.push({ name, path, mtimeMs: stat.mtimeMs, size: stat.size });
+      } catch {
+        // A session can disappear while the directory is being scanned.
+      }
+    }
+
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    return files.map(({ name, path, mtimeMs, size }) => {
+      const cached = this.resumeSessionPreviewCache.get(path);
+      const preview =
+        cached && cached.mtimeMs === mtimeMs && cached.size === size
+          ? cached.preview
+          : this.readSessionPreview(path);
+
+      if (!cached || cached.mtimeMs !== mtimeMs || cached.size !== size) {
+        this.resumeSessionPreviewCache.set(path, { mtimeMs, size, preview });
+      }
+
+      const customTitle = this.getSessionTitle(path);
+      return {
+        path,
+        label:
+          customTitle ||
+          (preview ? preview.slice(0, 24) : basename(name, ".jsonl").slice(0, 12)),
+        mtime: mtimeMs,
+        preview,
+      };
+    });
   }
 
   private readSessionPreview(path: string): string {
+    let fd: number | null = null;
     try {
-      const text = readFileSync(path, "utf8");
-      for (const line of text.split(/\r?\n/)) {
+      fd = openSync(path, "r");
+      const buffer = Buffer.alloc(SESSION_PREVIEW_MAX_BYTES);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+      const text = buffer.subarray(0, bytesRead).toString("utf8");
+      // Ignore a possibly truncated final JSONL line. Earlier lines contain
+      // the session metadata and normally the first user message we need.
+      const lastNewline = text.lastIndexOf("\n");
+      const completeText = lastNewline >= 0 ? text.slice(0, lastNewline) : text;
+
+      for (const line of completeText.split(/\r?\n/)) {
         if (!line.trim()) continue;
-        const entry = JSON.parse(line) as any;
+        let entry: any;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
         const content = entry.message?.content ?? entry.content;
         const role = entry.message?.role ?? entry.role;
         if (role === "user") {
@@ -4686,6 +5095,8 @@ export class PiAgentView extends ItemView {
       }
     } catch {
       // Ignore malformed/locked session files.
+    } finally {
+      if (fd !== null) closeSync(fd);
     }
     return "";
   }
@@ -4761,9 +5172,12 @@ export class PiAgentView extends ItemView {
    * Pi builds can fall back to `get_messages`, which still keeps the UI
    * usable, albeit without entry ids for those messages.
    */
-  private async readActiveBranchFromPi(): Promise<any[]> {
-    const tab = this.activeTab;
-    const client = this.client;
+  private async readActiveBranchFromPi(
+    expectedTab: ChatTab | null = this.activeTab,
+    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+  ): Promise<any[]> {
+    const tab = expectedTab;
+    const client = expectedClient;
     if (!client) return [];
 
     try {
@@ -4964,8 +5378,9 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private async runBashMode(message: string): Promise<void> {
-    if (!this.client) return;
+  private async runBashMode(message: string, targetClient?: PiAgentClient): Promise<void> {
+    const client = targetClient || this.activeTab?.client || this.client;
+    if (!client) return;
 
     const command = message.replace(/^!+/, "").trim();
     if (!command) return;
@@ -4997,7 +5412,7 @@ export class PiAgentView extends ItemView {
     header.onclick = () => outputEl.toggleClass("is-visible", !outputEl.hasClass("is-visible"));
 
     try {
-      const result = await this.client.bash(command);
+      const result = await client.bash(command);
       const data = result.data as any;
       const closeEl = toolBlock.querySelector(".pi-agent-tool-close") as HTMLElement | null;
       if (closeEl) {
@@ -5038,7 +5453,7 @@ export class PiAgentView extends ItemView {
     try {
       const result = await this.client.getCommands();
       const piCommands = result.success && result.data
-        ? ((result.data as any).commands || []) as PiCommand[]
+        ? ((result.data as any).commands || []) as PiCommandInfo[]
         : [];
       const commands = this.mergePimateCommands(piCommands);
       if (!commands.length) {
@@ -5286,16 +5701,23 @@ export class PiAgentView extends ItemView {
   private addContextItem(item: ContextItem): void {
     if (this.contextItems.some((existing) => existing.value === item.value)) return;
     this.contextItems.push(item);
+    if (this.activeTab) {
+      this.activeTab.contextItems = this.contextItems.map((contextItem) => ({ ...contextItem }));
+    }
     this.renderContextItems();
   }
 
   private removeContextItem(id: string): void {
     this.contextItems = this.contextItems.filter((item) => item.id !== id);
+    if (this.activeTab) {
+      this.activeTab.contextItems = this.contextItems.map((contextItem) => ({ ...contextItem }));
+    }
     this.renderContextItems();
   }
 
   private clearContextItems(): void {
     this.contextItems = [];
+    if (this.activeTab) this.activeTab.contextItems = [];
     this.renderContextItems();
   }
 
@@ -5452,18 +5874,23 @@ export class PiAgentView extends ItemView {
       }));
   }
 
-  private async refreshStateDisplay(): Promise<void> {
-    if (!this.client) return;
+  private async refreshStateDisplay(
+    expectedTab: ChatTab | null = this.activeTab,
+    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+  ): Promise<void> {
+    const tab = expectedTab;
+    const client = expectedClient;
+    if (!tab || !client) return;
     try {
-      if (this.activeTab) {
-        await this.syncTabStateFromPi(this.activeTab);
-      }
+      await this.syncTabStateFromPi(tab);
+      if (!this.isCurrentTabClient(tab, client)) return;
 
-      await this.refreshContextUsageDisplay();
+      await this.refreshContextUsageDisplay(tab, client);
+      if (!this.isCurrentTabClient(tab, client)) return;
 
       // 预热可用模型列表缓存，确保点击弹出时能“秒开”且不阻塞用户
-      this.client.getAvailableModels().then(res => {
-        if (res.success && res.data) {
+      client.getAvailableModels().then(res => {
+        if (this.isCurrentTabClient(tab, client) && res.success && res.data) {
           this.availableModelsCache = (res.data.models || []) as PiModel[];
         }
       }).catch(() => {});
@@ -5472,13 +5899,20 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private async refreshContextUsageDisplay(): Promise<void> {
-    if (!this.client || !this.footerContextEl) return;
+  private async refreshContextUsageDisplay(
+    expectedTab: ChatTab | null = this.activeTab,
+    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+  ): Promise<void> {
+    const tab = expectedTab;
+    const client = expectedClient;
+    if (!tab || !client || !this.footerContextEl) return;
     try {
-      const result = await this.client.getSessionStats();
+      const result = await client.getSessionStats();
+      if (!this.isCurrentTabClient(tab, client)) return;
       if (result.success) {
-        this.updateActiveTabSessionInfo(result.data as any);
+        this.updateActiveTabSessionInfo(result.data as any, tab);
         await this.persistSessionTabs();
+        if (!this.isCurrentTabClient(tab, client)) return;
       }
       const usage = (result.data as any)?.contextUsage;
       if (result.success && usage?.percent != null) {
@@ -5487,8 +5921,17 @@ export class PiAgentView extends ItemView {
         this.updateContextMeter(null, "Context usage");
       }
     } catch {
-      this.updateContextMeter(null, "Context usage");
+      if (this.isCurrentTabClient(tab, client)) {
+        this.updateContextMeter(null, "Context usage");
+      }
     }
+  }
+
+  private isCurrentTabClient(
+    tab: ChatTab | null,
+    client: PiAgentClient | null
+  ): boolean {
+    return !!tab && !!client && this.activeTab === tab && tab.client === client && this.client === client;
   }
 
   private updateContextMeter(percent: number | null, title: string): void {
@@ -5511,8 +5954,8 @@ export class PiAgentView extends ItemView {
     this.footerContextEl.setAttribute("title", title);
   }
 
-  private updateActiveTabSessionInfo(data: any): void {
-    const tab = this.activeTab;
+  private updateActiveTabSessionInfo(data: any, expectedTab?: ChatTab): void {
+    const tab = expectedTab || this.activeTab;
     if (!tab || !data) return;
     if (typeof data.sessionFile === "string") tab.sessionFile = data.sessionFile;
     if (typeof data.sessionId === "string") tab.sessionId = data.sessionId;
@@ -5636,14 +6079,26 @@ export class PiAgentView extends ItemView {
   }
 
   private async loadMessages(
-    options: { forceRpc?: boolean } = {}
+    options: {
+      forceRpc?: boolean;
+      expectedTab?: ChatTab | null;
+      expectedClient?: PiAgentClient | null;
+      expectedSwitchSeq?: number;
+    } = {}
   ): Promise<void> {
-    if (!this.client) return;
+    const tab = options.expectedTab ?? this.activeTab;
+    const client = options.expectedClient ?? tab?.client ?? this.client;
+    const isCurrentRequest = (): boolean =>
+      !!tab &&
+      !!client &&
+      this.isCurrentTabClient(tab, client) &&
+      (options.expectedSwitchSeq === undefined || this.tabSwitchSeq === options.expectedSwitchSeq);
+
+    if (!tab || !client || !isCurrentRequest()) return;
 
     // Decide source: prefer direct file read (fast, paginated) when we
     // have a known sessionFile. Falls back to RPC for sessions that live
     // only in memory (e.g. --no-session) or when the file is missing.
-    const tab = this.activeTab;
     const filePath = tab?.sessionFile;
     const limit = this.plugin.settings.maxHistoryDisplay;
     let messages: any[] = [];
@@ -5655,7 +6110,8 @@ export class PiAgentView extends ItemView {
     if (!options.forceRpc) this.activeBranchHistory = null;
 
     if (options.forceRpc) {
-      const branchMessages = await this.readActiveBranchFromPi();
+      const branchMessages = await this.readActiveBranchFromPi(tab, client);
+      if (!isCurrentRequest()) return;
       this.activeBranchHistory = branchMessages;
       total = branchMessages.length;
       messages = limit > 0 ? branchMessages.slice(-limit) : branchMessages;
@@ -5675,7 +6131,8 @@ export class PiAgentView extends ItemView {
     }
     if (!options.forceRpc && !usedFile) {
       try {
-        const result = await this.client.getMessages();
+        const result = await client.getMessages();
+        if (!isCurrentRequest()) return;
         if (result.success && result.data) {
           const rpcMessages = (result.data as any).messages || [];
           total = rpcMessages.length;
@@ -5686,6 +6143,8 @@ export class PiAgentView extends ItemView {
         return;
       }
     }
+
+    if (!isCurrentRequest()) return;
 
     this.historyShownCount = messages.length;
     this.historyTotalCount = total;
@@ -6447,9 +6906,16 @@ export class PiAgentView extends ItemView {
   // ─── Autocomplete Slash Command Methods ─────────────────────────────
 
   /** Add direct RPC operations that Pi intentionally omits from get_commands. */
-  private mergePimateCommands(piCommands: PiCommand[]): PiCommand[] {
+  private mergePimateCommands(piCommands: PiCommandInfo[]): PiCommandInfo[] {
     const seen = new Set<string>();
-    return [...PIMATE_BUILTIN_COMMANDS, ...piCommands].filter((command) => {
+    const bridgePath = this.plugin.piReloadBridgePath;
+    const vaultBasePath = (this.app.vault.adapter as any).getBasePath?.() || process.cwd();
+    const visiblePiCommands = bridgePath
+      ? piCommands.filter(
+          (command) => !isPiCommandFromPath(command, bridgePath, vaultBasePath)
+        )
+      : piCommands;
+    return [...PIMATE_BUILTIN_COMMANDS, ...visiblePiCommands].filter((command) => {
       const name = command?.name?.trim();
       if (!name) return false;
       const key = name.toLowerCase();
@@ -6459,8 +6925,8 @@ export class PiAgentView extends ItemView {
     });
   }
 
-  private async loadAvailableCommands(): Promise<void> {
-    const client = this.client;
+  private async loadAvailableCommands(expectedClient: PiAgentClient | null = this.client): Promise<void> {
+    const client = expectedClient;
     if (!client) return;
 
     if (this.commandCatalogClient === client) return;
@@ -6478,7 +6944,7 @@ export class PiAgentView extends ItemView {
         // composer.
         if (this.client !== client || this.activeTab?.client !== client) return;
         const piCommands = res.success && res.data
-          ? ((res.data as any).commands || []) as PiCommand[]
+          ? ((res.data as any).commands || []) as PiCommandInfo[]
           : [];
         this.availableCommands = this.mergePimateCommands(piCommands);
         this.commandCatalogClient = client;
@@ -6501,10 +6967,18 @@ export class PiAgentView extends ItemView {
     if (!this.inputEl) return null;
     const value = this.inputEl.value;
     const caretPos = this.inputEl.selectionStart;
-    if (value.startsWith("/") && caretPos > 0 && !value.slice(0, caretPos).includes(" ")) {
-      return value.slice(1, caretPos).toLowerCase();
-    }
-    return null;
+    if (caretPos <= 0) return null;
+
+    // Pi executes extension commands, skills, and prompt templates only when the
+    // command begins the submitted message. Keep completion aligned with that
+    // execution contract rather than suggesting inert mid-sentence tokens.
+    const beforeCaret = value.slice(0, caretPos);
+    const match = beforeCaret.match(/^\s*(\/[^\s]*)$/);
+    if (!match) return null;
+
+    const commandToken = match[1];
+    this.commandQueryStart = beforeCaret.length - commandToken.length;
+    return commandToken.slice(1).toLowerCase();
   }
 
   private handleCommandInput(): void {
@@ -6512,7 +6986,6 @@ export class PiAgentView extends ItemView {
     const query = this.getSlashCommandQuery();
 
     if (query !== null) {
-      this.commandQueryStart = 0;
       this.showCommandDropdown(query);
 
       // Command loading is intentionally fire-and-forget during tab startup.
@@ -6523,7 +6996,6 @@ export class PiAgentView extends ItemView {
         void this.loadAvailableCommands().then(() => {
           const refreshedQuery = this.getSlashCommandQuery();
           if (refreshedQuery !== null) {
-            this.commandQueryStart = 0;
             this.showCommandDropdown(refreshedQuery);
           }
         });
@@ -6685,6 +7157,7 @@ export class PiAgentView extends ItemView {
     }
     this.restoreTabModelConfig();
     if (!this.tabs.some((t) => t.id === this.activeTabId)) {
+      this.saveActiveComposerState();
       this.activeTabId = this.tabs[0]?.id || null;
     }
     this.renderTabs();
@@ -6735,17 +7208,17 @@ export class PiAgentView extends ItemView {
 
 }
 
-class CommandSuggestModal extends SuggestModal<PiCommand> {
+class CommandSuggestModal extends SuggestModal<PiCommandInfo> {
   constructor(
     app: App,
-    private readonly commands: PiCommand[],
-    private readonly onChoose: (command: PiCommand) => void
+    private readonly commands: PiCommandInfo[],
+    private readonly onChoose: (command: PiCommandInfo) => void
   ) {
     super(app);
     this.setPlaceholder("Search commands and skills...");
   }
 
-  getSuggestions(query: string): PiCommand[] {
+  getSuggestions(query: string): PiCommandInfo[] {
     const q = query.toLowerCase().trim();
     if (!q) return this.commands.slice(0, 80);
     return this.commands
@@ -6757,7 +7230,7 @@ class CommandSuggestModal extends SuggestModal<PiCommand> {
       .slice(0, 80);
   }
 
-  renderSuggestion(command: PiCommand, el: HTMLElement): void {
+  renderSuggestion(command: PiCommandInfo, el: HTMLElement): void {
     el.addClass("pi-agent-suggestion");
     el.createDiv({
       text: `/${command.name}`,
@@ -6769,7 +7242,7 @@ class CommandSuggestModal extends SuggestModal<PiCommand> {
     });
   }
 
-  onChooseSuggestion(command: PiCommand): void {
+  onChooseSuggestion(command: PiCommandInfo): void {
     this.onChoose(command);
   }
 }
@@ -6786,10 +7259,13 @@ class ResumeSessionSuggestModal extends SuggestModal<ResumeSessionItem> {
 
   getSuggestions(query: string): ResumeSessionItem[] {
     const q = query.toLowerCase().trim();
-    if (!q) return this.sessions.slice(0, 80);
+    if (!q) return this.sessions;
     return this.sessions
-      .filter((session) => `${session.label} ${session.preview || ""} ${session.path}`.toLowerCase().includes(q))
-      .slice(0, 80);
+      .filter((session) =>
+        `${session.label} ${session.preview || ""} ${session.path}`
+          .toLowerCase()
+          .includes(q)
+      );
   }
 
   renderSuggestion(session: ResumeSessionItem, el: HTMLElement): void {
