@@ -68,6 +68,7 @@ export interface PersistedSessionTab {
 export interface PiAgentSettings {
   enableAntigravity: boolean;
   defaultEngine: "pi" | "antigravity";
+  activeTabIndex: number;
   agyPath: string;
   agyModel: string;
   agyEffort: "low" | "medium" | "high";
@@ -94,7 +95,8 @@ export interface PiAgentSettings {
 
 export const DEFAULT_SETTINGS: PiAgentSettings = {
   enableAntigravity: true,
-  defaultEngine: "antigravity",
+  defaultEngine: "pi",
+  activeTabIndex: 0,
   agyPath: "agy",
   agyModel: "gemini-3.8-flash-high",
   agyEffort: "high",
@@ -134,7 +136,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
   // `data-just-added` 定位那一行的 key input，避免「猜最后一个 input」的
   // 误跳焦点问题（自定义 provider 区里的 input 也匹配 input[type=password]）。
   justAddedBuiltinId: string | null = null;
-  private activeSettingsTab: "agy" | "pi" | "general" | "display" = "agy";
+  private activeSettingsTab: "pi" | "agy" | "general" | "display" = "pi";
 
   constructor(app: App, plugin: PiAgentPlugin) {
     super(app, plugin);
@@ -473,9 +475,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     // ─── 属性页选项卡导航 (Property Pages Navigation) ─────────────────────
     const tabBar = containerEl.createDiv("pimate-settings-tabs-header");
-    const tabs: Array<{ id: "agy" | "pi" | "general" | "display"; label: string }> = [
-      { id: "agy", label: isZh ? "✦ Antigravity (Google免密)" : "✦ Antigravity (OAuth)" },
+    const tabs: Array<{ id: "pi" | "agy" | "general" | "display"; label: string }> = [
       { id: "pi", label: isZh ? "π Pi Agent (模型与凭证)" : "π Pi Agent (Providers)" },
+      { id: "agy", label: isZh ? "✦ Antigravity (Google免密)" : "✦ Antigravity (OAuth)" },
       { id: "general", label: isZh ? "⚙️ 通用设置" : "⚙️ General" },
       { id: "display", label: isZh ? "🎨 界面偏好" : "🎨 Display & Prompts" },
     ];
@@ -1312,9 +1314,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
     } else {
       engineSetting.addDropdown((dropdown) =>
         dropdown
-          .addOption("antigravity", isZh ? "✦ Antigravity CLI (Google 账号免密)" : "✦ Antigravity CLI (Google OAuth)")
           .addOption("pi", isZh ? "π Pi Coding Agent (自定义 Provider/Key)" : "π Pi Coding Agent (Custom Provider/Key)")
-          .setValue(this.plugin.settings.defaultEngine || "antigravity")
+          .addOption("antigravity", isZh ? "✦ Antigravity CLI (Google 账号免密)" : "✦ Antigravity CLI (Google OAuth)")
+          .setValue(this.plugin.settings.defaultEngine || "pi")
           .onChange(async (value) => {
             this.plugin.settings.defaultEngine = value as "pi" | "antigravity";
             await this.plugin.saveSettings();

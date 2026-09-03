@@ -875,7 +875,7 @@ export class PiAgentView extends ItemView {
       const pTab = persisted[i - 1];
       const defaultEngine = this.plugin.settings.enableAntigravity === false
         ? "pi"
-        : (this.plugin.settings.defaultEngine || "antigravity");
+        : (this.plugin.settings.defaultEngine || "pi");
       const engine = this.plugin.settings.enableAntigravity === false
         ? "pi"
         : (pTab?.engine || defaultEngine);
@@ -895,9 +895,16 @@ export class PiAgentView extends ItemView {
       });
     }
 
-    const active =
-      this.tabs.find((tab) => tab.sessionFile?.toLowerCase() === this.plugin.settings.activeSessionFile?.toLowerCase()) ||
-      this.tabs[0];
+    const savedIndex = this.plugin.settings.activeTabIndex;
+    let active = (typeof savedIndex === "number" && savedIndex >= 0 && savedIndex < this.tabs.length)
+      ? this.tabs[savedIndex]
+      : undefined;
+    if (!active && this.plugin.settings.activeSessionFile) {
+      active = this.tabs.find((tab) => tab.sessionFile?.toLowerCase() === this.plugin.settings.activeSessionFile?.toLowerCase());
+    }
+    if (!active) {
+      active = this.tabs[0];
+    }
     this.activeTabId = active?.id || null;
     this.renderTabs();
     if (active) await this.switchToTab(active.id);
@@ -906,7 +913,7 @@ export class PiAgentView extends ItemView {
   private async createAndSwitchTab(): Promise<void> {
     const defaultEngine = this.plugin.settings.enableAntigravity === false
       ? "pi"
-      : (this.plugin.settings.defaultEngine || "antigravity");
+      : (this.plugin.settings.defaultEngine || "pi");
     const tab: ChatTab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
@@ -989,7 +996,6 @@ export class PiAgentView extends ItemView {
     const switchSeq = ++this.tabSwitchSeq;
     this.activeTabId = tab.id;
     this.client = tab.client;
-    this.availableModelsCache = null;
     this.updateEngineDisplay();
     this.restoreComposerState(tab);
     this.forkMessagesByEntryId.clear();
@@ -1228,16 +1234,19 @@ export class PiAgentView extends ItemView {
   private async updateActiveTabModel(provider: string, modelId: string): Promise<void> {
     const tab = this.activeTab;
     if (!tab?.client) {
-      // No active Pi client to talk to; fall back to plain settings update.
       if (tab) {
         tab.modelProvider = provider;
         tab.modelId = modelId;
       }
-      this.plugin.settings.provider = provider;
-      this.plugin.settings.modelId = modelId;
+      if (tab?.engine === "antigravity") {
+        this.plugin.settings.agyModel = modelId;
+      } else {
+        this.plugin.settings.provider = provider;
+        this.plugin.settings.modelId = modelId;
+      }
       await this.plugin.saveSettings();
       await this.persistSessionTabs();
-      this.updateModelDisplay(provider, modelId);
+      this.renderActiveTabModelAndEffort();
       return;
     }
 
@@ -1260,9 +1269,7 @@ export class PiAgentView extends ItemView {
     // Now pull authoritative state from Pi — it may have clamped the
     // current thinking level to a value the new model supports.
     await this.syncTabStateFromPi(tab);
-
-    // The tab fields / global settings / footer / persistence are updated
-    // inside applyAuthoritativePiState when syncTabStateFromPi returns.
+    this.renderActiveTabModelAndEffort();
 
     // If an effort popup is open, the displayed model just changed; close it
     // so the user reopens with the new model's options.
@@ -1273,10 +1280,14 @@ export class PiAgentView extends ItemView {
     const tab = this.activeTab;
     if (!tab?.client) {
       if (tab) tab.thinkingLevel = level;
-      await this.persistSessionTabs();
-      if (this.footerEffortCurrent) {
-        this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+      if (tab?.engine === "antigravity") {
+        this.plugin.settings.agyEffort = level as any;
+      } else {
+        this.plugin.settings.thinkingLevel = level;
       }
+      await this.plugin.saveSettings();
+      await this.persistSessionTabs();
+      this.renderActiveTabModelAndEffort();
       return;
     }
 
@@ -1293,6 +1304,7 @@ export class PiAgentView extends ItemView {
 
     // Pi may clamp; let getState() be the authoritative source.
     await this.syncTabStateFromPi(tab);
+    this.renderActiveTabModelAndEffort();
   }
 
   // ─── Pi authoritative state sync ───────────────────────────────────────────
@@ -3029,9 +3041,11 @@ export class PiAgentView extends ItemView {
   private renderActiveTabModelAndEffort(): void {
     const tab = this.activeTab;
     if (!tab) return;
-    const provider = tab.modelProvider || this.plugin.settings.provider || "";
-    const modelId = tab.modelId || this.plugin.settings.modelId || "";
-    const level = tab.thinkingLevel ?? this.plugin.settings.thinkingLevel ?? "";
+    this.updateEngineDisplay();
+    const isAgy = (tab.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    const provider = tab.modelProvider || (isAgy ? "antigravity" : (this.plugin.settings.provider || ""));
+    const modelId = tab.modelId || (isAgy ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high") : (this.plugin.settings.modelId || ""));
+    const level = tab.thinkingLevel ?? (isAgy ? (this.plugin.settings.agyEffort || "high") : (this.plugin.settings.thinkingLevel ?? ""));
     this.updateModelDisplay(provider, modelId);
     if (this.footerEffortCurrent) {
       this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
@@ -4419,15 +4433,18 @@ export class PiAgentView extends ItemView {
     if (!this.client) return;
     const isZh = this.plugin.settings.language === "zh";
 
+    const currentEngine = this.activeTab?.engine || this.plugin.settings.defaultEngine || "pi";
+    const cache = this.getModelsCacheForEngine(currentEngine);
+
     // 1. 如果有缓存，立即瞬间弹出渲染，实现“零延迟秒开”！
-    if (this.availableModelsCache && this.availableModelsCache.length > 0) {
-      this.renderModelPopup(anchorEl, this.availableModelsCache);
+    if (cache && cache.length > 0) {
+      this.renderModelPopup(anchorEl, cache);
       // 同时在后台静默抓取最新模型列表并更新缓存
       this.client.getAvailableModels().then(result => {
         if (result.success && result.data) {
           const models = ((result.data as any).models || []) as PiModel[];
           if (models.length > 0) {
-            this.availableModelsCache = models;
+            this.setModelsCacheForEngine(currentEngine, models);
           }
         }
       }).catch(err => {
@@ -4457,7 +4474,7 @@ export class PiAgentView extends ItemView {
     try {
       const result = await this.client.getAvailableModels();
       if (!result.success || !result.data) {
-        if (!this.availableModelsCache) this.closeModelPopup();
+        if (!cache) this.closeModelPopup();
         return;
       }
 
@@ -4468,7 +4485,7 @@ export class PiAgentView extends ItemView {
         return;
       }
 
-      this.availableModelsCache = models;
+      this.setModelsCacheForEngine(currentEngine, models);
       // 关闭 Loading 骨架，渲染正式菜单
       this.closeModelPopup();
       this.renderModelPopup(anchorEl, models);
@@ -4509,12 +4526,14 @@ export class PiAgentView extends ItemView {
       groups.get(groupName)!.push(model);
     }
 
+    const isAgy = (this.activeTab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    const currentProvider = this.activeTab?.modelProvider || (isAgy ? "antigravity" : this.plugin.settings.provider) || "";
+    const currentModelId = this.activeTab?.modelId || (isAgy ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high") : this.plugin.settings.modelId) || "";
+
     for (const [groupName, groupModels] of groups.entries()) {
       const titleEl = this.modelPopupEl.createDiv("pi-agent-model-popup-group-title");
       titleEl.setText(groupName);
 
-      const currentProvider = this.activeTab?.modelProvider || this.plugin.settings.provider || "";
-      const currentModelId = this.activeTab?.modelId || this.plugin.settings.modelId || "";
       for (const model of groupModels) {
         const isCurrent = currentModelId === model.id && (!currentProvider || currentProvider === model.provider);
         const itemEl = this.modelPopupEl.createDiv({
@@ -5960,7 +5979,8 @@ export class PiAgentView extends ItemView {
       // 预热可用模型列表缓存，确保点击弹出时能“秒开”且不阻塞用户
       client.getAvailableModels().then(res => {
         if (this.isCurrentTabClient(tab, client) && res.success && res.data) {
-          this.availableModelsCache = (res.data.models || []) as PiModel[];
+          const engine = tab.engine || this.plugin.settings.defaultEngine || "pi";
+          this.setModelsCacheForEngine(engine, (res.data.models || []) as PiModel[]);
         }
       }).catch(() => {});
     } catch {
@@ -6050,6 +6070,8 @@ export class PiAgentView extends ItemView {
       modelId: tab.modelId,
       thinkingLevel: tab.thinkingLevel,
     }));
+    const activeIndex = this.tabs.findIndex((tab) => tab.id === this.activeTabId);
+    this.plugin.settings.activeTabIndex = activeIndex >= 0 ? activeIndex : 0;
     this.plugin.settings.activeSessionFile = this.activeTab?.sessionFile || "";
     await this.plugin.saveSettings();
   }
@@ -6147,7 +6169,6 @@ export class PiAgentView extends ItemView {
     }
 
     tab.engine = newEngine;
-    this.availableModelsCache = null;
 
     if (tab.client) {
       await tab.client.destroy().catch(() => undefined);
@@ -6171,11 +6192,7 @@ export class PiAgentView extends ItemView {
     }
 
     await this.persistSessionTabs();
-    this.updateEngineDisplay();
-    this.updateModelDisplay(tab.modelProvider || "", tab.modelId || "");
-    if (this.footerEffortCurrent) {
-      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(tab.thinkingLevel));
-    }
+    this.renderActiveTabModelAndEffort();
 
     if (this.activeTab === tab) {
       if (this.chatContainer) this.chatContainer.empty();
@@ -6190,8 +6207,12 @@ export class PiAgentView extends ItemView {
       this.client = tab.client;
       await this.refreshStateDisplay();
       await this.loadAvailableCommands();
+      this.renderActiveTabRuntimeStatus();
+      this.renderActiveTabSpeed();
+      this.renderActiveTabModelAndEffort();
     }
     this.updateButtons();
+    this.renderTabs();
     new Notice(isZh ? `已切换引擎为 ${newEngine === "antigravity" ? "✦ Antigravity CLI" : "π Pi Agent"}` : `Switched to ${newEngine === "antigravity" ? "Antigravity CLI" : "Pi Agent"}`);
   }
 
@@ -7371,11 +7392,18 @@ export class PiAgentView extends ItemView {
     } else {
       while (this.tabs.length < maxTabs) {
         const i = this.tabs.length + 1;
+        const defaultEngine = this.plugin.settings.enableAntigravity === false
+          ? "pi"
+          : (this.plugin.settings.defaultEngine || "pi");
         this.tabs.push({
           id: `tab-static-${i}`,
           label: String(i),
           client: null,
           isStreaming: false,
+          engine: defaultEngine,
+          modelProvider: defaultEngine === "antigravity" ? "antigravity" : this.plugin.settings.provider,
+          modelId: defaultEngine === "antigravity" ? this.plugin.settings.agyModel : this.plugin.settings.modelId,
+          thinkingLevel: defaultEngine === "antigravity" ? this.plugin.settings.agyEffort : this.plugin.settings.thinkingLevel,
         });
       }
     }
@@ -7392,7 +7420,22 @@ export class PiAgentView extends ItemView {
 
   private activeDropdown: "model" | "effort" | null = null;
   private activeDropdownEl: HTMLElement | null = null;
-  private availableModelsCache: PiModel[] | null = null;
+  private piModelsCache: PiModel[] | null = null;
+  private agyModelsCache: PiModel[] | null = null;
+
+  private getModelsCacheForEngine(engine?: string): PiModel[] | null {
+    const eng = engine || this.activeTab?.engine || this.plugin.settings.defaultEngine || "pi";
+    return eng === "antigravity" ? this.agyModelsCache : this.piModelsCache;
+  }
+
+  private setModelsCacheForEngine(engine: string, models: PiModel[]): void {
+    if (engine === "antigravity") {
+      this.agyModelsCache = models;
+    } else {
+      this.piModelsCache = models;
+    }
+  }
+
   private modelOutsideClickHandler: ((e: MouseEvent) => void) | null = null;
   private effortOutsideClickHandler: ((e: MouseEvent) => void) | null = null;
 
