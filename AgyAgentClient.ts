@@ -24,6 +24,17 @@ export interface AgyAgentClientOptions {
   dangerouslySkipPermissions?: boolean;
 }
 
+type AgyPromptOptions = {
+  streamingBehavior?: "steer" | "followUp";
+  images?: Array<{ type: string; data: string; mimeType: string }>;
+};
+
+interface PendingAgyPrompt {
+  message: string;
+  options?: AgyPromptOptions;
+  kind: "steering" | "followUp";
+}
+
 /**
  * Resolve the agy executable path on Windows and POSIX.
  */
@@ -93,12 +104,17 @@ export class AgyAgentClient extends EventEmitter {
   private buffer = "";
   private decoder = new StringDecoder("utf8");
   private destroyed = false;
+  private processGeneration = 0;
+  private startPromise: Promise<void> | null = null;
 
   private options: AgyAgentClientOptions;
   private conversationId: string | null = null;
   private currentModelId: string;
   private currentEffort: string;
   private availableTools: string[] = [];
+  private pendingPrompts: PendingAgyPrompt[] = [];
+  private historyLoadedConversationId: string | null = null;
+  private toolCallStates = new Map<string, "active" | "done">();
 
   private lastAssistantText = "";
   private lastAssistantThinking = "";
@@ -186,6 +202,111 @@ export class AgyAgentClient extends EventEmitter {
     }
   }
 
+  private ensureHistoryLoaded(): void {
+    if (!this.conversationId || this.historyLoadedConversationId === this.conversationId) {
+      return;
+    }
+    this.historyMessages = this.loadTranscriptHistory();
+    this.historyLoadedConversationId = this.conversationId;
+  }
+
+  private emitQueueUpdate(): void {
+    this.emit("event", {
+      type: "queue_update",
+      steering: this.pendingPrompts
+        .filter((prompt) => prompt.kind === "steering")
+        .map((prompt) => prompt.message),
+      followUp: this.pendingPrompts
+        .filter((prompt) => prompt.kind === "followUp")
+        .map((prompt) => prompt.message),
+    });
+  }
+
+  private invalidateProcess(child: ChildProcess): void {
+    if (this.process !== child) return;
+    this.process = null;
+    this.processGeneration++;
+    this.buffer = "";
+    this.decoder = new StringDecoder("utf8");
+    this.isTurnStreaming = false;
+    this.toolCallStates.clear();
+  }
+
+  private async terminateChild(
+    child: ChildProcess,
+    signal: NodeJS.Signals = "SIGTERM"
+  ): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(forceKillTimer);
+        child.removeListener("close", finish);
+        resolve();
+      };
+      const forceKillTimer = setTimeout(() => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+          }
+        } catch {
+          // The process may have exited between the status check and kill.
+        }
+        finish();
+      }, 1_000);
+
+      child.once("close", finish);
+      try {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill(signal);
+        } else {
+          finish();
+        }
+      } catch {
+        finish();
+      }
+    });
+  }
+
+  private async resolveLaunchSelection(): Promise<{
+    modelId: string;
+    effortArg?: string;
+    effectiveEffort: string;
+  }> {
+    const modelId = this.currentModelId;
+    const effort = this.currentEffort;
+    const suffixMatch = modelId.match(/-(low|medium|high)$/);
+
+    // Models without an effort suffix accept --effort directly.
+    if (!suffixMatch) {
+      return { modelId, effortArg: effort, effectiveEffort: effort };
+    }
+
+    const encodedEffort = suffixMatch[1];
+    if (!effort || effort === encodedEffort) {
+      return { modelId, effectiveEffort: encodedEffort };
+    }
+
+    // AGY rejects a model ID carrying one effort together with a different
+    // --effort flag. Prefer the matching sibling when the installed CLI
+    // exposes it (for example gemini-3.8-flash-low). Some model families do
+    // not publish every effort, so fall back to the encoded model instead of
+    // launching a command that the CLI will reject.
+    const candidateModelId = `${modelId.slice(0, -encodedEffort.length)}${effort}`;
+    const availableModels = await AgyAgentClient.getAvailableModels(this.options.agyPath);
+    if (availableModels.some((model) => model.id === candidateModelId)) {
+      return { modelId: candidateModelId, effectiveEffort: effort };
+    }
+
+    console.warn(
+      `[agy] Model ${candidateModelId} is not available; using ${modelId} (${encodedEffort} effort)`
+    );
+    return { modelId, effectiveEffort: encodedEffort };
+  }
+
   /**
    * Launch `agy` process in stream-json mode and wait for the "init" event.
    */
@@ -193,38 +314,47 @@ export class AgyAgentClient extends EventEmitter {
     if (this.destroyed) throw new Error("Client destroyed");
     if (this.isRunning()) return;
 
+    if (this.startPromise) return this.startPromise;
+
+    const startPromise = this.startProcess();
+    this.startPromise = startPromise;
+    try {
+      await startPromise;
+    } finally {
+      if (this.startPromise === startPromise) this.startPromise = null;
+    }
+  }
+
+  private async startProcess(): Promise<void> {
+    if (this.destroyed) throw new Error("Client destroyed");
+    if (this.isRunning()) return;
+
+    const launchSelection = await this.resolveLaunchSelection();
+    if (this.destroyed) throw new Error("Client destroyed");
+    this.currentModelId = launchSelection.modelId;
+    this.currentEffort = launchSelection.effectiveEffort;
+
     const resolved = resolveAgySpawn(this.options.agyPath);
     const args: string[] = [
       ...resolved.scriptArgs,
+      // `--print` consumes the next argv item as its prompt. An empty
+      // assignment selects print mode without stealing `--input-format`.
+      "--print=",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
     ];
 
-    if (this.options.dangerouslySkipPermissions !== false) {
+    if (this.options.dangerouslySkipPermissions === true) {
       args.push("--dangerously-skip-permissions");
     }
 
-    // Harmonize model and effort to prevent agy flag conflict
-    let targetModel = this.currentModelId;
-    let targetEffort: string | undefined = this.currentEffort;
-
-    const suffixMatch = targetModel?.match(/-(low|medium|high)$/);
-    if (suffixMatch) {
-      const suffix = suffixMatch[1];
-      if (targetEffort && targetEffort !== suffix) {
-        // Adapt model suffix to match target effort
-        const base = targetModel.slice(0, -suffix.length);
-        targetModel = `${base}${targetEffort}`;
-      }
-      // Omit --effort flag when model ID already explicitly specifies effort
-      targetEffort = undefined;
+    // A suffix such as `-high` is part of the model ID. When present, the
+    // matching effort is encoded in that ID and must not be passed again.
+    if (this.currentModelId) {
+      args.push("--model", this.currentModelId);
     }
-
-    if (targetModel) {
-      args.push("--model", targetModel);
-    }
-    if (targetEffort) {
-      args.push("--effort", targetEffort);
+    if (launchSelection.effortArg) {
+      args.push("--effort", launchSelection.effortArg);
     }
     if (this.conversationId) {
       args.push("--conversation", this.conversationId);
@@ -252,9 +382,14 @@ export class AgyAgentClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+      let initTimeout: ReturnType<typeof setTimeout> | null = null;
       const settle = (err?: Error) => {
         if (settled) return;
         settled = true;
+        if (initTimeout) {
+          clearTimeout(initTimeout);
+          initTimeout = null;
+        }
         if (err) reject(err);
         else resolve();
       };
@@ -262,62 +397,65 @@ export class AgyAgentClient extends EventEmitter {
       try {
         const child = spawn(resolved.cmd, args, spawnOptions);
         this.process = child;
+        const generation = ++this.processGeneration;
         this.buffer = "";
+        this.decoder = new StringDecoder("utf8");
 
         // Wait up to 20s for the init event
-        const initTimeout = setTimeout(() => {
+        initTimeout = setTimeout(() => {
           if (!settled) {
             settle(new Error("Timeout waiting for agy init event"));
+            this.invalidateProcess(child);
+            void this.terminateChild(child);
           }
         }, 20_000);
 
         this.initResolve = () => {
-          clearTimeout(initTimeout);
           settle();
         };
         this.initReject = (err: unknown) => {
-          clearTimeout(initTimeout);
           settle(err instanceof Error ? err : new Error(String(err)));
         };
 
         child.stdout!.on("data", (chunk: Buffer) => {
+          if (this.process !== child || this.processGeneration !== generation) return;
           this.handleData(chunk);
         });
 
         child.stderr!.on("data", (chunk: Buffer) => {
+          if (this.process !== child || this.processGeneration !== generation) return;
           console.warn("[agy stderr]", chunk.toString());
         });
 
         child.on("error", (err) => {
+          if (this.process !== child || this.processGeneration !== generation) return;
           console.error("[agy] Process error:", err);
           if (!settled) settle(err);
           else this.emit("error", err);
         });
 
         child.on("close", (code) => {
+          if (this.process !== child || this.processGeneration !== generation) return;
           console.log(`[agy] Process closed with code ${code}`);
           const wasRunningTurn = this.isTurnStreaming;
-          const wasDestroyed = this.destroyed;
-          this.isTurnStreaming = false;
           this.process = null;
 
           if (!settled) {
+            this.isTurnStreaming = false;
+            this.pendingPrompts = [];
+            this.toolCallStates.clear();
+            this.emitQueueUpdate();
             settle(new Error(`agy exited with code ${code} before initialization`));
           } else {
             if (wasRunningTurn) {
-              this.emit("event", {
-                type: "message_update",
-                assistantMessageEvent: {
-                  type: "error",
-                  reason: `Process exited with code ${code}`,
-                },
-              });
-              this.emit("event", { type: "turn_end" });
-              this.emit("event", { type: "agent_settled" });
+              this.finishActiveTurnWithError(`Process exited with code ${code}`);
+            } else {
+              this.isTurnStreaming = false;
+              this.pendingPrompts = [];
+              this.toolCallStates.clear();
+              this.emitQueueUpdate();
             }
-            if (!wasDestroyed) {
-              this.emit("close");
-            }
+            this.emit("close");
           }
         });
       } catch (err) {
@@ -368,6 +506,9 @@ export class AgyAgentClient extends EventEmitter {
     // 1. Session Init
     if (eventName === "init") {
       this.conversationId = data.conversation_id || this.conversationId;
+      if (typeof data.init?.model === "string" && data.init.model.trim()) {
+        this.currentModelId = data.init.model.trim();
+      }
       this.availableTools = data.init?.tools || [];
       if (this.initResolve) {
         this.initResolve();
@@ -406,15 +547,35 @@ export class AgyAgentClient extends EventEmitter {
           outputText = JSON.stringify(step.tool_info.output, null, 2);
         }
 
-        const isError = step.state === "ERROR";
+        // A tool step can be reported as ACTIVE and then DONE. Render the
+        // execution only once, and surface errors carried in tool_info.
+        const isError = step.state === "ERROR" || !!step.tool_info?.error;
+        const toolState = this.toolCallStates.get(toolCallId);
+        if (toolState === "done") return;
+        if (step.state === "ACTIVE") {
+          if (toolState) return;
+          this.toolCallStates.set(toolCallId, "active");
+          this.emit("event", {
+            type: "tool_execution_start",
+            toolCallId,
+            toolName,
+            args,
+          });
+          return;
+        }
 
-        // Emit tool execution start
-        this.emit("event", {
-          type: "tool_execution_start",
-          toolCallId,
-          toolName,
-          args,
-        });
+        // Some CLI versions only emit the terminal tool event. Starting it
+        // here keeps those versions renderable; ACTIVE/DONE versions get a
+        // single start from the ACTIVE branch above.
+        if (toolState !== "active") {
+          this.emit("event", {
+            type: "tool_execution_start",
+            toolCallId,
+            toolName,
+            args,
+          });
+        }
+        this.toolCallStates.set(toolCallId, "done");
 
         // Emit tool execution end
         this.emit("event", {
@@ -467,6 +628,19 @@ export class AgyAgentClient extends EventEmitter {
     // 3. Turn Result
     if (eventName === "result") {
       const result = data.result;
+      if (!this.isTurnStreaming) {
+        // A CLI validation/authentication failure can be reported as a result
+        // before init (for example an invalid model/effort combination).
+        // Reject startup immediately so the UI receives the useful AGY error
+        // instead of waiting for the generic init timeout.
+        if (result?.status !== "SUCCESS" && this.initReject) {
+          const rejectInit = this.initReject;
+          this.initResolve = null;
+          this.initReject = null;
+          rejectInit(new Error(result?.error || "Antigravity initialization failed"));
+        }
+        return;
+      }
       if (result?.usage) {
         this.updateUsage(result.usage);
       }
@@ -496,8 +670,6 @@ export class AgyAgentClient extends EventEmitter {
             content: blocks,
           },
         });
-        this.emit("event", { type: "turn_end" });
-        this.emit("event", { type: "agent_settled" });
       } else {
         const errorMsg = result?.error || "Agent execution failed";
         this.emit("event", {
@@ -514,45 +686,52 @@ export class AgyAgentClient extends EventEmitter {
             content: this.lastAssistantText,
           },
         });
-        this.emit("event", { type: "turn_end" });
-        this.emit("event", { type: "agent_settled" });
       }
 
-      this.isTurnStreaming = false;
+      this.emit("event", { type: "agent_end" });
+      this.emit("event", { type: "turn_end" });
+
+      const nextPrompt = this.pendingPrompts.shift();
+      this.emitQueueUpdate();
+      if (nextPrompt) {
+        try {
+          this.beginPrompt(nextPrompt.message, nextPrompt.options);
+        } catch (err) {
+          this.finishActiveTurnWithError(`Failed to send queued prompt: ${(err as Error).message}`);
+        }
+      } else {
+        this.isTurnStreaming = false;
+        this.emit("event", { type: "agent_settled" });
+      }
       return;
     }
   }
 
-  private updateUsage(usage: {
-    input_tokens?: number;
-    output_tokens?: number;
-    thinking_tokens?: number;
-    total_tokens?: number;
-  }): void {
-    if (typeof usage.input_tokens === "number") this.inputTokens = usage.input_tokens;
-    if (typeof usage.output_tokens === "number") this.outputTokens = usage.output_tokens;
-    if (typeof usage.thinking_tokens === "number") this.thinkingTokens = usage.thinking_tokens;
-    if (typeof usage.total_tokens === "number") this.totalTokens = usage.total_tokens;
+  private finishActiveTurnWithError(reason: string): void {
+    const partialText = this.lastAssistantText;
+    this.pendingPrompts = [];
+    this.toolCallStates.clear();
+    this.emitQueueUpdate();
+    this.isTurnStreaming = false;
+    this.emit("event", {
+      type: "message_update",
+      assistantMessageEvent: { type: "error", reason },
+    });
+    this.emit("event", {
+      type: "message_end",
+      message: { role: "assistant", content: partialText },
+    });
+    this.emit("event", { type: "agent_end" });
+    this.emit("event", { type: "turn_end" });
+    this.emit("event", { type: "agent_settled" });
   }
 
-  /**
-   * Send a prompt to Antigravity CLI over stdin stream.
-   */
-  async prompt(
-    message: string,
-    options?: {
-      streamingBehavior?: "steer" | "followUp";
-      images?: Array<{ type: string; data: string; mimeType: string }>;
-    }
-  ): Promise<RpcResponse> {
-    if (this.destroyed) throw new Error("Client destroyed");
-    if (!this.isRunning()) {
-      await this.start();
-    }
-
+  private beginPrompt(message: string, options?: AgyPromptOptions): void {
+    this.ensureHistoryLoaded();
     this.lastAssistantText = "";
     this.lastAssistantThinking = "";
     this.isTurnStreaming = true;
+    this.toolCallStates.clear();
 
     this.historyMessages.push({
       role: "user",
@@ -576,8 +755,58 @@ export class AgyAgentClient extends EventEmitter {
       message: { content: message },
     }) + "\n";
 
+    this.process!.stdin!.write(payload);
+  }
+
+  private updateUsage(usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    thinking_tokens?: number;
+    total_tokens?: number;
+  }): void {
+    if (typeof usage.input_tokens === "number") this.inputTokens = usage.input_tokens;
+    if (typeof usage.output_tokens === "number") this.outputTokens = usage.output_tokens;
+    if (typeof usage.thinking_tokens === "number") this.thinkingTokens = usage.thinking_tokens;
+    if (typeof usage.total_tokens === "number") this.totalTokens = usage.total_tokens;
+  }
+
+  /**
+   * Send a prompt to Antigravity CLI over stdin stream.
+   */
+  async prompt(
+    message: string,
+    options?: AgyPromptOptions
+  ): Promise<RpcResponse> {
+    if (this.destroyed) throw new Error("Client destroyed");
+    if (options?.images?.length) {
+      return {
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "Antigravity CLI image attachments are not supported by this adapter yet",
+      };
+    }
+    if (!this.isRunning()) {
+      await this.start();
+    }
+
     try {
-      this.process!.stdin!.write(payload);
+      if (this.isTurnStreaming) {
+        this.pendingPrompts.push({
+          message,
+          options,
+          kind: options?.streamingBehavior === "steer" ? "steering" : "followUp",
+        });
+        this.emitQueueUpdate();
+      } else {
+        try {
+          this.beginPrompt(message, options);
+        } catch (err) {
+          this.historyMessages.pop();
+          this.finishActiveTurnWithError(`Failed to send prompt: ${(err as Error).message}`);
+          throw err;
+        }
+      }
       return {
         type: "response",
         command: "prompt",
@@ -596,7 +825,7 @@ export class AgyAgentClient extends EventEmitter {
     message: string,
     options?: { images?: Array<{ type: string; data: string; mimeType: string }> }
   ): Promise<RpcResponse> {
-    return this.prompt(message, options);
+    return this.prompt(message, { ...options, streamingBehavior: "steer" });
   }
 
   /**
@@ -606,37 +835,39 @@ export class AgyAgentClient extends EventEmitter {
     message: string,
     options?: { images?: Array<{ type: string; data: string; mimeType: string }> }
   ): Promise<RpcResponse> {
-    return this.prompt(message, options);
+    return this.prompt(message, { ...options, streamingBehavior: "followUp" });
   }
 
   /**
    * Abort the active turn.
    */
   async abort(): Promise<RpcResponse> {
-    if (!this.process || this.process.killed) {
+    const hadActiveTurn = this.isTurnStreaming;
+    const partialText = this.lastAssistantText;
+    const child = this.process;
+    this.pendingPrompts = [];
+    this.emitQueueUpdate();
+
+    if (!child || child.killed) {
+      if (hadActiveTurn) {
+        this.lastAssistantText = partialText;
+        this.finishActiveTurnWithError("Operation aborted by user");
+      }
       return { type: "response", command: "abort", success: true };
     }
 
-    try {
-      this.process.kill("SIGINT");
-    } catch (err) {
-      console.warn("[agy] Failed to send SIGINT:", err);
-    }
-
+    // AGY print mode does not expose a turn-level abort protocol. Terminate
+    // this child and resume the same conversation on the next prompt. The
+    // generation guard prevents a late result from the old child being routed
+    // into the replacement turn.
+    this.invalidateProcess(child);
     this.isTurnStreaming = false;
-    this.emit("event", {
-      type: "message_update",
-      assistantMessageEvent: {
-        type: "error",
-        reason: "Operation aborted by user",
-      },
-    });
-    this.emit("event", {
-      type: "message_end",
-      message: { role: "assistant", content: this.lastAssistantText },
-    });
-    this.emit("event", { type: "turn_end" });
-    this.emit("event", { type: "agent_settled" });
+    await this.terminateChild(child, "SIGINT");
+
+    if (hadActiveTurn) {
+      this.lastAssistantText = partialText;
+      this.finishActiveTurnWithError("Operation aborted by user");
+    }
 
     return { type: "response", command: "abort", success: true };
   }
@@ -650,6 +881,8 @@ export class AgyAgentClient extends EventEmitter {
       command: "get_state",
       success: true,
       data: {
+        isStreaming: this.isTurnStreaming,
+        pendingMessageCount: this.pendingPrompts.length,
         model: {
           id: this.currentModelId,
           provider: "antigravity",
@@ -685,6 +918,14 @@ export class AgyAgentClient extends EventEmitter {
         },
       };
     }
+    if (this.isTurnStreaming) {
+      return {
+        type: "response",
+        command: "set_model",
+        success: false,
+        error: "Wait for the current Antigravity turn to finish before changing models",
+      };
+    }
     this.currentModelId = modelId;
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
@@ -714,6 +955,14 @@ export class AgyAgentClient extends EventEmitter {
         success: true,
       };
     }
+    if (this.isTurnStreaming) {
+      return {
+        type: "response",
+        command: "set_thinking_level",
+        success: false,
+        error: "Wait for the current Antigravity turn to finish before changing effort",
+      };
+    }
     this.currentEffort = level;
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
@@ -730,6 +979,14 @@ export class AgyAgentClient extends EventEmitter {
    */
   async getAvailableModels(): Promise<RpcResponse<AvailableModelsResult>> {
     const models = await AgyAgentClient.getAvailableModels(this.options.agyPath);
+    if (models.length === 0) {
+      return {
+        type: "response",
+        command: "get_available_models",
+        success: false,
+        error: "Unable to query available Antigravity models",
+      };
+    }
     return {
       type: "response",
       command: "get_available_models",
@@ -739,9 +996,7 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async getMessages(): Promise<RpcResponse> {
-    if (this.historyMessages.length === 0) {
-      this.historyMessages = this.loadTranscriptHistory();
-    }
+    this.ensureHistoryLoaded();
     return {
       type: "response",
       command: "get_messages",
@@ -760,11 +1015,21 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async getSessionStats(): Promise<RpcResponse> {
+    this.ensureHistoryLoaded();
     return {
       type: "response",
       command: "get_session_stats",
       success: true,
       data: {
+        totalMessages: this.historyMessages.length,
+        tokens: {
+          total: this.totalTokens,
+          input: this.inputTokens,
+          output: this.outputTokens,
+          thinking: this.thinkingTokens,
+        },
+        cost: 0,
+        contextUsage: undefined,
         totalTokens: this.totalTokens,
         inputTokens: this.inputTokens,
         outputTokens: this.outputTokens,
@@ -778,6 +1043,8 @@ export class AgyAgentClient extends EventEmitter {
    */
   async switchSession(conversationId: string): Promise<RpcResponse> {
     this.conversationId = conversationId;
+    this.historyMessages = [];
+    this.historyLoadedConversationId = null;
     await this.restart();
     return {
       type: "response",
@@ -799,8 +1066,8 @@ export class AgyAgentClient extends EventEmitter {
     return {
       type: "response",
       command: "get_fork_messages",
-      success: true,
-      data: { messages: [] },
+      success: false,
+      error: "Branching/forking is not supported by Antigravity CLI",
     };
   }
 
@@ -808,8 +1075,8 @@ export class AgyAgentClient extends EventEmitter {
     return {
       type: "response",
       command: "get_entries",
-      success: true,
-      data: { entries: [] },
+      success: false,
+      error: "Session entry trees are not exposed by Antigravity CLI",
     };
   }
 
@@ -835,21 +1102,24 @@ export class AgyAgentClient extends EventEmitter {
     return {
       type: "response",
       command: "compact",
-      success: true,
-      data: { compacted: false },
+      success: false,
+      error: "Context compaction is not exposed by Antigravity CLI",
     };
   }
 
   async bash(command: string): Promise<RpcResponse> {
-    return this.prompt(`!${command}`);
+    return {
+      type: "response",
+      command: "bash",
+      success: false,
+      error: "Direct Bash mode is only supported by the Pi engine; ask Antigravity in a normal prompt to run a command",
+    };
   }
 
   async getLastAssistantText(): Promise<RpcResponse> {
     let text = this.lastAssistantText;
     if (!text) {
-      if (this.historyMessages.length === 0) {
-        this.historyMessages = this.loadTranscriptHistory();
-      }
+      this.ensureHistoryLoaded();
       for (let i = this.historyMessages.length - 1; i >= 0; i--) {
         const m = this.historyMessages[i];
         if (m.role === "assistant") {
@@ -865,7 +1135,7 @@ export class AgyAgentClient extends EventEmitter {
       type: "response",
       command: "get_last_assistant_text",
       success: true,
-      data: text,
+      data: { text },
     };
   }
 
@@ -894,11 +1164,15 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   sendUIResponse(id: string, response: Record<string, unknown>): void {
-    // agy runs with auto-approved permissions; stub for UI compatibility
+    // AGY runs headlessly without the Pi extension UI protocol.
   }
 
   async reloadExtensionsViaBridge(bridgePath: string): Promise<any> {
-    return { success: true };
+    return {
+      success: false,
+      fallbackToRestart: false,
+      error: "Extension reload is not supported by Antigravity CLI",
+    };
   }
 
   async restart(): Promise<void> {
@@ -908,8 +1182,13 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async destroy(): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed && !this.process && !this.startPromise) return;
     this.destroyed = true;
+    this.pendingPrompts = [];
+    this.emitQueueUpdate();
+    this.isTurnStreaming = false;
+    this.toolCallStates.clear();
+    this.processGeneration++;
 
     if (this.initReject) {
       this.initReject(new Error("Client destroyed"));
@@ -921,14 +1200,14 @@ export class AgyAgentClient extends EventEmitter {
       const p = this.process;
       this.process = null;
 
-      if (!p.killed) {
-        p.kill("SIGTERM");
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        if (!p.killed) {
-          p.kill("SIGKILL");
-        }
-      }
+      await this.terminateChild(p);
     }
+
+    // A model/effort reconciliation may still be probing `agy models` before
+    // spawning. Wait for that startup attempt to observe `destroyed` and
+    // finish before a restart can begin a second process.
+    const pendingStart = this.startPromise;
+    if (pendingStart) await pendingStart.catch(() => undefined);
   }
 
   // ─── Static Helpers ────────────────────────────────────────────────────────
@@ -946,37 +1225,7 @@ export class AgyAgentClient extends EventEmitter {
         { timeout: 15000, env: process.env },
         (err, stdout) => {
           if (err || !stdout) {
-            // Fallback to default list if command fails
-            return resolve([
-              {
-                id: "gemini-3.8-flash-high",
-                provider: "antigravity",
-                name: "Gemini 3.8 Flash (High)",
-                reasoning: true,
-                thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-              },
-              {
-                id: "gemini-3.8-flash-medium",
-                provider: "antigravity",
-                name: "Gemini 3.8 Flash (Medium)",
-                reasoning: true,
-                thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-              },
-              {
-                id: "gemini-3.1-pro-high",
-                provider: "antigravity",
-                name: "Gemini 3.1 Pro (High)",
-                reasoning: true,
-                thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-              },
-              {
-                id: "claude-sonnet-4-6",
-                provider: "antigravity",
-                name: "Claude Sonnet 4.6 (Thinking)",
-                reasoning: true,
-                thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-              },
-            ]);
+            return resolve([]);
           }
 
           const lines = stdout.split("\n");
@@ -1013,16 +1262,6 @@ export class AgyAgentClient extends EventEmitter {
             }
           }
 
-          if (models.length === 0) {
-            models.push({
-              id: "gemini-3.8-flash-high",
-              provider: "antigravity",
-              name: "Gemini 3.8 Flash (High)",
-              reasoning: true,
-              thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-            });
-          }
-
           resolve(models);
         }
       );
@@ -1034,7 +1273,7 @@ export class AgyAgentClient extends EventEmitter {
    */
   static async checkAuthStatus(
     userAgyPath?: string
-  ): Promise<{ installed: boolean; authenticated: boolean; version?: string; error?: string }> {
+  ): Promise<{ installed: boolean; authenticated: boolean | null; version?: string; error?: string }> {
     const resolved = resolveAgySpawn(userAgyPath);
 
     // 1. Check version
@@ -1061,26 +1300,36 @@ export class AgyAgentClient extends EventEmitter {
     }
 
     // 2. Check auth by querying models
-    const authRes = await new Promise<boolean>((res) => {
+    const authRes = await new Promise<{ status: boolean | null; error?: string }>((res) => {
       execFile(
         resolved.cmd,
         [...resolved.scriptArgs, "models"],
         { timeout: 15000, env: process.env },
-        (err, stdout) => {
-          if (err || !stdout) return res(false);
+        (err, stdout, stderr) => {
+          const diagnostic = [stderr?.trim(), err?.message].filter(Boolean).join(" ");
+          if (err || !stdout) {
+            // `agy models` is a network/service probe, not a reliable local
+            // OAuth check. Treat transient failures as unknown instead of
+            // telling the user that their cached credentials are invalid.
+            if (/auth|login|credential|unauthor/i.test(diagnostic)) {
+              return res({ status: false, error: diagnostic });
+            }
+            return res({ status: null, error: diagnostic || "Could not query available models" });
+          }
           // If models list contains known model names or has at least 1 model
           if (stdout.includes("gemini") || stdout.includes("claude") || stdout.includes("gpt")) {
-            return res(true);
+            return res({ status: true });
           }
-          res(false);
+          res({ status: null, error: "agy returned no recognizable model list" });
         }
       );
     });
 
     return {
       installed: true,
-      authenticated: authRes,
+      authenticated: authRes.status,
       version: versionRes.version,
+      error: authRes.error,
     };
   }
 }

@@ -72,6 +72,7 @@ export interface PiAgentSettings {
   agyPath: string;
   agyModel: string;
   agyEffort: "low" | "medium" | "high";
+  agyAutoApproveTools: boolean;
   piPath: string;
   provider: string;
   modelId: string;
@@ -100,6 +101,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   agyPath: "agy",
   agyModel: "gemini-3.8-flash-high",
   agyEffort: "high",
+  agyAutoApproveTools: false,
   piPath: "pi",
   provider: "",
   modelId: "",
@@ -561,6 +563,22 @@ export class PiAgentSettingTab extends PluginSettingTab {
       return;
     }
 
+    new Setting(containerEl)
+      .setName(isZh ? "自动批准所有工具操作" : "Auto-approve all tool actions")
+      .setDesc(
+        isZh
+          ? "高风险：向 agy 追加 --dangerously-skip-permissions，允许其直接执行文件修改与命令。关闭后不追加该参数；最终权限仍会叠加 agy 的用户设置、项目策略和 settings.json。"
+          : "High risk: adds --dangerously-skip-permissions so agy can execute file changes and commands without prompting. When off, the flag is omitted; effective permissions still include agy's user settings, project policy, and settings.json."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.agyAutoApproveTools === true)
+          .onChange(async (value) => {
+            this.plugin.settings.agyAutoApproveTools = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     // 动态探测状态卡片
     const agyStatusCard = containerEl.createDiv("agy-status-card");
     const statusHeader = agyStatusCard.createDiv("agy-status-card-header");
@@ -594,7 +612,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             ? "已成功检测到系统的 Google OAuth 授权态。Pimate 将直接复用此凭据，无需填写任何 API Key 即可使用！"
             : "Google OAuth credentials detected. Pimate will seamlessly reuse this authorization with zero API key configuration."
         );
-      } else {
+      } else if (status.authenticated === false) {
         agyStatusCard.className = "agy-status-card is-unauthenticated";
         statusTitle.setText(
           isZh
@@ -616,6 +634,18 @@ export class PiAgentSettingTab extends PluginSettingTab {
             new Notice(isZh ? "已复制 'agy' 到剪贴板，请在系统终端执行登录" : "Copied 'agy' to clipboard. Run it in your terminal.");
           });
         };
+      } else {
+        agyStatusCard.className = "agy-status-card is-unknown";
+        statusTitle.setText(
+          isZh
+            ? `🟡 已找到 agy，但暂时无法确认授权状态 · agy v${status.version || "1.x"}`
+            : `🟡 agy found, but authentication status is unknown · v${status.version || "1.x"}`
+        );
+        statusDesc.setText(
+          isZh
+            ? `模型列表探测未完成（${status.error || "服务暂不可用"}）。这不等于未登录；可直接在聊天中发送一条消息验证。`
+            : `The model probe did not complete (${status.error || "service unavailable"}). This does not mean you are logged out; send a chat message to verify.`
+        );
       }
     }).catch(() => {
       agyStatusCard.className = "agy-status-card is-not-installed";
@@ -681,6 +711,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
             dropdown.selectEl.empty();
             for (const m of models) {
               dropdown.addOption(m.id, m.name ? `${m.name}` : m.id);
+            }
+            if (selected && !models.some((model) => model.id === selected)) {
+              dropdown.addOption(selected, `${selected} (当前值 / current)`);
             }
             dropdown.setValue(selected);
           }

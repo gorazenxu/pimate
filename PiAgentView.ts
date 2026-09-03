@@ -1167,7 +1167,7 @@ export class PiAgentView extends ItemView {
         effort,
         cwd: vaultBasePath,
         conversationId: tab?.sessionId,
-        dangerouslySkipPermissions: true,
+        dangerouslySkipPermissions: settings.agyAutoApproveTools === true,
       });
     }
 
@@ -2692,8 +2692,16 @@ export class PiAgentView extends ItemView {
 
       let client = initialClient;
       if (hasQueuedMessages) {
-        client = await this.restartClientAfterHardSteer(tab, initialClient);
-        this.discardQueuedMessageBubbles(queuedBeforeAbort);
+        if (initialClient.engine === "antigravity") {
+          // Agy owns its in-memory queue and abort() clears it while
+          // terminating the current print-mode process. It has no Pi-style
+          // session file, so restarting through restartTabClient() would
+          // incorrectly reject a valid redirect.
+          this.discardQueuedMessageBubbles(queuedBeforeAbort);
+        } else {
+          client = await this.restartClientAfterHardSteer(tab, initialClient);
+          this.discardQueuedMessageBubbles(queuedBeforeAbort);
+        }
       }
 
       const response = await client.prompt(message, { images: options.images });
@@ -3494,6 +3502,14 @@ export class PiAgentView extends ItemView {
     const rawMessage = this.inputEl.value.trim();
     const contextPrefix = this.buildContextPrefix();
     const images = this.getImagePayloads();
+    if (client.engine === "antigravity" && images.length > 0) {
+      new Notice(
+        this.plugin.settings.language !== "en"
+          ? "当前 Antigravity 适配器暂不支持图片随 prompt 发送，请移除图片后再发送。"
+          : "The Antigravity adapter does not support image attachments yet. Remove the images before sending."
+      );
+      return;
+    }
     const userMessage = rawMessage || (images.length ? "Please analyze the attached image(s)." : "");
     const baseMessage = `${contextPrefix}${userMessage}`.trim();
     if (!baseMessage && images.length === 0) {
@@ -3866,6 +3882,12 @@ export class PiAgentView extends ItemView {
 
   private async persistAutoSessionTitle(tab: ChatTab, title: string): Promise<void> {
     if (!tab.sessionFile) {
+      if (tab.engine === "antigravity") {
+        tab.label = title;
+        this.renderTabs();
+        await this.persistSessionTabs();
+        return;
+      }
       this.pendingAutoTitles.set(tab.id, title);
       return;
     }
@@ -3962,10 +3984,17 @@ export class PiAgentView extends ItemView {
     this.updateButtons();
 
     this.runAsync(async () => {
+      const queuedBeforeAbort = [...this.pendingQueuedMessages];
       try {
         const response = await client.abort();
         if (!response.success) {
           throw new Error(response.error || "Pi did not stop the current response");
+        }
+        if (client.engine === "antigravity") {
+          // Agy abort() deliberately drops prompts that were still queued in
+          // the adapter. Remove their optimistic bubbles instead of leaving
+          // them in the transcript as if they had been sent.
+          this.discardQueuedMessageBubbles(queuedBeforeAbort);
         }
       } catch (err) {
         new Notice(`❌ ${isZh ? "停止失败：" : "Could not stop: "}${(err as Error).message}`);
@@ -3980,6 +4009,11 @@ export class PiAgentView extends ItemView {
     const tab = this.activeTab;
     if (!tab) return;
     const operationSeq = this.tabSwitchSeq;
+
+    const previousClient = tab.client;
+    if (previousClient) {
+      await previousClient.destroy().catch(() => undefined);
+    }
 
     // 清空当前 Tab 绑定的会话参数
     tab.sessionFile = undefined;
@@ -5475,6 +5509,16 @@ export class PiAgentView extends ItemView {
     const client = targetClient || this.activeTab?.client || this.client;
     if (!client) return;
 
+    if (client.engine === "antigravity") {
+      const isZh = this.plugin.settings.language !== "en";
+      new Notice(
+        isZh
+          ? "Antigravity 不支持 Pimate 的直接 Bash 模式；请用普通消息请求它执行命令。"
+          : "Antigravity does not support Pimate's direct Bash mode; ask it to run the command in a normal prompt."
+      );
+      return;
+    }
+
     const command = message.replace(/^!+/, "").trim();
     if (!command) return;
 
@@ -6481,13 +6525,14 @@ export class PiAgentView extends ItemView {
       return !!content?.textContent?.trim();
     });
     const hasTool = !!message.contentEl.querySelector(".pi-agent-tool-block");
+    const hasError = !!message.contentEl.querySelector(".pi-agent-error-block");
 
     for (const block of thinkingBlocks) {
       const content = block.querySelector(".pi-agent-thinking-content") as HTMLElement | null;
       if (!content?.textContent?.trim()) block.remove();
     }
 
-    if (!hasText && !hasThinking && !hasTool) {
+    if (!hasText && !hasThinking && !hasTool && !hasError) {
       message.el.remove();
       this.renderedMessages = this.renderedMessages.filter((m) => m !== message);
       return;
