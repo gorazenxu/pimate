@@ -6124,6 +6124,12 @@ export class PiAgentView extends ItemView {
       tab.client = null;
     }
 
+    // Reset session bindings when switching engines so the new engine starts cleanly
+    tab.sessionFile = undefined;
+    tab.sessionId = undefined;
+    tab.restored = false;
+    tab.requiresBranchHistoryRpc = false;
+
     if (newEngine === "antigravity") {
       tab.modelProvider = "antigravity";
       tab.modelId = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
@@ -6141,10 +6147,21 @@ export class PiAgentView extends ItemView {
       this.footerEffortCurrent.setText(this.getThinkingLevelLabel(tab.thinkingLevel));
     }
 
+    if (this.activeTab === tab) {
+      if (this.chatContainer) this.chatContainer.empty();
+      this.renderedMessages = [];
+      this.pendingQueuedMessages = [];
+      this.renderEmptyState();
+      this.setStatus(isZh ? `正在连接 ${newEngine === "antigravity" ? "Antigravity CLI" : "Pi Agent"}…` : `Starting ${newEngine}…`, "thinking");
+    }
+
     await this.ensureTabClient(tab);
     if (this.activeTab === tab) {
       this.client = tab.client;
+      await this.refreshStateDisplay();
+      await this.loadAvailableCommands();
     }
+    this.updateButtons();
     new Notice(isZh ? `已切换引擎为 ${newEngine === "antigravity" ? "✦ Antigravity CLI" : "π Pi Agent"}` : `Switched to ${newEngine === "antigravity" ? "Antigravity CLI" : "Pi Agent"}`);
   }
 

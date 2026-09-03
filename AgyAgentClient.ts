@@ -47,15 +47,19 @@ export function resolveAgySpawn(
   }
 
   // POSIX (macOS, Linux)
-  if (path.isAbsolute(p)) {
-    if (fs.existsSync(p)) return { cmd: p, scriptArgs: [] };
+  let resolvedPosix = p;
+  if (resolvedPosix.startsWith("~/") && process.env.HOME) {
+    resolvedPosix = path.join(process.env.HOME, resolvedPosix.slice(2));
+  }
+  if (path.isAbsolute(resolvedPosix)) {
+    if (fs.existsSync(resolvedPosix)) return { cmd: resolvedPosix, scriptArgs: [] };
   }
 
   const searchDirs = [
-    ...(process.env.PATH || "").split(path.delimiter),
     process.env.HOME ? path.join(process.env.HOME, ".local", "bin") : "",
     "/opt/homebrew/bin",
     "/usr/local/bin",
+    ...(process.env.PATH || "").split(path.delimiter),
     "/usr/bin",
     "/bin",
   ];
@@ -64,13 +68,13 @@ export function resolveAgySpawn(
   for (const dir of searchDirs) {
     if (!dir || seen.has(dir)) continue;
     seen.add(dir);
-    const candidate = path.join(dir, p);
+    const candidate = path.join(dir, resolvedPosix);
     if (fs.existsSync(candidate)) {
       return { cmd: candidate, scriptArgs: [] };
     }
   }
 
-  return { cmd: p, scriptArgs: [] };
+  return { cmd: resolvedPosix, scriptArgs: [] };
 }
 
 /**
@@ -165,9 +169,22 @@ export class AgyAgentClient extends EventEmitter {
       args.push("--conversation", this.conversationId);
     }
 
+    this.destroyed = false;
+
+    const homeDir = process.env.HOME || "";
+    const customPath = [
+      path.join(homeDir, ".local", "bin"),
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      process.env.PATH || "",
+    ].filter(Boolean).join(path.delimiter);
+
     const spawnOptions: SpawnOptions = {
       cwd: this.options.cwd || process.cwd(),
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        PATH: customPath,
+      },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     };
@@ -219,6 +236,7 @@ export class AgyAgentClient extends EventEmitter {
         child.on("close", (code) => {
           console.log(`[agy] Process closed with code ${code}`);
           const wasRunningTurn = this.isTurnStreaming;
+          const wasDestroyed = this.destroyed;
           this.isTurnStreaming = false;
           this.process = null;
 
@@ -236,7 +254,9 @@ export class AgyAgentClient extends EventEmitter {
               this.emit("event", { type: "turn_end" });
               this.emit("event", { type: "agent_settled" });
             }
-            this.emit("close");
+            if (!wasDestroyed) {
+              this.emit("close");
+            }
           }
         });
       } catch (err) {
@@ -573,6 +593,20 @@ export class AgyAgentClient extends EventEmitter {
     provider: string,
     modelId: string
   ): Promise<RpcResponse<SetModelResult>> {
+    if (this.currentModelId === modelId && this.isRunning()) {
+      return {
+        type: "response",
+        command: "set_model",
+        success: true,
+        data: {
+          id: modelId,
+          provider: "antigravity",
+          name: modelId,
+          reasoning: true,
+          thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
+        },
+      };
+    }
     this.currentModelId = modelId;
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
@@ -595,6 +629,13 @@ export class AgyAgentClient extends EventEmitter {
    * Set thinking effort level.
    */
   async setThinkingLevel(level: string): Promise<RpcResponse> {
+    if (this.currentEffort === level && this.isRunning()) {
+      return {
+        type: "response",
+        command: "set_thinking_level",
+        success: true,
+      };
+    }
     this.currentEffort = level;
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
