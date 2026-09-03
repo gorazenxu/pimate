@@ -83,6 +83,8 @@ interface ResumeSessionItem {
   label: string;
   mtime: number;
   preview?: string;
+  engine?: "pi" | "antigravity";
+  conversationId?: string;
 }
 
 interface ResumeSessionPreviewCacheEntry {
@@ -4376,29 +4378,55 @@ export class PiAgentView extends ItemView {
   }
 
   private async showResumeSelector(): Promise<void> {
-    const directory = this.getSessionDirectory();
-    if (!directory) {
-      new Notice("No session directory known yet. Send one message first.");
-      return;
-    }
     try {
-      const sessions = this.listResumeSessions(directory);
+      const isAgy = this.activeTab?.engine === "antigravity";
+      const sessions = this.listResumeSessionsForActiveEngine();
       if (sessions.length === 0) {
         new Notice("No previous sessions found");
         return;
       }
       new ResumeSessionSuggestModal(this.app, sessions, async (session) => {
+        if (isAgy) {
+          await this.openResumeSession(session);
+          return;
+        }
         new ResumeActionModal(this.app, session, async (action) => {
           if (action === "open") await this.openResumeSession(session);
           if (action === "delete") await this.deleteResumeSession(session);
         }).open();
-      }).open();
+      }, isAgy ? "Resume which Antigravity conversation?" : "Resume which Pi session?").open();
     } catch (err) {
       new Notice(`Resume failed: ${(err as Error).message}`);
     }
   }
 
+  private listResumeSessionsForActiveEngine(): ResumeSessionItem[] {
+    if (this.activeTab?.engine === "antigravity") {
+      const vaultPath = (this.app.vault.adapter as any).getBasePath?.() || undefined;
+      return AgyAgentClient.listConversations(vaultPath).map((conversation) => ({
+        path: "",
+        label:
+          conversation.title ||
+          (conversation.preview
+            ? conversation.preview.slice(0, 24)
+            : conversation.conversationId.slice(0, 12)),
+        mtime: conversation.mtime,
+        preview: conversation.preview,
+        engine: "antigravity",
+        conversationId: conversation.conversationId,
+      }));
+    }
+
+    const directory = this.getSessionDirectory();
+    return directory ? this.listResumeSessions(directory) : [];
+  }
+
   private async openResumeSession(session: ResumeSessionItem): Promise<void> {
+    if (session.engine === "antigravity" || session.conversationId) {
+      await this.openAgyResumeSession(session);
+      return;
+    }
+
     const active = this.activeTab;
     if (!active) return;
 
@@ -4459,6 +4487,88 @@ export class PiAgentView extends ItemView {
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
 
+    await this.switchToTab(active.id);
+  }
+
+  private async openAgyResumeSession(session: ResumeSessionItem): Promise<void> {
+    const active = this.activeTab;
+    const conversationId = session.conversationId?.trim();
+    const isZh = this.plugin.settings.language === "zh";
+    if (!active || !conversationId) return;
+    if (active.engine !== "antigravity") {
+      new Notice(
+        isZh
+          ? "当前会话卡不是 AGY，无法载入 AGY 历史会话"
+          : "The active tab is not using Antigravity, so this conversation cannot be loaded here"
+      );
+      return;
+    }
+    if (!AgyAgentClient.conversationExists(conversationId)) {
+      new Notice(isZh ? "AGY 历史会话不存在或已被删除" : "Antigravity conversation was not found");
+      return;
+    }
+
+    const existing = this.tabs.find(
+      (tab) => tab.engine === "antigravity" && tab.sessionId === conversationId
+    );
+    if (existing) {
+      await this.switchToTab(existing.id);
+      return;
+    }
+
+    if (active.isStreaming) {
+      new Notice(
+        isZh
+          ? "当前会话正在生成中，请先等待或停止"
+          : "The current conversation is still generating; wait or stop it first"
+      );
+      return;
+    }
+
+    const client = active.client;
+    if (client?.engine === "antigravity" && client.isRunning()) {
+      try {
+        this.setStatus(isZh ? "正在载入历史会话..." : "Restoring session...", "thinking");
+        const result = await (client as AgyAgentClient).switchSession(conversationId);
+        if (!result.success || (result.data as any)?.cancelled) {
+          new Notice(
+            isZh
+              ? result.error || "切换历史会话失败"
+              : result.error || "Failed to switch Antigravity conversation"
+          );
+          return;
+        }
+
+        active.sessionFile = undefined;
+        active.sessionId = conversationId;
+        active.restored = true;
+        this.client = active.client;
+        await this.applyTabRuntimePreferences(active);
+        await this.reloadAfterSessionRebind();
+        this.setStatus("Ready", "ok");
+        this.updateButtons();
+        await this.persistSessionTabs();
+        return;
+      } catch (err) {
+        new Notice(
+          isZh
+            ? `切换历史会话出错: ${(err as Error).message}`
+            : `Switch error: ${(err as Error).message}`
+        );
+        return;
+      }
+    }
+
+    if (active.client) {
+      await active.client.destroy().catch(() => undefined);
+      active.client = null;
+    }
+    active.sessionFile = undefined;
+    active.sessionId = conversationId;
+    active.restored = true;
+    this.resetActiveRenderState();
+    if (this.chatContainer) this.chatContainer.empty();
+    this.renderedMessages = [];
     await this.switchToTab(active.id);
   }
 
@@ -4902,18 +5012,9 @@ export class PiAgentView extends ItemView {
     header.createDiv({ text: "CONVERSATIONS", cls: "pi-agent-history-title" });
 
     try {
-      // Keep the custom History UI, but use exactly the same data source as
-      // Resume session...: current resume directory + listResumeSessions().
-      const directory = this.getSessionDirectory();
-      if (!directory) {
-        this.historyPanelEl.createDiv({
-          text: isZh ? "暂无会话历史" : "No conversation history",
-          cls: "pi-agent-history-empty",
-        });
-        return;
-      }
-
-      const sessions = this.listResumeSessions(directory);
+      // Keep the custom History UI in sync with the Resume action. Pi reads
+      // its JSONL directory; AGY reads its conversation metadata cache.
+      const sessions = this.listResumeSessionsForActiveEngine();
       if (sessions.length === 0) {
         this.historyPanelEl.createDiv({
           text: isZh ? "暂无会话历史" : "No conversation history",
@@ -4936,8 +5037,8 @@ export class PiAgentView extends ItemView {
         listContainer.empty();
         const q = query.trim().toLowerCase();
         const filtered = q
-          ? sessions.filter((session) => {
-              const haystack = [session.label, session.preview, session.path]
+            ? sessions.filter((session) => {
+              const haystack = [session.label, session.preview, session.path, session.conversationId]
                 .filter(Boolean)
                 .join(" ")
                 .toLowerCase();
@@ -4953,13 +5054,22 @@ export class PiAgentView extends ItemView {
           return;
         }
 
-        const currentSessionPath = this.activeTab?.sessionFile
-          ?.replace(/\\/g, "/")
-          .toLowerCase();
+        const isAgy = this.activeTab?.engine === "antigravity";
+        const currentConversationId = isAgy
+          ? this.activeTab?.sessionId ||
+            (this.activeTab?.client?.engine === "antigravity"
+              ? (this.activeTab.client as AgyAgentClient).getConversationId() || ""
+              : "")
+          : "";
+        const currentSessionPath = !isAgy
+          ? this.activeTab?.sessionFile?.replace(/\\/g, "/").toLowerCase()
+          : "";
 
         for (const session of filtered) {
           const sessionPath = session.path?.replace(/\\/g, "/").toLowerCase();
-          const isCurrentSession = !!currentSessionPath && sessionPath === currentSessionPath;
+          const isCurrentSession = isAgy
+            ? !!currentConversationId && session.conversationId === currentConversationId
+            : !!currentSessionPath && sessionPath === currentSessionPath;
           const itemEl = listContainer.createDiv(
             isCurrentSession
               ? "pi-agent-history-item is-current-session"
@@ -4991,6 +5101,8 @@ export class PiAgentView extends ItemView {
               historyBtn?.removeClass("is-active");
             });
           };
+
+          if (session.engine === "antigravity") continue;
 
           itemEl.addEventListener("contextmenu", (e) => {
             e.preventDefault();
@@ -5053,6 +5165,14 @@ export class PiAgentView extends ItemView {
 
   private async renameResumeSession(session: ResumeSessionItem): Promise<void> {
     const isZh = this.plugin.settings.language === "zh";
+    if (session.engine === "antigravity") {
+      new Notice(
+        isZh
+          ? "AGY 历史会话的重命名请在 AGY 原生 /resume 中进行"
+          : "Rename Antigravity conversations from AGY's native /resume picker"
+      );
+      return;
+    }
     const current = this.getSessionTitle(session.path) || session.label || "";
     const value = await new Promise<string | null>((resolve) => {
       new PiAgentEditorModal(
@@ -5076,6 +5196,15 @@ export class PiAgentView extends ItemView {
   }
 
   private async deleteResumeSession(session: ResumeSessionItem): Promise<void> {
+    if (session.engine === "antigravity") {
+      const isZh = this.plugin.settings.language === "zh";
+      new Notice(
+        isZh
+          ? "AGY 历史会话的删除请在 AGY 原生 /resume 中进行"
+          : "Delete Antigravity conversations from AGY's native /resume picker"
+      );
+      return;
+    }
     const confirmed = await new Promise<boolean>((resolve) => {
       new PiAgentConfirmModal(
         this.app,
@@ -7572,10 +7701,11 @@ class ResumeSessionSuggestModal extends SuggestModal<ResumeSessionItem> {
   constructor(
     app: App,
     private readonly sessions: ResumeSessionItem[],
-    private readonly onChoose: (session: ResumeSessionItem) => void | Promise<void>
+    private readonly onChoose: (session: ResumeSessionItem) => void | Promise<void>,
+    placeholder = "Resume which Pi session?"
   ) {
     super(app);
-    this.setPlaceholder("Resume which Pi session?");
+    this.setPlaceholder(placeholder);
   }
 
   getSuggestions(query: string): ResumeSessionItem[] {
@@ -7583,7 +7713,7 @@ class ResumeSessionSuggestModal extends SuggestModal<ResumeSessionItem> {
     if (!q) return this.sessions;
     return this.sessions
       .filter((session) =>
-        `${session.label} ${session.preview || ""} ${session.path}`
+        `${session.label} ${session.preview || ""} ${session.path || ""} ${session.conversationId || ""}`
           .toLowerCase()
           .includes(q)
       );
@@ -7592,12 +7722,12 @@ class ResumeSessionSuggestModal extends SuggestModal<ResumeSessionItem> {
   renderSuggestion(session: ResumeSessionItem, el: HTMLElement): void {
     el.addClass("pi-agent-suggestion");
     el.createDiv({
-      text: session.label || basename(session.path),
+      text: session.label || session.conversationId || basename(session.path),
       cls: "pi-agent-suggestion-title",
     });
     const date = new Date(session.mtime).toLocaleString();
     el.createDiv({
-      text: `${date} · ${session.preview || session.path}`,
+      text: `${date} · ${session.preview || session.conversationId || session.path}`,
       cls: "pi-agent-suggestion-note",
     });
   }

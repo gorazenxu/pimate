@@ -24,6 +24,15 @@ export interface AgyAgentClientOptions {
   dangerouslySkipPermissions?: boolean;
 }
 
+export interface AgyConversationSummary {
+  conversationId: string;
+  title: string;
+  preview: string;
+  mtime: number;
+  stepCount: number;
+  workspaceUris: string[];
+}
+
 type AgyPromptOptions = {
   streamingBehavior?: "steer" | "followUp";
   images?: Array<{ type: string; data: string; mimeType: string }>;
@@ -106,6 +115,10 @@ export class AgyAgentClient extends EventEmitter {
   private destroyed = false;
   private processGeneration = 0;
   private startPromise: Promise<void> | null = null;
+  // AGY can be called by startup, tab switching, model changes, and history
+  // restore at nearly the same time. Serialize lifecycle mutations so a
+  // queued destroy cannot invalidate a start that a restore is waiting for.
+  private lifecycleTail: Promise<void> = Promise.resolve();
 
   private options: AgyAgentClientOptions;
   private conversationId: string | null = null;
@@ -132,6 +145,12 @@ export class AgyAgentClient extends EventEmitter {
   private initResolve: ((value?: unknown) => void) | null = null;
   private initReject: ((reason?: unknown) => void) | null = null;
 
+  private enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleTail.then(operation, operation);
+    this.lifecycleTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   constructor(options: AgyAgentClientOptions) {
     super();
     this.options = { ...options };
@@ -154,11 +173,8 @@ export class AgyAgentClient extends EventEmitter {
   }> {
     if (!this.conversationId) return [];
     try {
-      const home = process.env.HOME || os.homedir();
       const transcriptPath = path.join(
-        home,
-        ".gemini",
-        "antigravity-cli",
+        this.getAgyDataDir(),
         "brain",
         this.conversationId,
         ".system_generated",
@@ -307,10 +323,23 @@ export class AgyAgentClient extends EventEmitter {
     return { modelId, effectiveEffort: encodedEffort };
   }
 
+  private getAgyDataDir(): string {
+    return AgyAgentClient.getAgyDataDir();
+  }
+
+  private resetHistoryCache(): void {
+    this.historyMessages = [];
+    this.historyLoadedConversationId = null;
+  }
+
   /**
    * Launch `agy` process in stream-json mode and wait for the "init" event.
    */
   async start(): Promise<void> {
+    return this.enqueueLifecycle(() => this.startInternal());
+  }
+
+  private async startInternal(): Promise<void> {
     if (this.destroyed) throw new Error("Client destroyed");
     if (this.isRunning()) return;
 
@@ -1042,10 +1071,70 @@ export class AgyAgentClient extends EventEmitter {
    * Switch or resume a previous conversation by ID.
    */
   async switchSession(conversationId: string): Promise<RpcResponse> {
+    const nextConversationId = conversationId.trim();
+    if (!AgyAgentClient.conversationExists(nextConversationId)) {
+      return {
+        type: "response",
+        command: "switch_session",
+        success: false,
+        error: "Antigravity conversation was not found",
+      };
+    }
+
+    return this.enqueueLifecycle(() => this.switchSessionInternal(nextConversationId));
+  }
+
+  private async switchSessionInternal(conversationId: string): Promise<RpcResponse> {
+    if (this.isTurnStreaming) {
+      return {
+        type: "response",
+        command: "switch_session",
+        success: false,
+        error: "Wait for the current Antigravity turn to finish before switching conversations",
+      };
+    }
+
+    const previousConversationId = this.conversationId;
     this.conversationId = conversationId;
-    this.historyMessages = [];
-    this.historyLoadedConversationId = null;
-    await this.restart();
+    this.resetHistoryCache();
+
+    try {
+      await this.destroyInternal();
+      this.destroyed = false;
+      await this.startInternal();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+
+      // A failed restore must not leave the tab holding a destroyed client.
+      // Reconnect the previous conversation so the user can retry without
+      // restarting Obsidian.
+      this.conversationId = previousConversationId;
+      this.resetHistoryCache();
+      this.destroyed = false;
+      await this.startInternal().catch(() => undefined);
+      return {
+        type: "response",
+        command: "switch_session",
+        success: false,
+        error: `Failed to restore Antigravity conversation: ${reason}`,
+      };
+    }
+
+    if (this.conversationId !== conversationId) {
+      const actualConversationId = this.conversationId;
+      await this.destroyInternal();
+      this.conversationId = previousConversationId;
+      this.resetHistoryCache();
+      this.destroyed = false;
+      await this.startInternal().catch(() => undefined);
+      return {
+        type: "response",
+        command: "switch_session",
+        success: false,
+        error: `Antigravity did not restore the requested conversation (opened ${actualConversationId || "a new conversation"})`,
+      };
+    }
+
     return {
       type: "response",
       command: "switch_session",
@@ -1176,12 +1265,20 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    await this.destroy();
+    return this.enqueueLifecycle(() => this.restartInternal());
+  }
+
+  private async restartInternal(): Promise<void> {
+    await this.destroyInternal();
     this.destroyed = false;
-    await this.start();
+    await this.startInternal();
   }
 
   async destroy(): Promise<void> {
+    return this.enqueueLifecycle(() => this.destroyInternal());
+  }
+
+  private async destroyInternal(): Promise<void> {
     if (this.destroyed && !this.process && !this.startPromise) return;
     this.destroyed = true;
     this.pendingPrompts = [];
@@ -1211,6 +1308,148 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   // ─── Static Helpers ────────────────────────────────────────────────────────
+
+  private static getAgyDataDir(): string {
+    const home = process.env.HOME || os.homedir();
+    return path.join(home, ".gemini", "antigravity-cli");
+  }
+
+  static conversationExists(conversationId: string): boolean {
+    const id = conversationId.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      return false;
+    }
+    const dataDir = AgyAgentClient.getAgyDataDir();
+    return (
+      fs.existsSync(path.join(dataDir, "conversations", `${id}.db`)) ||
+      fs.existsSync(path.join(dataDir, "brain", id))
+    );
+  }
+
+  /**
+   * Read AGY's persistent conversation metadata cache. The cache is the same
+   * source used by the native `/resume` picker; the actual `.db` file check
+   * keeps stale cache records out of Pimate's list.
+   */
+  static listConversations(cwd?: string): AgyConversationSummary[] {
+    const dataDir = AgyAgentClient.getAgyDataDir();
+    const metadataPath = path.join(dataDir, "cache", "conversation_metadata.json");
+    const lastConversationsPath = path.join(dataDir, "cache", "last_conversations.json");
+    const conversationsDir = path.join(dataDir, "conversations");
+
+    let metadata: Record<string, any> = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+      if (parsed?.conversations && typeof parsed.conversations === "object") {
+        metadata = parsed.conversations;
+      }
+    } catch {
+      // AGY may be updating the cache, or an older version may not have it.
+    }
+
+    let lastConversationId = "";
+    try {
+      const parsed = JSON.parse(fs.readFileSync(lastConversationsPath, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        const target = cwd ? path.resolve(cwd) : "";
+        const match = Object.entries(parsed).find(([workspace]) => {
+          if (!target) return false;
+          return path.resolve(workspace) === target;
+        });
+        if (typeof match?.[1] === "string") lastConversationId = match[1];
+      }
+    } catch {
+      // The metadata list below is still useful without the last-session map.
+    }
+
+    const dbMtimes = new Map<string, number>();
+    try {
+      for (const name of fs.readdirSync(conversationsDir)) {
+        const match = name.match(
+          /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.db$/i
+        );
+        if (!match) continue;
+        try {
+          const stat = fs.statSync(path.join(conversationsDir, name));
+          if (stat.isFile()) dbMtimes.set(match[1], stat.mtimeMs);
+        } catch {
+          // A conversation can be removed while the directory is scanned.
+        }
+      }
+    } catch {
+      // Return an empty list if AGY's local store is not available.
+    }
+
+    const summaries: AgyConversationSummary[] = [];
+    for (const [key, record] of Object.entries(metadata)) {
+      const summary = record?.summary;
+      if (!summary || typeof summary !== "object") continue;
+
+      const conversationId =
+        typeof summary.ID === "string" && summary.ID.trim() ? summary.ID.trim() : key;
+      if (!dbMtimes.has(conversationId)) continue;
+
+      const stepCount = Number(summary.NumSteps) || 0;
+      // Match AGY's native picker behavior: empty startup shells are not
+      // recoverable conversations and should not clutter the list.
+      if (stepCount <= 0) continue;
+
+      const workspaceUris = Array.isArray(summary.WorkspaceURIs)
+        ? summary.WorkspaceURIs.filter((uri: unknown): uri is string => typeof uri === "string")
+        : [];
+      const updatedAt = Date.parse(
+        typeof record.last_modified_time === "string"
+          ? record.last_modified_time
+          : typeof summary.UpdatedAt === "string"
+            ? summary.UpdatedAt
+            : ""
+      );
+      summaries.push({
+        conversationId,
+        title: typeof summary.Title === "string" ? summary.Title.trim() : "",
+        preview: typeof summary.Preview === "string" ? summary.Preview.trim() : "",
+        mtime: Number.isFinite(updatedAt) ? updatedAt : dbMtimes.get(conversationId) || 0,
+        stepCount,
+        workspaceUris,
+      });
+    }
+
+    const normalizedCwd = cwd ? path.resolve(cwd) : "";
+    const workspaceFromUri = (uri: string): string => {
+      try {
+        const filePath = uri.startsWith("file://")
+          ? uri.slice("file://".length)
+          : uri;
+        return path.resolve(decodeURIComponent(filePath));
+      } catch {
+        return uri;
+      }
+    };
+    const belongsToWorkspace = (summary: AgyConversationSummary): boolean =>
+      !!normalizedCwd && summary.workspaceUris.some(
+        (uri) => workspaceFromUri(uri) === normalizedCwd
+      );
+
+    let filtered = summaries;
+    if (normalizedCwd) {
+      const explicitMatches = summaries.filter(belongsToWorkspace);
+      if (explicitMatches.length > 0) {
+        filtered = summaries.filter(
+          (summary) => belongsToWorkspace(summary) || summary.conversationId === lastConversationId
+        );
+      } else {
+        // AGY 1.1.x sometimes leaves WorkspaceURIs empty for print-mode
+        // conversations. Keep those unscoped records visible instead of
+        // showing a blank history panel, while still excluding conversations
+        // explicitly tied to another workspace.
+        filtered = summaries.filter(
+          (summary) => summary.workspaceUris.length === 0 || summary.conversationId === lastConversationId
+        );
+      }
+    }
+
+    return filtered.sort((a, b) => b.mtime - a.mtime);
+  }
 
   /**
    * Query available models from `agy models`.
