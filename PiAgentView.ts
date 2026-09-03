@@ -37,6 +37,12 @@ import {
   type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
 import { AgyAgentClient } from "./AgyAgentClient";
+import {
+  AgyUsageStore,
+  getAgyUsageStorePath,
+  type AgyUsageSnapshot,
+  type AgyUsageTotals,
+} from "./AgyUsageStore";
 
 export type AgentClient = PiAgentClient | AgyAgentClient;
 
@@ -4167,10 +4173,15 @@ export class PiAgentView extends ItemView {
       if (result.success && result.data) {
         const data = result.data as any;
         const tokens = data.tokens || {};
+        const usageKnown = data.usageKnown !== false;
         const info = [
           `Messages: ${data.totalMessages || 0}`,
-          `Tokens: ${tokens.total || 0} (in: ${tokens.input || 0}, out: ${tokens.output || 0})`,
-          `Cost: $${(data.cost || 0).toFixed(4)}`,
+          usageKnown
+            ? `Tokens: ${tokens.total || 0} (in: ${tokens.input || 0}, out: ${tokens.output || 0}, thinking: ${tokens.thinking || 0}, cache read: ${tokens.cacheRead || 0})`
+            : "Tokens: unavailable until AGY completes a turn",
+          data.costKnown === false
+            ? "Cost: unavailable"
+            : `Cost: $${(data.cost || 0).toFixed(4)}`,
         ];
         if (data.contextUsage?.percent != null) {
           info.push(
@@ -8338,11 +8349,13 @@ interface UsageModelRow {
   messageCount: number;
   input: number;
   output: number;
+  thinking: number;
   cacheRead: number;
   cacheWrite: number;
   cacheTotal: number;
   totalTokens: number;
   cost: number;
+  costKnown: boolean;
   hitRate: number | null;
   firstUsed: number | null;
   lastUsed: number | null;
@@ -8351,11 +8364,14 @@ interface UsageModelRow {
 interface UsageTotals {
   input: number;
   output: number;
+  thinking: number;
   cacheRead: number;
   cacheWrite: number;
   cacheTotal: number;
   totalTokens: number;
   cost: number;
+  costKnownMessages: number;
+  unknownCostMessages: number;
   messageCount: number;
 }
 
@@ -8372,6 +8388,7 @@ type UsageSortKey =
   | "totalTokens"
   | "input"
   | "output"
+  | "thinking"
   | "cacheRead"
   | "cacheWrite"
   | "cacheTotal"
@@ -8637,11 +8654,14 @@ function aggregateUsage(
   const totals: UsageTotals = {
     input: 0,
     output: 0,
+    thinking: 0,
     cacheRead: 0,
     cacheWrite: 0,
     cacheTotal: 0,
     totalTokens: 0,
     cost: 0,
+    costKnownMessages: 0,
+    unknownCostMessages: 0,
     messageCount: 0,
   };
   let sessionCount = 0;
@@ -8664,11 +8684,13 @@ function aggregateUsage(
           messageCount: 0,
           input: 0,
           output: 0,
+          thinking: 0,
           cacheRead: 0,
           cacheWrite: 0,
           cacheTotal: 0,
           totalTokens: 0,
           cost: 0,
+          costKnown: true,
           hitRate: null,
           firstUsed: null,
           lastUsed: null,
@@ -8695,6 +8717,7 @@ function aggregateUsage(
       }
       totals.input += input;
       totals.output += output;
+      totals.costKnownMessages += 1;
       totals.cacheRead += cacheRead;
       totals.cacheWrite += cacheWrite;
       totals.totalTokens += total;
@@ -8721,6 +8744,241 @@ function scanUsageRange(
 ): UsageResult {
   const cache = scanUsageIncremental(sessionsBaseDir, usageCachePath());
   return aggregateUsage(cache.perFile, from, to);
+}
+
+function subtractAgyUsage(
+  current: AgyUsageTotals,
+  previous: AgyUsageTotals | null
+): AgyUsageTotals {
+  if (!previous) return { ...current };
+  const subtract = (a: number, b: number) => Math.max(0, a - b);
+  return {
+    input: subtract(current.input, previous.input),
+    output: subtract(current.output, previous.output),
+    thinking: subtract(current.thinking, previous.thinking),
+    cacheRead: subtract(current.cacheRead, previous.cacheRead),
+    total: subtract(current.total, previous.total),
+  };
+}
+
+function agyUsageHasValues(usage: AgyUsageTotals): boolean {
+  return usage.input > 0 || usage.output > 0 || usage.thinking > 0 || usage.cacheRead > 0 || usage.total > 0;
+}
+
+function deriveAgyUsageDeltas(
+  snapshots: AgyUsageSnapshot[]
+): Array<{ snapshot: AgyUsageSnapshot; delta: AgyUsageTotals; baseline: boolean }> {
+  const grouped = new Map<string, AgyUsageSnapshot[]>();
+  const seen = new Set<string>();
+  for (const snapshot of snapshots) {
+    const totals = snapshot.cumulative;
+    const key = [
+      snapshot.conversationId,
+      snapshot.numTurns ?? "",
+      totals.input,
+      totals.output,
+      totals.thinking,
+      totals.cacheRead,
+      totals.total,
+    ].join(":");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const list = grouped.get(snapshot.conversationId) || [];
+    list.push(snapshot);
+    grouped.set(snapshot.conversationId, list);
+  }
+
+  const result: Array<{ snapshot: AgyUsageSnapshot; delta: AgyUsageTotals; baseline: boolean }> = [];
+  for (const list of grouped.values()) {
+    list.sort((a, b) => {
+      if (a.numTurns != null && b.numTurns != null && a.numTurns !== b.numTurns) {
+        return a.numTurns - b.numTurns;
+      }
+      if (a.numTurns != null && b.numTurns == null) return -1;
+      if (a.numTurns == null && b.numTurns != null) return 1;
+      return a.observedAt - b.observedAt;
+    });
+
+    let previous: AgyUsageSnapshot | null = null;
+    for (const snapshot of list) {
+      const current = snapshot.cumulative;
+      const reset = !!previous && (
+        current.input < previous.cumulative.input ||
+        current.output < previous.cumulative.output ||
+        current.thinking < previous.cumulative.thinking ||
+        current.cacheRead < previous.cumulative.cacheRead ||
+        current.total < previous.cumulative.total
+      );
+      const baseline = !previous
+        ? snapshot.numTurns == null || snapshot.numTurns > 1
+        : reset;
+      result.push({
+        snapshot,
+        delta: reset ? { ...current } : subtractAgyUsage(current, previous?.cumulative || null),
+        baseline,
+      });
+      previous = snapshot;
+    }
+  }
+  return result;
+}
+
+async function scanAgyUsageRange(
+  from: number | null,
+  to: number | null
+): Promise<UsageResult> {
+  const snapshots = await AgyUsageStore.readAll();
+  const boundedRange = from != null || to != null;
+  const byModel = new Map<string, UsageModelRow>();
+  const totals: UsageTotals = {
+    input: 0,
+    output: 0,
+    thinking: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cacheTotal: 0,
+    totalTokens: 0,
+    cost: 0,
+    costKnownMessages: 0,
+    unknownCostMessages: 0,
+    messageCount: 0,
+  };
+  const sessions = new Set<string>();
+
+  for (const { snapshot, delta, baseline } of deriveAgyUsageDeltas(snapshots)) {
+    // A first observation of an existing conversation contains AGY's entire
+    // historical cumulative usage. Keep it available in "All time", but do
+    // not attribute that old usage to the day on which Pimate first saw it.
+    if (boundedRange && baseline) continue;
+    if (from != null && snapshot.observedAt < from) continue;
+    if (to != null && snapshot.observedAt > to) continue;
+    if (!agyUsageHasValues(delta)) continue;
+
+    const provider = "Antigravity";
+    const model = snapshot.model || "unknown";
+    const key = `${provider}::${model}`;
+    let row = byModel.get(key);
+    if (!row) {
+      row = {
+        provider,
+        model,
+        messageCount: 0,
+        input: 0,
+        output: 0,
+        thinking: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cacheTotal: 0,
+        totalTokens: 0,
+        cost: 0,
+        costKnown: false,
+        hitRate: null,
+        firstUsed: null,
+        lastUsed: null,
+      };
+      byModel.set(key, row);
+    }
+    row.messageCount += 1;
+    row.input += delta.input;
+    row.output += delta.output;
+    row.thinking += delta.thinking;
+    row.cacheRead += delta.cacheRead;
+    row.cacheTotal += delta.cacheRead;
+    row.totalTokens += delta.total;
+    if (row.firstUsed == null || snapshot.observedAt < row.firstUsed) row.firstUsed = snapshot.observedAt;
+    if (row.lastUsed == null || snapshot.observedAt > row.lastUsed) row.lastUsed = snapshot.observedAt;
+
+    totals.input += delta.input;
+    totals.output += delta.output;
+    totals.thinking += delta.thinking;
+    totals.cacheRead += delta.cacheRead;
+    totals.cacheTotal += delta.cacheRead;
+    totals.totalTokens += delta.total;
+    totals.unknownCostMessages += 1;
+    totals.messageCount += 1;
+    sessions.add(snapshot.conversationId);
+  }
+
+  return {
+    from,
+    to,
+    sessionCount: sessions.size,
+    byModel: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    totals,
+  };
+}
+
+function mergeUsageResults(results: UsageResult[]): UsageResult {
+  const byModel = new Map<string, UsageModelRow>();
+  const totals: UsageTotals = {
+    input: 0,
+    output: 0,
+    thinking: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cacheTotal: 0,
+    totalTokens: 0,
+    cost: 0,
+    costKnownMessages: 0,
+    unknownCostMessages: 0,
+    messageCount: 0,
+  };
+  for (const result of results) {
+    totals.input += result.totals.input;
+    totals.output += result.totals.output;
+    totals.thinking += result.totals.thinking;
+    totals.cacheRead += result.totals.cacheRead;
+    totals.cacheWrite += result.totals.cacheWrite;
+    totals.cacheTotal += result.totals.cacheTotal;
+    totals.totalTokens += result.totals.totalTokens;
+    totals.cost += result.totals.cost;
+    totals.costKnownMessages += result.totals.costKnownMessages;
+    totals.unknownCostMessages += result.totals.unknownCostMessages;
+    totals.messageCount += result.totals.messageCount;
+
+    for (const row of result.byModel) {
+      const key = `${row.provider}::${row.model}`;
+      const existing = byModel.get(key);
+      if (!existing) {
+        byModel.set(key, { ...row });
+        continue;
+      }
+      existing.messageCount += row.messageCount;
+      existing.input += row.input;
+      existing.output += row.output;
+      existing.thinking += row.thinking;
+      existing.cacheRead += row.cacheRead;
+      existing.cacheWrite += row.cacheWrite;
+      existing.cacheTotal += row.cacheTotal;
+      existing.totalTokens += row.totalTokens;
+      existing.cost += row.cost;
+      existing.costKnown = existing.costKnown && row.costKnown;
+      if (row.firstUsed != null && (existing.firstUsed == null || row.firstUsed < existing.firstUsed)) {
+        existing.firstUsed = row.firstUsed;
+      }
+      if (row.lastUsed != null && (existing.lastUsed == null || row.lastUsed > existing.lastUsed)) {
+        existing.lastUsed = row.lastUsed;
+      }
+    }
+  }
+
+  return {
+    from: results[0]?.from ?? null,
+    to: results[0]?.to ?? null,
+    sessionCount: results.reduce((sum, result) => sum + result.sessionCount, 0),
+    byModel: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    totals,
+  };
+}
+
+async function scanUnifiedUsageRange(
+  sessionsBaseDir: string,
+  from: number | null,
+  to: number | null
+): Promise<UsageResult> {
+  const piResult = scanUsageRange(sessionsBaseDir, from, to);
+  const agyResult = await scanAgyUsageRange(from, to);
+  return mergeUsageResults([piResult, agyResult]);
 }
 
 class UsageStatsModal extends Modal {
@@ -8829,9 +9087,12 @@ class UsageStatsModal extends Modal {
 
     // Footer
     const footer = contentEl.createDiv("pi-agent-usage-footer");
-    footer.createSpan({
-      text: isZh ? "点击列标题排序 · 数据源：~/.pi/agent/sessions" : "Click a column to sort · Data source: ~/.pi/agent/sessions",
+    const source = footer.createSpan({
+      text: isZh
+        ? "点击列标题排序 · 数据源：Pi 会话日志 + AGY 用量日志"
+        : "Click a column to sort · Data source: Pi session logs + AGY usage journal",
     });
+    source.setAttribute("title", `${usageCachePath()}\n${getAgyUsageStorePath()}`);
     footer.createSpan({ text: "Esc", cls: "pi-agent-usage-foot-hint" });
     this.scan();
   }
@@ -8843,24 +9104,26 @@ class UsageStatsModal extends Modal {
     this.updateStatus();
     window.setTimeout(() => {
       if (reqId !== this.reqId) return;
-      try {
-        const home = homedir().replace(/\\/g, "/");
-        const sessionsBaseDir = `${home}/.pi/agent/sessions`;
-        const range = buildRange(this.preset, this.customFrom, this.customTo);
-        const result = scanUsageRange(sessionsBaseDir, range.from, range.to);
-        if (reqId !== this.reqId) return;
-        this.data = result;
-        this.loading = false;
-        this.updateRangeLabel();
-        this.renderSummary();
-        this.renderTable();
-        this.updateStatus();
-      } catch (err) {
-        if (reqId !== this.reqId) return;
-        this.error = (err as Error).message;
-        this.loading = false;
-        this.updateStatus();
-      }
+      void (async () => {
+        try {
+          const home = homedir().replace(/\\/g, "/");
+          const sessionsBaseDir = `${home}/.pi/agent/sessions`;
+          const range = buildRange(this.preset, this.customFrom, this.customTo);
+          const result = await scanUnifiedUsageRange(sessionsBaseDir, range.from, range.to);
+          if (reqId !== this.reqId) return;
+          this.data = result;
+          this.loading = false;
+          this.updateRangeLabel();
+          this.renderSummary();
+          this.renderTable();
+          this.updateStatus();
+        } catch (err) {
+          if (reqId !== this.reqId) return;
+          this.error = (err as Error).message;
+          this.loading = false;
+          this.updateStatus();
+        }
+      })();
     }, 0);
   }
 
@@ -8900,20 +9163,26 @@ class UsageStatsModal extends Modal {
     const isZh = this.lang === "zh";
     const t = this.data.totals;
     const hr = computeHitRate(t.input, t.cacheRead);
+    const costSub = t.unknownCostMessages > 0
+      ? (t.costKnownMessages > 0
+        ? (isZh ? "AGY 费用未提供" : "AGY cost unavailable")
+        : (isZh ? "AGY 未提供费用" : "AGY does not provide cost"))
+      : `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`;
     const cards = [
       { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
       { label: isZh ? "输入" : "Input", value: fmtNum(t.input), sub: t.input.toLocaleString() },
       { label: isZh ? "输出" : "Output", value: fmtNum(t.output), sub: t.output.toLocaleString() },
+      { label: isZh ? "思考" : "Thinking", value: fmtNum(t.thinking), sub: t.thinking.toLocaleString() },
       {
-        label: isZh ? "缓存 Σ" : "Cache Σ",
-        value: fmtNum(t.cacheTotal),
-        sub: hr === null ? "—" : `${isZh ? "命中率" : "hit"} ${(hr * 100).toFixed(1)}%`,
+        label: isZh ? "缓存读" : "Cache read",
+        value: fmtNum(t.cacheRead),
+        sub: hr === null ? "—" : `${isZh ? "占比" : "share"} ${(hr * 100).toFixed(1)}%`,
         subColor: hitRateColor(hr),
       },
       {
         label: isZh ? "费用" : "Cost",
-        value: fmtCost(t.cost),
-        sub: `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`,
+        value: t.costKnownMessages > 0 ? fmtCost(t.cost) : "—",
+        sub: costSub,
       },
     ];
     for (const c of cards) {
@@ -8971,6 +9240,7 @@ class UsageStatsModal extends Modal {
       { key: "messageCount", label: isZh ? "消息" : "Msgs", align: "right" },
       { key: "input", label: isZh ? "输入" : "Input", align: "right" },
       { key: "output", label: isZh ? "输出" : "Output", align: "right" },
+      { key: "thinking", label: isZh ? "思考" : "Thinking", align: "right" },
       { key: "cacheRead", label: isZh ? "缓存读" : "Cache R", align: "right" },
       { key: "cacheWrite", label: isZh ? "缓存写" : "Cache W", align: "right" },
       { key: "totalTokens", label: isZh ? "总计" : "Total", align: "right" },
@@ -9015,11 +9285,12 @@ class UsageStatsModal extends Modal {
         [m.messageCount.toLocaleString(), "right"],
         [fmtNum(m.input), "right"],
         [fmtNum(m.output), "right"],
+        [fmtNum(m.thinking), "right"],
         [fmtNum(m.cacheRead), "right"],
         [fmtNum(m.cacheWrite), "right"],
         [fmtNum(m.totalTokens), "right"],
         [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
-        [fmtCost(m.cost), "right"],
+        [m.costKnown ? fmtCost(m.cost) : "—", "right"],
       ];
       for (const [val, align, color] of cells) {
         const td = tr.createEl("td", { text: val });

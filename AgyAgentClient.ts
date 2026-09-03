@@ -14,6 +14,7 @@ import type {
   ForkMessagesResult,
   SessionEntriesResult,
 } from "./PiAgentClient";
+import { AgyUsageStore } from "./AgyUsageStore";
 
 export interface AgyAgentClientOptions {
   agyPath?: string;
@@ -135,7 +136,12 @@ export class AgyAgentClient extends EventEmitter {
   private inputTokens = 0;
   private outputTokens = 0;
   private thinkingTokens = 0;
+  private cacheReadTokens = 0;
   private totalTokens = 0;
+  private usageKnown = false;
+  private usageObservedAt = 0;
+  private usageLoadPromise: Promise<void> = Promise.resolve();
+  private usageStateRevision = 0;
 
   private historyMessages: Array<{
     role: "user" | "assistant";
@@ -157,6 +163,7 @@ export class AgyAgentClient extends EventEmitter {
     this.conversationId = options.conversationId || null;
     this.currentModelId = options.modelId || "gemini-3.8-flash-high";
     this.currentEffort = options.effort || "high";
+    this.usageLoadPromise = this.restorePersistedUsage(this.conversationId);
   }
 
   getConversationId(): string | null {
@@ -330,6 +337,63 @@ export class AgyAgentClient extends EventEmitter {
   private resetHistoryCache(): void {
     this.historyMessages = [];
     this.historyLoadedConversationId = null;
+  }
+
+  private resetUsageState(): void {
+    this.usageStateRevision++;
+    this.inputTokens = 0;
+    this.outputTokens = 0;
+    this.thinkingTokens = 0;
+    this.cacheReadTokens = 0;
+    this.totalTokens = 0;
+    this.usageKnown = false;
+    this.usageObservedAt = 0;
+  }
+
+  private async restorePersistedUsage(conversationId: string | null): Promise<void> {
+    this.resetUsageState();
+    if (!conversationId) return;
+    const loadRevision = this.usageStateRevision;
+    try {
+      const snapshot = await AgyUsageStore.getLatest(conversationId);
+      if (
+        !snapshot ||
+        this.conversationId !== conversationId ||
+        this.usageStateRevision !== loadRevision
+      ) return;
+      this.inputTokens = snapshot.cumulative.input;
+      this.outputTokens = snapshot.cumulative.output;
+      this.thinkingTokens = snapshot.cumulative.thinking;
+      this.cacheReadTokens = snapshot.cumulative.cacheRead;
+      this.totalTokens = snapshot.cumulative.total;
+      this.usageKnown = true;
+      this.usageObservedAt = snapshot.observedAt;
+      this.usageStateRevision++;
+    } catch {
+      // Usage history is optional and must never prevent a conversation from
+      // starting or being restored.
+    }
+  }
+
+  private persistUsageSnapshot(numTurns: unknown): void {
+    if (!this.conversationId || !this.usageKnown) return;
+    AgyUsageStore.record({
+      conversationId: this.conversationId,
+      cwd: this.options.cwd || process.cwd(),
+      model: this.currentModelId || "unknown",
+      observedAt: Date.now(),
+      numTurns:
+        typeof numTurns === "number" && Number.isFinite(numTurns)
+          ? numTurns
+          : undefined,
+      cumulative: {
+        input: this.inputTokens,
+        output: this.outputTokens,
+        thinking: this.thinkingTokens,
+        cacheRead: this.cacheReadTokens,
+        total: this.totalTokens,
+      },
+    });
   }
 
   /**
@@ -672,6 +736,9 @@ export class AgyAgentClient extends EventEmitter {
       }
       if (result?.usage) {
         this.updateUsage(result.usage);
+        if (result.status === "SUCCESS") {
+          this.persistUsageSnapshot(result.num_turns);
+        }
       }
 
       if (result?.status === "SUCCESS") {
@@ -791,12 +858,35 @@ export class AgyAgentClient extends EventEmitter {
     input_tokens?: number;
     output_tokens?: number;
     thinking_tokens?: number;
+    cache_read_tokens?: number;
     total_tokens?: number;
   }): void {
-    if (typeof usage.input_tokens === "number") this.inputTokens = usage.input_tokens;
-    if (typeof usage.output_tokens === "number") this.outputTokens = usage.output_tokens;
-    if (typeof usage.thinking_tokens === "number") this.thinkingTokens = usage.thinking_tokens;
-    if (typeof usage.total_tokens === "number") this.totalTokens = usage.total_tokens;
+    let updated = false;
+    if (typeof usage.input_tokens === "number") {
+      this.inputTokens = usage.input_tokens;
+      updated = true;
+    }
+    if (typeof usage.output_tokens === "number") {
+      this.outputTokens = usage.output_tokens;
+      updated = true;
+    }
+    if (typeof usage.thinking_tokens === "number") {
+      this.thinkingTokens = usage.thinking_tokens;
+      updated = true;
+    }
+    if (typeof usage.cache_read_tokens === "number") {
+      this.cacheReadTokens = usage.cache_read_tokens;
+      updated = true;
+    }
+    if (typeof usage.total_tokens === "number") {
+      this.totalTokens = usage.total_tokens;
+      updated = true;
+    }
+    if (updated) {
+      this.usageStateRevision++;
+      this.usageKnown = true;
+      this.usageObservedAt = Date.now();
+    }
   }
 
   /**
@@ -1044,6 +1134,7 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async getSessionStats(): Promise<RpcResponse> {
+    await this.usageLoadPromise;
     this.ensureHistoryLoaded();
     return {
       type: "response",
@@ -1056,13 +1147,18 @@ export class AgyAgentClient extends EventEmitter {
           input: this.inputTokens,
           output: this.outputTokens,
           thinking: this.thinkingTokens,
+          cacheRead: this.cacheReadTokens,
         },
         cost: 0,
+        costKnown: false,
         contextUsage: undefined,
         totalTokens: this.totalTokens,
         inputTokens: this.inputTokens,
         outputTokens: this.outputTokens,
         thinkingTokens: this.thinkingTokens,
+        cacheReadTokens: this.cacheReadTokens,
+        usageKnown: this.usageKnown,
+        usageObservedAt: this.usageObservedAt || undefined,
       },
     };
   }
@@ -1097,6 +1193,8 @@ export class AgyAgentClient extends EventEmitter {
     const previousConversationId = this.conversationId;
     this.conversationId = conversationId;
     this.resetHistoryCache();
+    this.usageLoadPromise = this.restorePersistedUsage(conversationId);
+    await this.usageLoadPromise;
 
     try {
       await this.destroyInternal();
@@ -1110,6 +1208,8 @@ export class AgyAgentClient extends EventEmitter {
       // restarting Obsidian.
       this.conversationId = previousConversationId;
       this.resetHistoryCache();
+      this.usageLoadPromise = this.restorePersistedUsage(previousConversationId);
+      await this.usageLoadPromise;
       this.destroyed = false;
       await this.startInternal().catch(() => undefined);
       return {
@@ -1125,6 +1225,8 @@ export class AgyAgentClient extends EventEmitter {
       await this.destroyInternal();
       this.conversationId = previousConversationId;
       this.resetHistoryCache();
+      this.usageLoadPromise = this.restorePersistedUsage(previousConversationId);
+      await this.usageLoadPromise;
       this.destroyed = false;
       await this.startInternal().catch(() => undefined);
       return {
@@ -1305,6 +1407,7 @@ export class AgyAgentClient extends EventEmitter {
     // finish before a restart can begin a second process.
     const pendingStart = this.startPromise;
     if (pendingStart) await pendingStart.catch(() => undefined);
+    await AgyUsageStore.flush();
   }
 
   // ─── Static Helpers ────────────────────────────────────────────────────────
