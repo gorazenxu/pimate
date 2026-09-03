@@ -2317,6 +2317,11 @@ export class PiAgentView extends ItemView {
 
   private async refreshForkMessagesAndReloadHistory(): Promise<void> {
     const tab = this.activeTab;
+    if (tab?.engine === "antigravity") {
+      // Antigravity streams live into chatContainer without Pi fork metadata.
+      // Retain live DOM so turn completion does not wipe the displayed message.
+      return;
+    }
     const scopeVersion = this.forkScopeVersion;
     // Session files are created lazily on the first completed response. Sync
     // the path before deciding between file history and branch-aware RPC.
@@ -6510,7 +6515,11 @@ export class PiAgentView extends ItemView {
     } else if (msg.role === "branchSummary") {
       this.addCompactionSummaryMessage(msg.summary || "", undefined, "Branch summary", options);
     } else if (msg.role === "assistant") {
-      const blocks = Array.isArray(msg.content) ? msg.content : [];
+      const blocks = Array.isArray(msg.content)
+        ? msg.content
+        : typeof msg.content === "string" && msg.content.trim()
+          ? [{ type: "text", text: msg.content }]
+          : [];
       const hasVisibleText = blocks.some((block: any) => block.type === "text" && String(block.text || "").trim());
       const hasVisibleThinking = blocks.some((block: any) => block.type === "thinking" && String(block.thinking || "").trim());
       const hasToolCall = blocks.some((block: any) => block.type === "toolCall");

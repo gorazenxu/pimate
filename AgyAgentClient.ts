@@ -3,6 +3,7 @@ import { StringDecoder } from "string_decoder";
 import { EventEmitter } from "events";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import type {
   RpcResponse,
   RpcEvent,
@@ -100,11 +101,17 @@ export class AgyAgentClient extends EventEmitter {
   private availableTools: string[] = [];
 
   private lastAssistantText = "";
+  private lastAssistantThinking = "";
   private isTurnStreaming = false;
   private inputTokens = 0;
   private outputTokens = 0;
   private thinkingTokens = 0;
   private totalTokens = 0;
+
+  private historyMessages: Array<{
+    role: "user" | "assistant";
+    content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
+  }> = [];
 
   private initResolve: ((value?: unknown) => void) | null = null;
   private initReject: ((reason?: unknown) => void) | null = null;
@@ -123,6 +130,60 @@ export class AgyAgentClient extends EventEmitter {
 
   isRunning(): boolean {
     return this.process !== null && !this.process.killed;
+  }
+
+  private loadTranscriptHistory(): Array<{
+    role: "user" | "assistant";
+    content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
+  }> {
+    if (!this.conversationId) return [];
+    try {
+      const home = process.env.HOME || os.homedir();
+      const transcriptPath = path.join(
+        home,
+        ".gemini",
+        "antigravity-cli",
+        "brain",
+        this.conversationId,
+        ".system_generated",
+        "logs",
+        "transcript.jsonl"
+      );
+      if (!fs.existsSync(transcriptPath)) return [];
+      const raw = fs.readFileSync(transcriptPath, "utf-8");
+      const lines = raw.split("\n").filter(Boolean);
+      const messages: Array<{
+        role: "user" | "assistant";
+        content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
+      }> = [];
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type === "USER_INPUT" && entry.content) {
+            let text = String(entry.content);
+            const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+            if (reqMatch) text = reqMatch[1].trim();
+            messages.push({
+              role: "user",
+              content: [{ type: "text", text }],
+            });
+          } else if (entry.type === "PLANNER_RESPONSE" && entry.content) {
+            const blocks: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }> = [];
+            if (entry.thinking) {
+              blocks.push({ type: "thinking", thinking: String(entry.thinking) });
+            }
+            blocks.push({ type: "text", text: String(entry.content) });
+            messages.push({
+              role: "assistant",
+              content: blocks,
+            });
+          }
+        } catch {}
+      }
+      return messages;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -375,6 +436,7 @@ export class AgyAgentClient extends EventEmitter {
       // Model assistant streaming
       if (step.step_type === "agent_response") {
         if (step.thinking_delta) {
+          this.lastAssistantThinking += step.thinking_delta;
           this.emit("event", {
             type: "message_update",
             assistantMessageEvent: {
@@ -411,6 +473,16 @@ export class AgyAgentClient extends EventEmitter {
 
       if (result?.status === "SUCCESS") {
         const responseText = result.response || this.lastAssistantText;
+        const blocks: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }> = [];
+        if (this.lastAssistantThinking) {
+          blocks.push({ type: "thinking", thinking: this.lastAssistantThinking });
+        }
+        blocks.push({ type: "text", text: responseText });
+        this.historyMessages.push({
+          role: "assistant",
+          content: blocks,
+        });
+
         this.emit("event", {
           type: "message_update",
           assistantMessageEvent: {
@@ -421,7 +493,7 @@ export class AgyAgentClient extends EventEmitter {
           type: "message_end",
           message: {
             role: "assistant",
-            content: responseText,
+            content: blocks,
           },
         });
         this.emit("event", { type: "turn_end" });
@@ -479,7 +551,13 @@ export class AgyAgentClient extends EventEmitter {
     }
 
     this.lastAssistantText = "";
+    this.lastAssistantThinking = "";
     this.isTurnStreaming = true;
+
+    this.historyMessages.push({
+      role: "user",
+      content: [{ type: "text", text: message }],
+    });
 
     // Emit initial stream lifecycle events for UI
     this.emit("event", { type: "turn_start" });
@@ -661,11 +739,14 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async getMessages(): Promise<RpcResponse> {
+    if (this.historyMessages.length === 0) {
+      this.historyMessages = this.loadTranscriptHistory();
+    }
     return {
       type: "response",
       command: "get_messages",
       success: true,
-      data: { messages: [] },
+      data: { messages: this.historyMessages },
     };
   }
 
@@ -764,11 +845,27 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   async getLastAssistantText(): Promise<RpcResponse> {
+    let text = this.lastAssistantText;
+    if (!text) {
+      if (this.historyMessages.length === 0) {
+        this.historyMessages = this.loadTranscriptHistory();
+      }
+      for (let i = this.historyMessages.length - 1; i >= 0; i--) {
+        const m = this.historyMessages[i];
+        if (m.role === "assistant") {
+          const textBlock = m.content.find((b) => b.type === "text");
+          if (textBlock?.text) {
+            text = textBlock.text;
+            break;
+          }
+        }
+      }
+    }
     return {
       type: "response",
       command: "get_last_assistant_text",
       success: true,
-      data: this.lastAssistantText,
+      data: text,
     };
   }
 
