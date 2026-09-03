@@ -1384,8 +1384,12 @@ export class PiAgentView extends ItemView {
       tab.modelId &&
       tab === this.activeTab
     ) {
-      this.plugin.settings.provider = tab.modelProvider;
-      this.plugin.settings.modelId = tab.modelId;
+      if (tab.engine === "antigravity") {
+        this.plugin.settings.agyModel = tab.modelId;
+      } else {
+        this.plugin.settings.provider = tab.modelProvider;
+        this.plugin.settings.modelId = tab.modelId;
+      }
       settingsChanged = true;
     }
     if (
@@ -1393,7 +1397,11 @@ export class PiAgentView extends ItemView {
       tab.thinkingLevel !== undefined &&
       tab === this.activeTab
     ) {
-      this.plugin.settings.thinkingLevel = tab.thinkingLevel;
+      if (tab.engine === "antigravity") {
+        this.plugin.settings.agyEffort = tab.thinkingLevel as any;
+      } else {
+        this.plugin.settings.thinkingLevel = tab.thinkingLevel;
+      }
       settingsChanged = true;
     }
 
