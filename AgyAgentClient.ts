@@ -14,6 +14,7 @@ import type {
   ForkMessagesResult,
   SessionEntriesResult,
 } from "./PiAgentClient";
+import { calculateAgyCost } from "./AgyPricing";
 import { AgyUsageStore } from "./AgyUsageStore";
 
 export interface AgyAgentClientOptions {
@@ -140,6 +141,7 @@ export class AgyAgentClient extends EventEmitter {
   private totalTokens = 0;
   private usageKnown = false;
   private usageObservedAt = 0;
+  private usageModelId: string | null = null;
   private usageLoadPromise: Promise<void> = Promise.resolve();
   private usageStateRevision = 0;
 
@@ -348,6 +350,7 @@ export class AgyAgentClient extends EventEmitter {
     this.totalTokens = 0;
     this.usageKnown = false;
     this.usageObservedAt = 0;
+    this.usageModelId = null;
   }
 
   private async restorePersistedUsage(conversationId: string | null): Promise<void> {
@@ -368,6 +371,7 @@ export class AgyAgentClient extends EventEmitter {
       this.totalTokens = snapshot.cumulative.total;
       this.usageKnown = true;
       this.usageObservedAt = snapshot.observedAt;
+      this.usageModelId = snapshot.model || null;
       this.usageStateRevision++;
     } catch {
       // Usage history is optional and must never prevent a conversation from
@@ -886,6 +890,7 @@ export class AgyAgentClient extends EventEmitter {
       this.usageStateRevision++;
       this.usageKnown = true;
       this.usageObservedAt = Date.now();
+      this.usageModelId = this.currentModelId;
     }
   }
 
@@ -1136,6 +1141,15 @@ export class AgyAgentClient extends EventEmitter {
   async getSessionStats(): Promise<RpcResponse> {
     await this.usageLoadPromise;
     this.ensureHistoryLoaded();
+    const cost = this.usageKnown
+      ? calculateAgyCost(this.usageModelId || this.currentModelId, {
+        input: this.inputTokens,
+        output: this.outputTokens,
+        thinking: this.thinkingTokens,
+        cacheRead: this.cacheReadTokens,
+        total: this.totalTokens,
+      }, this.usageObservedAt || Date.now())
+      : null;
     return {
       type: "response",
       command: "get_session_stats",
@@ -1149,8 +1163,9 @@ export class AgyAgentClient extends EventEmitter {
           thinking: this.thinkingTokens,
           cacheRead: this.cacheReadTokens,
         },
-        cost: 0,
-        costKnown: false,
+        cost: cost ?? 0,
+        costKnown: cost !== null,
+        costEstimated: cost !== null,
         contextUsage: undefined,
         totalTokens: this.totalTokens,
         inputTokens: this.inputTokens,

@@ -38,6 +38,10 @@ import {
 } from "./PiAgentClient";
 import { AgyAgentClient } from "./AgyAgentClient";
 import {
+  AGY_GEMINI_PRICING_SOURCE,
+  calculateAgyCost,
+} from "./AgyPricing";
+import {
   AgyUsageStore,
   getAgyUsageStorePath,
   type AgyUsageSnapshot,
@@ -4181,7 +4185,7 @@ export class PiAgentView extends ItemView {
             : "Tokens: unavailable until AGY completes a turn",
           data.costKnown === false
             ? "Cost: unavailable"
-            : `Cost: $${(data.cost || 0).toFixed(4)}`,
+            : `${data.costEstimated ? "Estimated cost" : "Cost"}: ${data.costEstimated ? "~" : ""}$${(data.cost || 0).toFixed(4)}`,
         ];
         if (data.contextUsage?.percent != null) {
           info.push(
@@ -8371,6 +8375,7 @@ interface UsageTotals {
   totalTokens: number;
   cost: number;
   costKnownMessages: number;
+  estimatedCostMessages: number;
   unknownCostMessages: number;
   messageCount: number;
 }
@@ -8661,6 +8666,7 @@ function aggregateUsage(
     totalTokens: 0,
     cost: 0,
     costKnownMessages: 0,
+    estimatedCostMessages: 0,
     unknownCostMessages: 0,
     messageCount: 0,
   };
@@ -8840,6 +8846,7 @@ async function scanAgyUsageRange(
     totalTokens: 0,
     cost: 0,
     costKnownMessages: 0,
+    estimatedCostMessages: 0,
     unknownCostMessages: 0,
     messageCount: 0,
   };
@@ -8856,6 +8863,7 @@ async function scanAgyUsageRange(
 
     const provider = "Antigravity";
     const model = snapshot.model || "unknown";
+    const cost = calculateAgyCost(model, delta, snapshot.observedAt);
     const key = `${provider}::${model}`;
     let row = byModel.get(key);
     if (!row) {
@@ -8871,7 +8879,7 @@ async function scanAgyUsageRange(
         cacheTotal: 0,
         totalTokens: 0,
         cost: 0,
-        costKnown: false,
+        costKnown: cost !== null,
         hitRate: null,
         firstUsed: null,
         lastUsed: null,
@@ -8885,6 +8893,8 @@ async function scanAgyUsageRange(
     row.cacheRead += delta.cacheRead;
     row.cacheTotal += delta.cacheRead;
     row.totalTokens += delta.total;
+    row.cost += cost ?? 0;
+    row.costKnown = row.costKnown && cost !== null;
     if (row.firstUsed == null || snapshot.observedAt < row.firstUsed) row.firstUsed = snapshot.observedAt;
     if (row.lastUsed == null || snapshot.observedAt > row.lastUsed) row.lastUsed = snapshot.observedAt;
 
@@ -8894,7 +8904,13 @@ async function scanAgyUsageRange(
     totals.cacheRead += delta.cacheRead;
     totals.cacheTotal += delta.cacheRead;
     totals.totalTokens += delta.total;
-    totals.unknownCostMessages += 1;
+    if (cost === null) {
+      totals.unknownCostMessages += 1;
+    } else {
+      totals.cost += cost;
+      totals.costKnownMessages += 1;
+      totals.estimatedCostMessages += 1;
+    }
     totals.messageCount += 1;
     sessions.add(snapshot.conversationId);
   }
@@ -8920,6 +8936,7 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     totalTokens: 0,
     cost: 0,
     costKnownMessages: 0,
+    estimatedCostMessages: 0,
     unknownCostMessages: 0,
     messageCount: 0,
   };
@@ -8933,6 +8950,7 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     totals.totalTokens += result.totals.totalTokens;
     totals.cost += result.totals.cost;
     totals.costKnownMessages += result.totals.costKnownMessages;
+    totals.estimatedCostMessages += result.totals.estimatedCostMessages;
     totals.unknownCostMessages += result.totals.unknownCostMessages;
     totals.messageCount += result.totals.messageCount;
 
@@ -9092,7 +9110,10 @@ class UsageStatsModal extends Modal {
         ? "点击列标题排序 · 数据源：Pi 会话日志 + AGY 用量日志"
         : "Click a column to sort · Data source: Pi session logs + AGY usage journal",
     });
-    source.setAttribute("title", `${usageCachePath()}\n${getAgyUsageStorePath()}`);
+    source.setAttribute(
+      "title",
+      `${usageCachePath()}\n${getAgyUsageStorePath()}\n${AGY_GEMINI_PRICING_SOURCE}`
+    );
     footer.createSpan({ text: "Esc", cls: "pi-agent-usage-foot-hint" });
     this.scan();
   }
@@ -9163,10 +9184,15 @@ class UsageStatsModal extends Modal {
     const isZh = this.lang === "zh";
     const t = this.data.totals;
     const hr = computeHitRate(t.input, t.cacheRead);
+    const estimatedCost = t.estimatedCostMessages > 0;
     const costSub = t.unknownCostMessages > 0
       ? (t.costKnownMessages > 0
-        ? (isZh ? "AGY 费用未提供" : "AGY cost unavailable")
+        ? (estimatedCost
+          ? (isZh ? "部分按 Gemini API 官方价估算；AGY 部分未知" : "Partly estimated at Gemini API list price; some AGY costs unavailable")
+          : (isZh ? "AGY 费用未提供" : "AGY cost unavailable"))
         : (isZh ? "AGY 未提供费用" : "AGY does not provide cost"))
+      : estimatedCost
+        ? (isZh ? "按 Gemini API Standard 官方价估算" : "Estimated at Gemini API Standard list price")
       : `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`;
     const cards = [
       { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
@@ -9181,7 +9207,7 @@ class UsageStatsModal extends Modal {
       },
       {
         label: isZh ? "费用" : "Cost",
-        value: t.costKnownMessages > 0 ? fmtCost(t.cost) : "—",
+        value: t.costKnownMessages > 0 ? `${estimatedCost ? "~" : ""}${fmtCost(t.cost)}` : "—",
         sub: costSub,
       },
     ];
@@ -9290,7 +9316,7 @@ class UsageStatsModal extends Modal {
         [fmtNum(m.cacheWrite), "right"],
         [fmtNum(m.totalTokens), "right"],
         [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
-        [m.costKnown ? fmtCost(m.cost) : "—", "right"],
+        [m.costKnown ? `${m.provider === "Antigravity" ? "~" : ""}${fmtCost(m.cost)}` : "—", "right"],
       ];
       for (const [val, align, color] of cells) {
         const td = tr.createEl("td", { text: val });
