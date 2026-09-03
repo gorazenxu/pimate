@@ -2913,3 +2913,92 @@ summary.pi-agent-history-group-title:hover {
   padding: 4px 10px;
   white-space: nowrap;
 }
+
+/* ─── Antigravity CLI Settings UX ─────────────────────────── */
+.agy-status-card {
+  padding: 14px 16px;
+  margin: 12px 0 16px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  transition: all 0.2s ease;
+}
+
+.agy-status-card.is-authenticated {
+  border-color: rgba(var(--color-green-rgb, 46, 160, 67), 0.4);
+  background: rgba(var(--color-green-rgb, 46, 160, 67), 0.08);
+}
+
+.agy-status-card.is-unauthenticated {
+  border-color: rgba(var(--color-yellow-rgb, 210, 153, 34), 0.4);
+  background: rgba(var(--color-yellow-rgb, 210, 153, 34), 0.08);
+}
+
+.agy-status-card.is-not-installed {
+  border-color: rgba(var(--color-red-rgb, 248, 81, 73), 0.4);
+  background: rgba(var(--color-red-rgb, 248, 81, 73), 0.08);
+}
+
+.agy-status-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.agy-status-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-normal);
+}
+
+.agy-status-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.agy-status-card-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ─── Footer Engine Selector & Badge ───────────────────────── */
+.pi-agent-engine-selector {
+  display: flex;
+  align-items: center;
+}
+
+.pi-agent-engine-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  transition: all 0.15s ease;
+}
+
+.pi-agent-engine-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-engine-label.is-antigravity {
+  color: #4285f4;
+}
+
+.pi-agent-engine-label.is-pi {
+  color: var(--pi-brand, #8a2be2);
+}
+

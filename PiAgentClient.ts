@@ -299,6 +299,7 @@ export interface ReloadExtensionsResult {
 
 
 export class PiAgentClient extends EventEmitter {
+  readonly engine: "pi" = "pi";
   private process: ChildProcess | null = null;
   private buffer = "";
   private decoder = new StringDecoder("utf8");

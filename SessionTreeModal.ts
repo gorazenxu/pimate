@@ -1,13 +1,14 @@
 import { App, Modal, Notice, setIcon } from "obsidian";
-import type { ForkMessage, PiAgentClient } from "./PiAgentClient";
+import type { ForkMessage } from "./PiAgentClient";
+import type { AgentClient } from "./PiAgentView";
 
 export class SessionTreeModal extends Modal {
-  private client: PiAgentClient;
+  private client: AgentClient;
   private onSelectForkNode: (node: ForkMessage) => Promise<boolean>;
 
   constructor(
     app: App,
-    client: PiAgentClient,
+    client: AgentClient,
     onSelectForkNode: (node: ForkMessage) => Promise<boolean>
   ) {
     super(app);

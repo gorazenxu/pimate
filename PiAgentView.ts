@@ -36,6 +36,10 @@ import {
   type SessionEntry,
   type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
+import { AgyAgentClient } from "./AgyAgentClient";
+
+export type AgentClient = PiAgentClient | AgyAgentClient;
+
 import {
   isPiCommandFromPath,
   type PiCommandInfo,
@@ -106,7 +110,8 @@ interface ContextItem {
 interface ChatTab {
   id: string;
   label: string;
-  client: PiAgentClient | null;
+  engine?: "pi" | "antigravity";
+  client: AgentClient | null;
   isStreaming: boolean;
   queueCount?: number;
   steeringCount?: number;
@@ -178,7 +183,7 @@ interface MentionEntry {
 
 export class PiAgentView extends ItemView {
   plugin: PiAgentPlugin;
-  client: PiAgentClient | null = null;
+  client: AgentClient | null = null;
   private chatContainer: HTMLElement | null = null;
   private messageNavEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
@@ -196,6 +201,7 @@ export class PiAgentView extends ItemView {
   private speedEstimatedTokens = 0;
   private speedTimer: number | null = null;
   private speedHideTimer: number | null = null;
+  private footerEngineLabel: HTMLElement | null = null;
   private footerModelLabel: HTMLElement | null = null;
   private footerModelDropdown: HTMLElement | null = null;
   private effortSelector: HTMLElement | null = null;
@@ -276,8 +282,8 @@ export class PiAgentView extends ItemView {
   private commandQueryStart = -1;
   private availableCommands: PiCommandInfo[] = [...PIMATE_BUILTIN_COMMANDS];
   private commandLoadPromise: Promise<void> | null = null;
-  private commandLoadClient: PiAgentClient | null = null;
-  private commandCatalogClient: PiAgentClient | null = null;
+  private commandLoadClient: AgentClient | null = null;
+  private commandCatalogClient: AgentClient | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: PiAgentPlugin) {
     super(leaf);
@@ -716,6 +722,17 @@ export class PiAgentView extends ItemView {
     const footer = inputArea.createDiv("pi-agent-input-footer");
     const footerLeft = footer.createDiv("pi-agent-input-footer-left");
     
+    // 0. Engine Selector Container
+    const engineSelector = footerLeft.createDiv("pi-agent-engine-selector");
+    const footerEngineBtn = engineSelector.createDiv("pi-agent-engine-btn");
+    this.footerEngineLabel = footerEngineBtn.createSpan("pi-agent-engine-label");
+    this.updateEngineDisplay();
+
+    footerEngineBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.toggleEngineMenu(footerEngineBtn);
+    };
+
     // 1. Model Selector Container (Compat with Claudian)
     const modelSelector = footerLeft.createDiv("pi-agent-model-selector");
     const footerModelBtn = modelSelector.createDiv("pi-agent-model-btn");
@@ -855,17 +872,20 @@ export class PiAgentView extends ItemView {
 
     for (let i = 1; i <= count; i++) {
       const pTab = persisted[i - 1];
+      const defaultEngine = this.plugin.settings.defaultEngine || "antigravity";
+      const engine = pTab?.engine || defaultEngine;
       this.tabs.push({
         id: `tab-static-${i}`,
         label: String(i),
         client: null,
         isStreaming: false,
-        modelProvider: pTab?.modelProvider,
-        modelId: pTab?.modelId,
-        thinkingLevel: pTab?.thinkingLevel,
+        engine,
+        modelProvider: pTab?.modelProvider || (engine === "antigravity" ? "antigravity" : this.plugin.settings.provider),
+        modelId: pTab?.modelId || (engine === "antigravity" ? this.plugin.settings.agyModel : this.plugin.settings.modelId),
+        thinkingLevel: pTab?.thinkingLevel || (engine === "antigravity" ? this.plugin.settings.agyEffort : this.plugin.settings.thinkingLevel),
         sessionFile: pTab?.sessionFile,
         sessionId: pTab?.sessionId,
-        restored: !!pTab?.sessionFile,
+        restored: !!pTab?.sessionFile || !!pTab?.sessionId,
         requiresBranchHistoryRpc: false,
       });
     }
@@ -879,18 +899,16 @@ export class PiAgentView extends ItemView {
   }
 
   private async createAndSwitchTab(): Promise<void> {
+    const defaultEngine = this.plugin.settings.defaultEngine || "antigravity";
     const tab: ChatTab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
       client: null,
       isStreaming: false,
-      // New tabs always start from the global default provider/model/thinking
-      // (the same values the user sees in Plugin settings), so the tab
-      // doesn't accidentally inherit a stale value from the previous active
-      // tab after a provider switch.
-      modelProvider: this.plugin.settings.provider,
-      modelId: this.plugin.settings.modelId,
-      thinkingLevel: this.plugin.settings.thinkingLevel,
+      engine: defaultEngine,
+      modelProvider: defaultEngine === "antigravity" ? "antigravity" : this.plugin.settings.provider,
+      modelId: defaultEngine === "antigravity" ? this.plugin.settings.agyModel : this.plugin.settings.modelId,
+      thinkingLevel: defaultEngine === "antigravity" ? this.plugin.settings.agyEffort : this.plugin.settings.thinkingLevel,
       requiresBranchHistoryRpc: false,
     };
     this.saveActiveComposerState();
@@ -964,6 +982,8 @@ export class PiAgentView extends ItemView {
     const switchSeq = ++this.tabSwitchSeq;
     this.activeTabId = tab.id;
     this.client = tab.client;
+    this.availableModelsCache = null;
+    this.updateEngineDisplay();
     this.restoreComposerState(tab);
     this.forkMessagesByEntryId.clear();
     this.forkScopeVersion++;
@@ -1074,7 +1094,8 @@ export class PiAgentView extends ItemView {
     client.on("close", () => {
       tab.isStreaming = false;
       if (this.activeTabId === tab.id) {
-        this.setStatus("⚠️ Pi process disconnected", "warning");
+        const engineLabel = client.engine === "antigravity" ? "Antigravity CLI" : "Pi process";
+        this.setStatus(`⚠️ ${engineLabel} disconnected`, "warning");
         this.isStreaming = false;
         this.updateButtons();
       }
@@ -1082,7 +1103,9 @@ export class PiAgentView extends ItemView {
 
     try {
       await client.start();
-      if (tab.sessionFile) {
+      if (client.engine === "antigravity") {
+        tab.sessionId = (client as AgyAgentClient).getConversationId() || tab.sessionId;
+      } else if (tab.sessionFile) {
         const result = await client.switchSession(tab.sessionFile);
         if (!result.success || (result.data as any)?.cancelled) {
           const restoreError = result.error || `Failed to restore session: ${tab.label}`;
@@ -1097,8 +1120,9 @@ export class PiAgentView extends ItemView {
       }
     } catch (err) {
       if (this.activeTabId === tab.id) {
+        const engineLabel = client.engine === "antigravity" ? "Antigravity CLI" : "pi";
         this.setStatus(
-          `❌ Failed to start pi: ${(err as Error).message}`,
+          `❌ Failed to start ${engineLabel}: ${(err as Error).message}`,
           "error"
         );
       }
@@ -1110,11 +1134,26 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private createClient(tab?: ChatTab): PiAgentClient {
+  private createClient(tab?: ChatTab): AgentClient {
     const settings = this.plugin.settings;
     const adapter = this.app.vault.adapter;
     const vaultBasePath =
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : undefined;
+
+    const engine = tab?.engine || settings.defaultEngine || "antigravity";
+
+    if (engine === "antigravity") {
+      const modelId = tab?.modelId || settings.agyModel || "gemini-3.8-flash-high";
+      const effort = tab?.thinkingLevel || settings.agyEffort || "high";
+      return new AgyAgentClient({
+        agyPath: settings.agyPath,
+        modelId,
+        effort,
+        cwd: vaultBasePath,
+        conversationId: tab?.sessionId,
+        dangerouslySkipPermissions: true,
+      });
+    }
 
     const provider = tab?.modelProvider || settings.provider;
     const modelId = tab?.modelId || settings.modelId;
@@ -2000,9 +2039,18 @@ export class PiAgentView extends ItemView {
       const argsText = this.formatToolArgs(toolName, args);
       if (argsText) {
         const argsEl = header.createSpan({ text: argsText, cls: "pi-agent-tool-args" });
-        const path = (typeof args.path === "string" ? args.path : "") ||
-                     (typeof args.TargetFile === "string" ? args.TargetFile : "") ||
-                     (typeof args.target === "string" ? args.target : "");
+        let path = (typeof args.path === "string" ? args.path : "") ||
+                   (typeof args.AbsolutePath === "string" ? args.AbsolutePath : "") ||
+                   (typeof args.TargetFile === "string" ? args.TargetFile : "") ||
+                   (typeof args.DirectoryPath === "string" ? args.DirectoryPath : "") ||
+                   (typeof args.target === "string" ? args.target : "");
+
+        const adapter = this.app.vault.adapter;
+        const vaultBasePath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+        if (path && vaultBasePath && path.startsWith(vaultBasePath)) {
+          path = path.slice(vaultBasePath.length).replace(/^[/\\]+/, "");
+        }
+
         if (path) {
           argsEl.addClass("is-clickable");
           argsEl.setAttribute("title", `${path} (Click to open)`);
@@ -2015,9 +2063,9 @@ export class PiAgentView extends ItemView {
               });
             }
           };
-        } else if (toolName === "bash" && args.command) {
+        } else if (["bash", "run_command"].includes(toolName) && (args.command || args.CommandLine)) {
           argsEl.addClass("is-clickable");
-          const fullCmd = args.command as string;
+          const fullCmd = (args.command || args.CommandLine) as string;
           const isZh = this.plugin.settings.language === "zh";
           argsEl.setAttribute("title", `${fullCmd} (Click to copy)`);
           argsEl.onclick = (event) => {
@@ -2114,9 +2162,9 @@ export class PiAgentView extends ItemView {
         if (isError) {
           outputEl.createSpan({ text, cls: "pi-agent-tool-error" });
           outputEl.addClass("is-visible");
-        } else if (diffText && ["edit", "write"].includes(event.toolName as string)) {
+        } else if (diffText && ["edit", "write", "replace_file_content", "write_to_file"].includes(event.toolName as string)) {
           this.renderDiffOutput(outputEl, diffText);
-        } else if (text && ["bash", "grep", "find", "ls"].includes(event.toolName as string)) {
+        } else if (text && ["bash", "grep", "find", "ls", "run_command", "grep_search", "find_by_name", "list_dir"].includes(event.toolName as string)) {
           const displayText =
             text.length > 1600 ? text.slice(0, 1600) + "\n…" : text;
           const pre = outputEl.createEl("pre");
@@ -2572,7 +2620,7 @@ export class PiAgentView extends ItemView {
       userGoal?: string;
       images?: Array<{ type: string; data: string; mimeType: string }>;
       tab?: ChatTab;
-      client?: PiAgentClient;
+      client?: AgentClient;
     } = {}
   ): Promise<boolean> {
     const tab = options.tab || this.activeTab;
@@ -2654,8 +2702,8 @@ export class PiAgentView extends ItemView {
    */
   private async restartClientAfterHardSteer(
     tab: ChatTab,
-    previousClient: PiAgentClient
-  ): Promise<PiAgentClient> {
+    previousClient: AgentClient
+  ): Promise<AgentClient> {
     return this.restartTabClient(tab, previousClient, {
       clearQueuedState: true,
       missingSessionError: "Pi did not provide the current session to resume",
@@ -2665,13 +2713,13 @@ export class PiAgentView extends ItemView {
 
   private async restartTabClient(
     tab: ChatTab,
-    previousClient: PiAgentClient,
+    previousClient: AgentClient,
     options: {
       clearQueuedState: boolean;
       missingSessionError: string;
       restartError: string;
     }
-  ): Promise<PiAgentClient> {
+  ): Promise<AgentClient> {
     const synchronized = await this.syncTabStateFromPi(tab);
     if (!synchronized) {
       throw new Error("Could not verify the current session before restarting Pi");
@@ -3748,16 +3796,23 @@ export class PiAgentView extends ItemView {
       return;
     }
 
-    const oneOff = new PiAgentClient({
-      piPath: settings.piPath,
-      provider,
-      modelId,
-      thinkingLevel: tab.thinkingLevel || settings.thinkingLevel,
-      apiKey: this.readProviderApiKey(provider) || settings.apiKey,
-      // noSession=true keeps the title-generation prompt out of the user's
-      // main session jsonl — the prompt never lands in chat history.
-      noSession: true,
-    });
+    const engine = tab.engine || settings.defaultEngine || "antigravity";
+    const oneOff: AgentClient = engine === "antigravity"
+      ? new AgyAgentClient({
+          agyPath: settings.agyPath,
+          modelId: tab.modelId || settings.agyModel || "gemini-3.8-flash-low",
+          effort: "low",
+        })
+      : new PiAgentClient({
+          piPath: settings.piPath,
+          provider,
+          modelId,
+          thinkingLevel: tab.thinkingLevel || settings.thinkingLevel,
+          apiKey: this.readProviderApiKey(provider) || settings.apiKey,
+          // noSession=true keeps the title-generation prompt out of the user's
+          // main session jsonl — the prompt never lands in chat history.
+          noSession: true,
+        });
 
     try {
       await oneOff.start();
@@ -3766,13 +3821,9 @@ export class PiAgentView extends ItemView {
       const cleaned = this.cleanTitleOutput(title);
       if (cleaned) await this.persistAutoSessionTitle(tab, cleaned);
     } catch (err) {
-      console.warn("[pimate] auto-title LLM failed", err);
+      console.warn("[pi-agent] auto title generation failed:", err);
     } finally {
-      try {
-        await oneOff.destroy();
-      } catch (destroyErr) {
-        console.warn("[pimate] one-off client destroy failed", destroyErr);
-      }
+      await oneOff.destroy().catch(() => undefined);
     }
   }
 
@@ -3788,7 +3839,7 @@ export class PiAgentView extends ItemView {
   }
 
   private async raceTitleFetch(
-    client: PiAgentClient,
+    client: AgentClient,
     prompt: string,
     timeoutMs: number
   ): Promise<string> {
@@ -5174,7 +5225,7 @@ export class PiAgentView extends ItemView {
    */
   private async readActiveBranchFromPi(
     expectedTab: ChatTab | null = this.activeTab,
-    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+    expectedClient: AgentClient | null = expectedTab?.client ?? this.client
   ): Promise<any[]> {
     const tab = expectedTab;
     const client = expectedClient;
@@ -5378,7 +5429,7 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private async runBashMode(message: string, targetClient?: PiAgentClient): Promise<void> {
+  private async runBashMode(message: string, targetClient?: AgentClient): Promise<void> {
     const client = targetClient || this.activeTab?.client || this.client;
     if (!client) return;
 
@@ -5876,7 +5927,7 @@ export class PiAgentView extends ItemView {
 
   private async refreshStateDisplay(
     expectedTab: ChatTab | null = this.activeTab,
-    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+    expectedClient: AgentClient | null = expectedTab?.client ?? this.client
   ): Promise<void> {
     const tab = expectedTab;
     const client = expectedClient;
@@ -5901,7 +5952,7 @@ export class PiAgentView extends ItemView {
 
   private async refreshContextUsageDisplay(
     expectedTab: ChatTab | null = this.activeTab,
-    expectedClient: PiAgentClient | null = expectedTab?.client ?? this.client
+    expectedClient: AgentClient | null = expectedTab?.client ?? this.client
   ): Promise<void> {
     const tab = expectedTab;
     const client = expectedClient;
@@ -5929,7 +5980,7 @@ export class PiAgentView extends ItemView {
 
   private isCurrentTabClient(
     tab: ChatTab | null,
-    client: PiAgentClient | null
+    client: AgentClient | null
   ): boolean {
     return !!tab && !!client && this.activeTab === tab && tab.client === client && this.client === client;
   }
@@ -5976,6 +6027,7 @@ export class PiAgentView extends ItemView {
       label: tab.label,
       sessionFile: tab.sessionFile,
       sessionId: tab.sessionId,
+      engine: tab.engine,
       modelProvider: tab.modelProvider,
       modelId: tab.modelId,
       thinkingLevel: tab.thinkingLevel,
@@ -5989,19 +6041,113 @@ export class PiAgentView extends ItemView {
     for (let i = 0; i < this.tabs.length && i < persisted.length; i++) {
       const saved = persisted[i];
       if (!saved) continue;
+      if (saved.engine) this.tabs[i].engine = saved.engine;
       if (saved.modelProvider) this.tabs[i].modelProvider = saved.modelProvider;
       if (saved.modelId) this.tabs[i].modelId = saved.modelId;
       if (typeof saved.thinkingLevel === "string") this.tabs[i].thinkingLevel = saved.thinkingLevel;
     }
   }
 
+  private updateEngineDisplay(): void {
+    if (!this.footerEngineLabel) return;
+    const isZh = this.plugin.settings.language === "zh";
+    const engine = this.activeTab?.engine || this.plugin.settings.defaultEngine || "antigravity";
+    if (engine === "antigravity") {
+      this.footerEngineLabel.setText("✦ Antigravity");
+      this.footerEngineLabel.setAttribute(
+        "title",
+        isZh ? "当前引擎：Antigravity CLI (点击切换)" : "Engine: Antigravity CLI (Click to switch)"
+      );
+      this.footerEngineLabel.addClass("is-antigravity");
+      this.footerEngineLabel.removeClass("is-pi");
+    } else {
+      this.footerEngineLabel.setText("π Pi Agent");
+      this.footerEngineLabel.setAttribute(
+        "title",
+        isZh ? "当前引擎：Pi Coding Agent (点击切换)" : "Engine: Pi Coding Agent (Click to switch)"
+      );
+      this.footerEngineLabel.addClass("is-pi");
+      this.footerEngineLabel.removeClass("is-antigravity");
+    }
+  }
+
+  private toggleEngineMenu(anchorEl: HTMLElement): void {
+    const isZh = this.plugin.settings.language === "zh";
+    const tab = this.activeTab;
+    if (!tab) return;
+    const currentEngine = tab.engine || this.plugin.settings.defaultEngine || "antigravity";
+
+    const menu = new Menu();
+
+    menu.addItem((item) => {
+      item.setTitle(isZh ? "✦ Antigravity CLI (Google 免密生态)" : "✦ Antigravity CLI (Google OAuth)")
+        .setChecked(currentEngine === "antigravity")
+        .onClick(async () => {
+          if (currentEngine === "antigravity") return;
+          await this.switchTabEngine(tab, "antigravity");
+        });
+    });
+
+    menu.addItem((item) => {
+      item.setTitle(isZh ? "π Pi Coding Agent (多 Provider/Key)" : "π Pi Coding Agent (Providers/Key)")
+        .setChecked(currentEngine === "pi")
+        .onClick(async () => {
+          if (currentEngine === "pi") return;
+          await this.switchTabEngine(tab, "pi");
+        });
+    });
+
+    const rect = anchorEl.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.top - 10 });
+  }
+
+  private async switchTabEngine(tab: ChatTab, newEngine: "pi" | "antigravity"): Promise<void> {
+    const isZh = this.plugin.settings.language === "zh";
+    if (tab.isStreaming) {
+      new Notice(isZh ? "当前会话正在生成中，请先等待或停止" : "Cannot switch engine while generating");
+      return;
+    }
+
+    tab.engine = newEngine;
+    this.availableModelsCache = null;
+
+    if (tab.client) {
+      await tab.client.destroy().catch(() => undefined);
+      tab.client = null;
+    }
+
+    if (newEngine === "antigravity") {
+      tab.modelProvider = "antigravity";
+      tab.modelId = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
+      tab.thinkingLevel = this.plugin.settings.agyEffort || "high";
+    } else {
+      tab.modelProvider = this.plugin.settings.provider;
+      tab.modelId = this.plugin.settings.modelId;
+      tab.thinkingLevel = this.plugin.settings.thinkingLevel;
+    }
+
+    await this.persistSessionTabs();
+    this.updateEngineDisplay();
+    this.updateModelDisplay(tab.modelProvider || "", tab.modelId || "");
+    if (this.footerEffortCurrent) {
+      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(tab.thinkingLevel));
+    }
+
+    await this.ensureTabClient(tab);
+    if (this.activeTab === tab) {
+      this.client = tab.client;
+    }
+    new Notice(isZh ? `已切换引擎为 ${newEngine === "antigravity" ? "✦ Antigravity CLI" : "π Pi Agent"}` : `Switched to ${newEngine === "antigravity" ? "Antigravity CLI" : "Pi Agent"}`);
+  }
+
   private updateModelDisplay(provider: string, modelId: string): void {
     if (!this.footerModelLabel) return;
     const shortName = modelId
       .replace(/^claude-/, "")
+      .replace(/^gemini-/, "Gemini ")
       .replace(/^gpt-/, "GPT-")
       .replace(/^deepseek-/, "DeepSeek ")
-      .slice(0, 18);
+      .slice(0, 22);
     this.footerModelLabel.setText(shortName || provider);
     this.footerModelLabel.setAttribute("title", `${provider}/${modelId}`);
   }
@@ -6082,7 +6228,7 @@ export class PiAgentView extends ItemView {
     options: {
       forceRpc?: boolean;
       expectedTab?: ChatTab | null;
-      expectedClient?: PiAgentClient | null;
+      expectedClient?: AgentClient | null;
       expectedSwitchSeq?: number;
     } = {}
   ): Promise<void> {
@@ -6390,29 +6536,41 @@ export class PiAgentView extends ItemView {
     args: Record<string, unknown>
   ): string {
     switch (toolName) {
-      case "read": {
-        const path = (args.path as string) || (args.TargetFile as string) || (args.target as string) || "";
+      case "read":
+      case "view_file":
+      case "read_url_content":
+      case "read_browser_page": {
+        const path = (args.path as string) || (args.AbsolutePath as string) || (args.Url as string) || (args.TargetFile as string) || (args.target as string) || "";
         const base = this.getBasename(path);
         return `${base}${args.offset ? ` (offset: ${args.offset})` : ""}`;
       }
-      case "bash": {
-        const cmd = (args.command as string) || "";
+      case "bash":
+      case "run_command": {
+        const cmd = (args.command as string) || (args.CommandLine as string) || "";
         return cmd.length > 35 ? cmd.slice(0, 35) + "..." : cmd;
       }
-      case "write": {
+      case "write":
+      case "write_to_file": {
         const path = (args.path as string) || (args.TargetFile as string) || (args.target as string) || "";
         return this.getBasename(path);
       }
-      case "edit": {
+      case "edit":
+      case "replace_file_content":
+      case "multi_replace_file_content": {
         const path = (args.path as string) || (args.TargetFile as string) || (args.target as string) || "";
         return this.getBasename(path);
       }
       case "grep":
-        return `${args.pattern || ""}`;
+      case "grep_search":
+        return `${args.pattern || args.Query || ""}`;
       case "find":
-        return `${args.pattern || ""}`;
-      case "ls": {
-        return this.getBasename((args.path as string) || ".");
+      case "find_by_name":
+        return `${args.pattern || args.Pattern || ""}`;
+      case "search_web":
+        return `${args.query || ""}`;
+      case "ls":
+      case "list_dir": {
+        return this.getBasename((args.path as string) || (args.DirectoryPath as string) || ".");
       }
       default:
         return JSON.stringify(args).slice(0, 100);
@@ -6422,17 +6580,28 @@ export class PiAgentView extends ItemView {
   private getToolIcon(toolName: string): string {
     switch (toolName) {
       case "read":
+      case "view_file":
+      case "read_url_content":
+      case "read_browser_page":
         return "◇";
       case "write":
+      case "write_to_file":
         return "⊞";
       case "edit":
+      case "replace_file_content":
+      case "multi_replace_file_content":
         return "✎";
       case "bash":
+      case "run_command":
         return "⌘";
       case "grep":
+      case "grep_search":
       case "find":
+      case "find_by_name":
+      case "search_web":
         return "⌕";
       case "ls":
+      case "list_dir":
         return "▣";
       default:
         return "✧";
@@ -6925,7 +7094,7 @@ export class PiAgentView extends ItemView {
     });
   }
 
-  private async loadAvailableCommands(expectedClient: PiAgentClient | null = this.client): Promise<void> {
+  private async loadAvailableCommands(expectedClient: AgentClient | null = this.client): Promise<void> {
     const client = expectedClient;
     if (!client) return;
 

@@ -5,6 +5,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { exec } from "child_process";
+import { AgyAgentClient } from "./AgyAgentClient";
 
 // OpenAI Codex (ChatGPT) device-code flow constants, reverse-engineered from
 // @earendil-works/pi-ai/dist/utils/oauth/openai-codex.js
@@ -58,12 +59,17 @@ export interface PersistedSessionTab {
   label: string;
   sessionFile?: string;
   sessionId?: string;
+  engine?: "pi" | "antigravity";
   modelProvider?: string;
   modelId?: string;
   thinkingLevel?: string;
 }
 
 export interface PiAgentSettings {
+  defaultEngine: "pi" | "antigravity";
+  agyPath: string;
+  agyModel: string;
+  agyEffort: "low" | "medium" | "high";
   piPath: string;
   provider: string;
   modelId: string;
@@ -83,11 +89,13 @@ export interface PiAgentSettings {
   maxTabs: number;
   streamingRenderMode: "auto" | "pretty" | "fast";
   sessionTitles: Record<string, string>;
-  // (Hotkey for file-explorer selection was removed: it relied on internal
-  // Obsidian APIs. Multi-select is now triggered via right-click only.)
 }
 
 export const DEFAULT_SETTINGS: PiAgentSettings = {
+  defaultEngine: "antigravity",
+  agyPath: "agy",
+  agyModel: "gemini-3.8-flash-high",
+  agyEffort: "high",
   piPath: "pi",
   provider: "",
   modelId: "",
@@ -107,7 +115,6 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   maxTabs: 3,
   streamingRenderMode: "pretty",
   sessionTitles: {},
-  // (addExplorerSelectionHotkey removed — right-click now handles multi-select)
 };
 
 export interface DiscoveredSkill {
@@ -461,14 +468,15 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     const isZh = this.plugin.settings.language === "zh";
 
+    // ─── 一、通用与引擎首选项 (General & Engine Preference) ─────────────
     new Setting(containerEl)
-      .setName(isZh ? "Pimate 设置" : "Pimate Settings")
+      .setName(isZh ? "一、通用与引擎首选项 (General & Engine)" : "1. General & Engine Preference")
       .setHeading();
 
     // Language selector
     new Setting(containerEl)
-      .setName(isZh ? "语言 (Language)" : "Language (语言)")
-      .setDesc(isZh ? "选择设置界面的显示语言。" : "Choose the display language for the settings interface.")
+      .setName(isZh ? "界面语言 (Language)" : "Language (语言)")
+      .setDesc(isZh ? "选择设置界面与交互的显示语言。" : "Choose the display language for the settings interface.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("zh", "简体中文 (Chinese)")
@@ -481,12 +489,191 @@ export class PiAgentSettingTab extends PluginSettingTab {
           })
       );
 
-    // File-explorer multi-select is now handled via right-click context menu
-    // (right-click on file / folder → "Send to Pimate" or "Add N items to Pimate context"),
-    // plus the More menu → "附加文件管理器选中项" / "Attach file explorer selection".
-    // Multi-select reading uses Obsidian's internal selection/fileItems on a
-    // best-effort basis (no menu interception), so it is more robust than
-    // patching Obsidian's built-in multi-select context menu.
+    // Default Agent engine selector
+    new Setting(containerEl)
+      .setName(isZh ? "默认 Agent 引擎 (Default Engine)" : "Default Agent Engine")
+      .setDesc(
+        isZh
+          ? "选择新建会话时的默认 Agent 引擎。每个 Tab 亦可在底部栏独立切换。"
+          : "Choose the default Agent engine for new chat tabs. Can also be switched per-tab."
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("antigravity", isZh ? "✦ Antigravity CLI (Google 账号免密)" : "✦ Antigravity CLI (Google OAuth)")
+          .addOption("pi", isZh ? "π Pi Coding Agent (自定义 Provider/Key)" : "π Pi Coding Agent (Custom Provider/Key)")
+          .setValue(this.plugin.settings.defaultEngine || "antigravity")
+          .onChange(async (value) => {
+            this.plugin.settings.defaultEngine = value as "pi" | "antigravity";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // ─── 二、✦ Antigravity CLI 配置 (Google 账号免密生态) ──────────────
+    new Setting(containerEl)
+      .setName(isZh ? "二、✦ Antigravity CLI 配置 (Google 账号免密生态)" : "2. ✦ Antigravity CLI Configuration")
+      .setDesc(
+        isZh
+          ? "借助系统终端已登录的 Google 账号，零配置直接调用 Gemini、Claude 等模型与原生工具链。"
+          : "Leverages system Google OAuth credentials for zero-config Gemini and Claude models with native tools."
+      )
+      .setHeading();
+
+    // 动态探测状态卡片
+    const agyStatusCard = containerEl.createDiv("agy-status-card");
+    const statusHeader = agyStatusCard.createDiv("agy-status-card-header");
+    const statusTitle = statusHeader.createDiv("agy-status-card-title");
+    statusTitle.setText(isZh ? "正在探测 Antigravity 运行与授权状态..." : "Checking Antigravity status...");
+    const statusDesc = agyStatusCard.createDiv("agy-status-card-desc");
+    statusDesc.setText(isZh ? "正在检查系统 PATH 中的 agy 命令及 Google 账号授权态..." : "Checking agy in PATH and Google account credentials...");
+    const statusActions = agyStatusCard.createDiv("agy-status-card-actions");
+    statusActions.style.display = "none";
+
+    // 异步探测
+    AgyAgentClient.checkAuthStatus(this.plugin.settings.agyPath).then((status) => {
+      statusActions.empty();
+      if (!status.installed) {
+        agyStatusCard.className = "agy-status-card is-not-installed";
+        statusTitle.setText(isZh ? "🔴 未检测到 agy 命令行工具" : "🔴 agy CLI Not Found");
+        statusDesc.setText(
+          isZh
+            ? "在系统 PATH 或默认路径 (~/.local/bin/agy) 中未找到可执行文件。请确认是否已安装 Antigravity CLI，或在下方填入绝对路径。"
+            : "The agy binary was not found in PATH or ~/.local/bin/agy. Please install Antigravity CLI or specify its full path below."
+        );
+      } else if (status.authenticated) {
+        agyStatusCard.className = "agy-status-card is-authenticated";
+        statusTitle.setText(
+          isZh
+            ? `🟢 Google 账号已授权 (Authenticated) · agy v${status.version || "1.x"}`
+            : `🟢 Google Account Authenticated · agy v${status.version || "1.x"}`
+        );
+        statusDesc.setText(
+          isZh
+            ? "已成功检测到系统的 Google OAuth 授权态。Pimate 将直接复用此凭据，无需填写任何 API Key 即可使用！"
+            : "Google OAuth credentials detected. Pimate will seamlessly reuse this authorization with zero API key configuration."
+        );
+      } else {
+        agyStatusCard.className = "agy-status-card is-unauthenticated";
+        statusTitle.setText(
+          isZh
+            ? `🟡 未登录 Google 账号 · agy v${status.version || "1.x"}`
+            : `🟡 Not Authenticated · agy v${status.version || "1.x"}`
+        );
+        statusDesc.setText(
+          isZh
+            ? "已找到 agy 工具，但尚未完成 Google 账号授权。只需在系统终端执行一次 agy 并在浏览器完成登录即可。"
+            : "agy found, but Google account is not authenticated. Run `agy` in your terminal once to authorize via browser."
+        );
+        statusActions.style.display = "flex";
+        const copyBtn = statusActions.createEl("button", {
+          text: isZh ? "复制登录命令: agy" : "Copy Login Command: agy",
+          cls: "mod-cta",
+        });
+        copyBtn.onclick = () => {
+          void navigator.clipboard.writeText("agy").then(() => {
+            new Notice(isZh ? "已复制 'agy' 到剪贴板，请在系统终端执行登录" : "Copied 'agy' to clipboard. Run it in your terminal.");
+          });
+        };
+      }
+    }).catch(() => {
+      agyStatusCard.className = "agy-status-card is-not-installed";
+      statusTitle.setText(isZh ? "🔴 探测 Antigravity 状态失败" : "🔴 Failed to Probe Antigravity");
+      statusDesc.setText(isZh ? "请检查系统权限或在下方配置正确的可执行路径。" : "Please verify permissions or configure the executable path below.");
+    });
+
+    // agy path setting
+    new Setting(containerEl)
+      .setName(isZh ? "agy 可执行路径" : "agy Executable Path")
+      .setDesc(
+        isZh
+          ? "Antigravity CLI 命令路径。默认 'agy'（自动查找 PATH 及 ~/.local/bin/agy）。"
+          : "Path to agy command. Default is 'agy' (searches PATH and ~/.local/bin/agy)."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("agy")
+          .setValue(this.plugin.settings.agyPath || "agy")
+          .onChange(async (value) => {
+            this.plugin.settings.agyPath = value.trim() || "agy";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // agy default model setting
+    new Setting(containerEl)
+      .setName(isZh ? "默认 Antigravity 模型" : "Default Antigravity Model")
+      .setDesc(
+        isZh
+          ? "Antigravity 引擎的默认模型。推荐使用 Gemini 3.8 Flash (High) 或 Gemini 3.1 Pro (High)。"
+          : "Default model for Antigravity engine. Recommended: Gemini 3.8 Flash (High) or Gemini 3.1 Pro (High)."
+      )
+      .addDropdown((dropdown) => {
+        const currentVal = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
+        dropdown
+          .addOption("gemini-3.8-flash-high", "Gemini 3.8 Flash (High) (推荐)")
+          .addOption("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)")
+          .addOption("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)")
+          .addOption("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)")
+          .addOption("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)")
+          .addOption("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)")
+          .addOption("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)")
+          .addOption("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)");
+
+        const standardModels = [
+          "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+          "gemini-3.7-flash-high", "gemini-3.1-pro-high", "claude-sonnet-4-6",
+          "claude-opus-4-6-thinking", "gpt-oss-120b-medium"
+        ];
+        if (!standardModels.includes(currentVal) && currentVal) {
+          dropdown.addOption(currentVal, currentVal);
+        }
+
+        dropdown.setValue(currentVal).onChange(async (val) => {
+          this.plugin.settings.agyModel = val;
+          await this.plugin.saveSettings();
+        });
+
+        // 异步尝试用 agy models 动态刷新下拉列表
+        AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath).then((models) => {
+          if (models.length > 0) {
+            const selected = dropdown.getValue();
+            dropdown.selectEl.empty();
+            for (const m of models) {
+              dropdown.addOption(m.id, m.name ? `${m.name}` : m.id);
+            }
+            dropdown.setValue(selected);
+          }
+        }).catch(() => undefined);
+      });
+
+    // agy reasoning effort
+    new Setting(containerEl)
+      .setName(isZh ? "默认思考强度档位 (Reasoning Effort)" : "Default Reasoning Effort")
+      .setDesc(
+        isZh
+          ? "模型深度思考强度等级。对话底部栏亦可针对当前会话即时调整。"
+          : "Reasoning effort level for supporting models. Can also be adjusted in the chat footer."
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("high", isZh ? "High (深度思考 - 推荐)" : "High (Deep Thinking - Recommended)")
+          .addOption("medium", isZh ? "Medium (均衡)" : "Medium (Balanced)")
+          .addOption("low", isZh ? "Low (快速)" : "Low (Fast)")
+          .setValue(this.plugin.settings.agyEffort || "high")
+          .onChange(async (val) => {
+            this.plugin.settings.agyEffort = val as "low" | "medium" | "high";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // ─── 三、π Pi Coding Agent 配置 (保留现有完整能力) ──────────────────
+    new Setting(containerEl)
+      .setName(isZh ? "三、π Pi Coding Agent 配置 (保留现有完整能力)" : "3. π Pi Coding Agent Configuration")
+      .setDesc(
+        isZh
+          ? "配置 Pi 命令路径、自定义 Provider 凭据、models.json 与本地技能生态。"
+          : "Configure Pi executable path, custom provider credentials, models.json, and local skills."
+      )
+      .setHeading();
 
     // Pi executable path
     new Setting(containerEl)
@@ -507,7 +694,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName(isZh ? "默认模型配置 (Default Model Configuration)" : "Default Model Configuration")
+      .setName(isZh ? "Pi 默认模型配置 (Pi Default Model Configuration)" : "Pi Default Model Configuration")
       .setHeading();
 
     // 预设模型映射表，当选择 provider 时可以关联更新 modelId 的 placeholder 和推荐的默认值
@@ -846,10 +1033,10 @@ export class PiAgentSettingTab extends PluginSettingTab {
         });
       });
 
-    // ─── 默认服务商下拉已在上文动态化：内置 ∪ 自定义 ──────────────────
-
+    // ─── 四、界面交互与提示词偏好 (Display & Prompts - 共享) ─────────
     new Setting(containerEl)
-      .setName(isZh ? "提示词默认设置" : "Prompt Defaults")
+      .setName(isZh ? "四、界面交互与提示词偏好 (Display & Prompts)" : "4. Display & Prompts Preference")
+      .setDesc(isZh ? "跨引擎通用的提示词前缀、指令片段、流式打字与显示设置。" : "Universal prompt defaults, snippets, typewriter rendering, and display options.")
       .setHeading();
 
     new Setting(containerEl)

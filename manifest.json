@@ -1,9 +1,9 @@
 {
   "id": "pimate",
   "name": "Pimate",
-  "version": "1.0.49",
+  "version": "1.1.1",
   "minAppVersion": "1.5.0",
-  "description": "Embeds Pi Coding Agent as an AI collaborator for your vault. Chat, edit files, and run commands — all without leaving your editor.",
+  "description": "Embeds Antigravity CLI and Pi Coding Agent as dual-engine AI collaborators for your vault. Chat, edit files, and run commands — all without leaving your editor.",
   "author": "Gorazen",
   "authorUrl": "https://github.com/gorazenxu",
   "isDesktopOnly": true
