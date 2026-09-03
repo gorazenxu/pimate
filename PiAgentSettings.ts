@@ -66,6 +66,7 @@ export interface PersistedSessionTab {
 }
 
 export interface PiAgentSettings {
+  enableAntigravity: boolean;
   defaultEngine: "pi" | "antigravity";
   agyPath: string;
   agyModel: string;
@@ -92,6 +93,7 @@ export interface PiAgentSettings {
 }
 
 export const DEFAULT_SETTINGS: PiAgentSettings = {
+  enableAntigravity: true,
   defaultEngine: "antigravity",
   agyPath: "agy",
   agyModel: "gemini-3.8-flash-high",
@@ -132,6 +134,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
   // `data-just-added` 定位那一行的 key input，避免「猜最后一个 input」的
   // 误跳焦点问题（自定义 provider 区里的 input 也匹配 input[type=password]）。
   justAddedBuiltinId: string | null = null;
+  private activeSettingsTab: "agy" | "pi" | "general" | "display" = "agy";
 
   constructor(app: App, plugin: PiAgentPlugin) {
     super(app, plugin);
@@ -468,55 +471,93 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     const isZh = this.plugin.settings.language === "zh";
 
-    // ─── 一、通用与引擎首选项 (General & Engine Preference) ─────────────
-    new Setting(containerEl)
-      .setName(isZh ? "一、通用与引擎首选项 (General & Engine)" : "1. General & Engine Preference")
-      .setHeading();
+    // ─── 属性页选项卡导航 (Property Pages Navigation) ─────────────────────
+    const tabBar = containerEl.createDiv("pimate-settings-tabs-header");
+    const tabs: Array<{ id: "agy" | "pi" | "general" | "display"; label: string }> = [
+      { id: "agy", label: isZh ? "✦ Antigravity (Google免密)" : "✦ Antigravity (OAuth)" },
+      { id: "pi", label: isZh ? "π Pi Agent (模型与凭证)" : "π Pi Agent (Providers)" },
+      { id: "general", label: isZh ? "⚙️ 通用设置" : "⚙️ General" },
+      { id: "display", label: isZh ? "🎨 界面偏好" : "🎨 Display & Prompts" },
+    ];
 
-    // Language selector
-    new Setting(containerEl)
-      .setName(isZh ? "界面语言 (Language)" : "Language (语言)")
-      .setDesc(isZh ? "选择设置界面与交互的显示语言。" : "Choose the display language for the settings interface.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("zh", "简体中文 (Chinese)")
-          .addOption("en", "English")
-          .setValue(this.plugin.settings.language)
-          .onChange(async (value: string) => {
-            this.plugin.settings.language = value as "zh" | "en";
-            await this.plugin.saveSettings();
-            this.display(); // 即时刷新设置页面
-          })
-      );
+    tabs.forEach((tabItem) => {
+      const btn = tabBar.createEl("button", {
+        cls: `pimate-settings-tab-btn ${this.activeSettingsTab === tabItem.id ? "is-active" : ""}`,
+        text: tabItem.label,
+      });
+      btn.onclick = () => {
+        if (this.activeSettingsTab !== tabItem.id) {
+          this.activeSettingsTab = tabItem.id;
+          this.display();
+        }
+      };
+    });
 
-    // Default Agent engine selector
-    new Setting(containerEl)
-      .setName(isZh ? "默认 Agent 引擎 (Default Engine)" : "Default Agent Engine")
-      .setDesc(
-        isZh
-          ? "选择新建会话时的默认 Agent 引擎。每个 Tab 亦可在底部栏独立切换。"
-          : "Choose the default Agent engine for new chat tabs. Can also be switched per-tab."
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("antigravity", isZh ? "✦ Antigravity CLI (Google 账号免密)" : "✦ Antigravity CLI (Google OAuth)")
-          .addOption("pi", isZh ? "π Pi Coding Agent (自定义 Provider/Key)" : "π Pi Coding Agent (Custom Provider/Key)")
-          .setValue(this.plugin.settings.defaultEngine || "antigravity")
-          .onChange(async (value) => {
-            this.plugin.settings.defaultEngine = value as "pi" | "antigravity";
-            await this.plugin.saveSettings();
-          })
-      );
+    const pageContent = containerEl.createDiv("pimate-settings-page-content");
 
-    // ─── 二、✦ Antigravity CLI 配置 (Google 账号免密生态) ──────────────
+    switch (this.activeSettingsTab) {
+      case "agy":
+        this.renderAgySettings(pageContent, isZh);
+        break;
+      case "pi":
+        this.renderPiSettings(pageContent, isZh);
+        break;
+      case "general":
+        this.renderGeneralSettings(pageContent, isZh);
+        break;
+      case "display":
+        this.renderDisplaySettings(pageContent, isZh);
+        break;
+    }
+  }
+
+  private renderAgySettings(containerEl: HTMLElement, isZh: boolean): void {
     new Setting(containerEl)
-      .setName(isZh ? "二、✦ Antigravity CLI 配置 (Google 账号免密生态)" : "2. ✦ Antigravity CLI Configuration")
+      .setName(isZh ? "✦ Antigravity CLI 配置 (Google 账号免密生态)" : "✦ Antigravity CLI Configuration")
       .setDesc(
         isZh
           ? "借助系统终端已登录的 Google 账号，零配置直接调用 Gemini、Claude 等模型与原生工具链。"
           : "Leverages system Google OAuth credentials for zero-config Gemini and Claude models with native tools."
       )
       .setHeading();
+
+    // 独立总开关：启用 / 关闭 Antigravity CLI 引擎
+    new Setting(containerEl)
+      .setName(isZh ? "启用 Antigravity 引擎" : "Enable Antigravity Engine")
+      .setDesc(
+        isZh
+          ? "开启后，对话框底部将提供 Antigravity 引擎切换；若关闭，对话框将隐藏引擎选择器并默认使用 Pi Agent，无需手动选择。"
+          : "When enabled, Antigravity CLI can be selected in the chat footer. When disabled, the chat view hides the engine switcher and uses Pi Agent directly."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableAntigravity !== false)
+          .onChange(async (val) => {
+            this.plugin.settings.enableAntigravity = val;
+            if (!val && this.plugin.settings.defaultEngine === "antigravity") {
+              this.plugin.settings.defaultEngine = "pi";
+            }
+            await this.plugin.saveSettings();
+            this.display();
+
+            this.app.workspace.getLeavesOfType(PI_AGENT_VIEW_TYPE).forEach((leaf) => {
+              const view = leaf.view as any;
+              if (view && typeof view.refreshEngineVisibility === "function") {
+                view.refreshEngineVisibility();
+              }
+            });
+          })
+      );
+
+    if (this.plugin.settings.enableAntigravity === false) {
+      const banner = containerEl.createDiv("agy-disabled-banner");
+      banner.setText(
+        isZh
+          ? "💡 Antigravity 引擎当前已关闭。对话框已自动隐藏引擎选择开关，将直接采用 Pi Coding Agent 运行。"
+          : "💡 Antigravity engine is currently disabled. The chat view has hidden the engine switcher and will run using Pi Coding Agent."
+      );
+      return;
+    }
 
     // 动态探测状态卡片
     const agyStatusCard = containerEl.createDiv("agy-status-card");
@@ -632,7 +673,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
 
-        // 异步尝试用 agy models 动态刷新下拉列表
         AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath).then((models) => {
           if (models.length > 0) {
             const selected = dropdown.getValue();
@@ -664,10 +704,11 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+  }
 
-    // ─── 三、π Pi Coding Agent 配置 (保留现有完整能力) ──────────────────
+  private renderPiSettings(containerEl: HTMLElement, isZh: boolean): void {
     new Setting(containerEl)
-      .setName(isZh ? "三、π Pi Coding Agent 配置 (保留现有完整能力)" : "3. π Pi Coding Agent Configuration")
+      .setName(isZh ? "π Pi Coding Agent 配置 (保留现有完整能力)" : "π Pi Coding Agent Configuration")
       .setDesc(
         isZh
           ? "配置 Pi 命令路径、自定义 Provider 凭据、models.json 与本地技能生态。"
@@ -1033,9 +1074,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
         });
       });
 
-    // ─── 四、界面交互与提示词偏好 (Display & Prompts - 共享) ─────────
+    this.renderSkillsManagement(containerEl, isZh);
+  }
+
+  private renderDisplaySettings(containerEl: HTMLElement, isZh: boolean): void {
     new Setting(containerEl)
-      .setName(isZh ? "四、界面交互与提示词偏好 (Display & Prompts)" : "4. Display & Prompts Preference")
+      .setName(isZh ? "界面交互与提示词偏好 (Display & Prompts)" : "Display & Prompts Preference")
       .setDesc(isZh ? "跨引擎通用的提示词前缀、指令片段、流式打字与显示设置。" : "Universal prompt defaults, snippets, typewriter rendering, and display options.")
       .setHeading();
 
@@ -1222,6 +1266,62 @@ export class PiAgentSettingTab extends PluginSettingTab {
           })
       );
 
+  }
+
+  private renderGeneralSettings(containerEl: HTMLElement, isZh: boolean): void {
+    new Setting(containerEl)
+      .setName(isZh ? "通用与引擎首选项 (General & Engine Preference)" : "General & Engine Preference")
+      .setHeading();
+
+    // Language selector
+    new Setting(containerEl)
+      .setName(isZh ? "界面语言 (Language)" : "Language (语言)")
+      .setDesc(isZh ? "选择设置界面与交互的显示语言。" : "Choose the display language for the settings interface.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("zh", "简体中文 (Chinese)")
+          .addOption("en", "English")
+          .setValue(this.plugin.settings.language)
+          .onChange(async (value: string) => {
+            this.plugin.settings.language = value as "zh" | "en";
+            await this.plugin.saveSettings();
+            this.display(); // 即时刷新设置页面
+          })
+      );
+
+    // Default Agent engine selector
+    const engineSetting = new Setting(containerEl)
+      .setName(isZh ? "默认 Agent 引擎 (Default Engine)" : "Default Agent Engine")
+      .setDesc(
+        isZh
+          ? (this.plugin.settings.enableAntigravity === false
+              ? "Antigravity 引擎当前已关闭，默认及对话框仅使用 Pi Agent。"
+              : "选择新建会话时的默认 Agent 引擎。每个 Tab 亦可在底部栏独立切换。")
+          : (this.plugin.settings.enableAntigravity === false
+              ? "Antigravity engine is currently disabled, defaulting to Pi Agent."
+              : "Choose the default Agent engine for new chat tabs. Can also be switched per-tab.")
+      );
+
+    if (this.plugin.settings.enableAntigravity === false) {
+      engineSetting.addDropdown((dropdown) =>
+        dropdown
+          .addOption("pi", isZh ? "π Pi Coding Agent (独占)" : "π Pi Coding Agent (Only)")
+          .setValue("pi")
+          .setDisabled(true)
+      );
+    } else {
+      engineSetting.addDropdown((dropdown) =>
+        dropdown
+          .addOption("antigravity", isZh ? "✦ Antigravity CLI (Google 账号免密)" : "✦ Antigravity CLI (Google OAuth)")
+          .addOption("pi", isZh ? "π Pi Coding Agent (自定义 Provider/Key)" : "π Pi Coding Agent (Custom Provider/Key)")
+          .setValue(this.plugin.settings.defaultEngine || "antigravity")
+          .onChange(async (value) => {
+            this.plugin.settings.defaultEngine = value as "pi" | "antigravity";
+            await this.plugin.saveSettings();
+          })
+      );
+    }
+
     new Setting(containerEl)
       .setName(isZh ? "最大会话卡数量" : "Max session tabs")
       .setDesc(
@@ -1248,8 +1348,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
             }
           })
       );
+  }
 
-    // ─── 技能管理 (Skills Management) ───────────────────────────────────
+  private renderSkillsManagement(containerEl: HTMLElement, isZh: boolean): void {
     new Setting(containerEl)
       .setName(isZh ? "技能管理 (Skills Management)" : "Skills Management")
       .setHeading();

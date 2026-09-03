@@ -201,6 +201,7 @@ export class PiAgentView extends ItemView {
   private speedEstimatedTokens = 0;
   private speedTimer: number | null = null;
   private speedHideTimer: number | null = null;
+  private footerEngineSelector: HTMLElement | null = null;
   private footerEngineLabel: HTMLElement | null = null;
   private footerModelLabel: HTMLElement | null = null;
   private footerModelDropdown: HTMLElement | null = null;
@@ -723,8 +724,8 @@ export class PiAgentView extends ItemView {
     const footerLeft = footer.createDiv("pi-agent-input-footer-left");
     
     // 0. Engine Selector Container
-    const engineSelector = footerLeft.createDiv("pi-agent-engine-selector");
-    const footerEngineBtn = engineSelector.createDiv("pi-agent-engine-btn");
+    this.footerEngineSelector = footerLeft.createDiv("pi-agent-engine-selector");
+    const footerEngineBtn = this.footerEngineSelector.createDiv("pi-agent-engine-btn");
     this.footerEngineLabel = footerEngineBtn.createSpan("pi-agent-engine-label");
     this.updateEngineDisplay();
 
@@ -872,8 +873,12 @@ export class PiAgentView extends ItemView {
 
     for (let i = 1; i <= count; i++) {
       const pTab = persisted[i - 1];
-      const defaultEngine = this.plugin.settings.defaultEngine || "antigravity";
-      const engine = pTab?.engine || defaultEngine;
+      const defaultEngine = this.plugin.settings.enableAntigravity === false
+        ? "pi"
+        : (this.plugin.settings.defaultEngine || "antigravity");
+      const engine = this.plugin.settings.enableAntigravity === false
+        ? "pi"
+        : (pTab?.engine || defaultEngine);
       this.tabs.push({
         id: `tab-static-${i}`,
         label: String(i),
@@ -899,7 +904,9 @@ export class PiAgentView extends ItemView {
   }
 
   private async createAndSwitchTab(): Promise<void> {
-    const defaultEngine = this.plugin.settings.defaultEngine || "antigravity";
+    const defaultEngine = this.plugin.settings.enableAntigravity === false
+      ? "pi"
+      : (this.plugin.settings.defaultEngine || "antigravity");
     const tab: ChatTab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
@@ -1140,7 +1147,10 @@ export class PiAgentView extends ItemView {
     const vaultBasePath =
       adapter instanceof FileSystemAdapter ? adapter.getBasePath() : undefined;
 
-    const engine = tab?.engine || settings.defaultEngine || "antigravity";
+    let engine = tab?.engine || settings.defaultEngine || "antigravity";
+    if (settings.enableAntigravity === false) {
+      engine = "pi";
+    }
 
     if (engine === "antigravity") {
       const modelId = tab?.modelId || settings.agyModel || "gemini-3.8-flash-high";
@@ -6056,7 +6066,27 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  public refreshEngineVisibility(): void {
+    this.updateEngineDisplay();
+    if (this.plugin.settings.enableAntigravity === false) {
+      for (const tab of this.tabs) {
+        if (tab.engine === "antigravity") {
+          void this.switchTabEngine(tab, "pi");
+        }
+      }
+    }
+  }
+
   private updateEngineDisplay(): void {
+    if (this.plugin.settings.enableAntigravity === false) {
+      if (this.footerEngineSelector) {
+        this.footerEngineSelector.style.display = "none";
+      }
+      return;
+    }
+    if (this.footerEngineSelector) {
+      this.footerEngineSelector.style.display = "";
+    }
     if (!this.footerEngineLabel) return;
     const isZh = this.plugin.settings.language === "zh";
     const engine = this.activeTab?.engine || this.plugin.settings.defaultEngine || "antigravity";

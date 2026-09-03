@@ -3002,3 +3002,53 @@ summary.pi-agent-history-group-title:hover {
   color: var(--pi-brand, #8a2be2);
 }
 
+/* ─── Settings Property Pages (Tabs) Navigation ────────────── */
+.pimate-settings-tabs-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pimate-settings-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.pimate-settings-tab-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pimate-settings-tab-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.agy-disabled-banner {
+  padding: 14px 16px;
+  margin: 14px 0;
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+  border: 1px dashed var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+
