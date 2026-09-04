@@ -27,6 +27,7 @@ import {
 import { basename, dirname, join, relative } from "path";
 import { homedir } from "os";
 import type PiAgentPlugin from "./main";
+import type { AgyConversationIndexEntry } from "./PiAgentSettings";
 import {
   PiAgentClient,
   type RpcEvent,
@@ -95,6 +96,13 @@ interface ResumeSessionItem {
   preview?: string;
   engine?: "pi" | "antigravity";
   conversationId?: string;
+  agyHistoryScope?: "current" | "unassigned" | "other";
+}
+
+interface AgyHistoryBuckets {
+  current: ResumeSessionItem[];
+  unassigned: ResumeSessionItem[];
+  all: ResumeSessionItem[];
 }
 
 interface ResumeSessionPreviewCacheEntry {
@@ -104,6 +112,13 @@ interface ResumeSessionPreviewCacheEntry {
 }
 
 const SESSION_PREVIEW_MAX_BYTES = 128 * 1024;
+const AGY_HISTORY_LIST_CACHE_MS = 10_000;
+// AGY's stream-json input currently accepts text content blocks only. Pasted
+// images are materialized here so AGY can read them from the active vault.
+const AGY_IMAGE_ATTACHMENT_DIR = "999agy对话图片";
+// Reuse one hidden AGY conversation for title requests, then rotate it before
+// its accumulated context starts affecting title quality or startup latency.
+const AGY_TITLE_SESSION_MAX_TURNS = 40;
 
 interface ParsedSnippet {
   title: string;
@@ -231,6 +246,7 @@ export class PiAgentView extends ItemView {
   // authoritative in settings.sessionTitles.
   private titleGenRequested = new Set<string>();
   private pendingAutoTitles = new Map<string, string>();
+  private agyTitleGenerationTail: Promise<void> = Promise.resolve();
   private renderedMessages: RenderedMessage[] = [];
   // History paging (used for fast file-based load of large sessions).
   private historyShownCount = 0;     // currently displayed
@@ -256,6 +272,15 @@ export class PiAgentView extends ItemView {
   private modelPopupEl: HTMLElement | null = null;
   private effortPopupEl: HTMLElement | null = null;
   private isHistoryOpen = false;
+  // AGY's own cache is global. Keep a short-lived view cache after Pimate has
+  // classified records by this vault, so reopening the history panel does not
+  // repeatedly scan AGY metadata and the usage journal.
+  private agyHistoryScope: "current" | "unassigned" | "all" = "current";
+  private agyHistoryCache: {
+    workspacePath: string;
+    createdAt: number;
+    buckets: AgyHistoryBuckets;
+  } | null = null;
   private nextTabNumber = 1;
   private contextItems: ContextItem[] = [];
   private isStreaming = false;
@@ -1037,10 +1062,12 @@ export class PiAgentView extends ItemView {
     // Each call sets a different part of the UI and they don't depend on each other.
     void this.refreshStateDisplay(tab, client);
     void this.loadAvailableCommands(client);
-    // A tab switch may restore a session that already contains sibling
-    // branches, so calibrate once against Pi's authoritative active leaf.
+    // A Pi tab may restore a session that already contains sibling branches,
+    // so calibrate once against Pi's authoritative active leaf. AGY has no
+    // entry-tree RPC; asking it for one only adds a failed round trip before
+    // its transcript-backed history is loaded.
     await this.loadMessages({
-      forceRpc: true,
+      forceRpc: tab.engine !== "antigravity",
       expectedTab: tab,
       expectedClient: client,
       expectedSwitchSeq: switchSeq,
@@ -3514,24 +3541,6 @@ export class PiAgentView extends ItemView {
     const rawMessage = this.inputEl.value.trim();
     const contextPrefix = this.buildContextPrefix();
     const images = this.getImagePayloads();
-    if (client.engine === "antigravity" && images.length > 0) {
-      new Notice(
-        this.plugin.settings.language !== "en"
-          ? "当前 Antigravity 适配器暂不支持图片随 prompt 发送，请移除图片后再发送。"
-          : "The Antigravity adapter does not support image attachments yet. Remove the images before sending."
-      );
-      return;
-    }
-    const userMessage = rawMessage || (images.length ? "Please analyze the attached image(s)." : "");
-    const baseMessage = `${contextPrefix}${userMessage}`.trim();
-    if (!baseMessage && images.length === 0) {
-      if (streamingBehavior === "steer") {
-        this.inputEl.focus();
-        new Notice("请先输入调整内容，再点击“调整方向”");
-      }
-      return;
-    }
-
     const builtinCommand = this.parsePimateBuiltinCommand(rawMessage);
     if (builtinCommand) {
       this.inputEl.value = "";
@@ -3547,11 +3556,36 @@ export class PiAgentView extends ItemView {
       return;
     }
 
+    let agyImagePaths: string[] = [];
+    if (client.engine === "antigravity" && images.length > 0) {
+      try {
+        agyImagePaths = await this.persistAgyImageAttachments(images);
+      } catch (err) {
+        new Notice(
+          `❌ ${this.plugin.settings.language !== "en" ? "保存 AGY 图片失败：" : "Could not save image for AGY: "}${(err as Error).message}`
+        );
+        return;
+      }
+    }
+    const agyImagePrefix = this.buildAgyImagePrefix(agyImagePaths);
+    const userMessage = rawMessage || (images.length ? "Please analyze the attached image(s)." : "");
+    const baseMessage = `${contextPrefix}${agyImagePrefix}${userMessage}`.trim();
+    if (!baseMessage) {
+      if (streamingBehavior === "steer") {
+        this.inputEl.focus();
+        new Notice("请先输入调整内容，再点击“调整方向”");
+      }
+      return;
+    }
+
     const message = this.applySystemPrompt(baseMessage);
     const shouldQueue = tab.isStreaming && !message.startsWith("!");
     const shouldHardSteer = shouldQueue && streamingBehavior === "steer";
+    // Pi receives native image payloads. AGY receives the generated local-file
+    // references in `message` instead; its stream-json adapter must stay text-only.
+    const sendImages = client.engine === "antigravity" ? [] : images;
 
-    this.maybeTitleActiveTab(rawMessage || message);
+    this.maybeTitleActiveTab(rawMessage || userMessage);
 
     // Stash images so the user-message bubble (rendered when Pi echoes via
     // message_start) can show the attached images at the top, like Claudian.
@@ -3591,7 +3625,7 @@ export class PiAgentView extends ItemView {
         // to stop the current output before starting this input as a fresh
         // direction.
         await this.hardSteerMessage(message, {
-          images,
+          images: sendImages,
           userGoal: rawMessage || userMessage,
           tab,
           client,
@@ -3600,16 +3634,24 @@ export class PiAgentView extends ItemView {
         // Normal Enter remains a non-destructive follow-up queue.
         const response = await client.prompt(message, {
           streamingBehavior: "followUp",
-          images,
+          images: sendImages,
         });
         if (!response.success) {
           throw new Error(response.error || "Pi did not accept the queued message");
         }
       } else {
-        const response = await client.prompt(message, { images });
+        const response = await client.prompt(message, { images: sendImages });
         if (!response.success) {
           throw new Error(response.error || "Pi did not accept the message");
         }
+      }
+      if (client.engine === "antigravity" && !message.startsWith("!")) {
+        void this.recordAgyConversationAfterAcceptedPrompt(
+          tab,
+          rawMessage || userMessage
+        ).catch((err) => {
+          console.warn("[pimate] could not record AGY conversation ownership:", err);
+        });
       }
     } catch (err) {
       if (shouldQueue && !shouldHardSteer) this.removePendingQueuedMessage(message);
@@ -3807,6 +3849,179 @@ export class PiAgentView extends ItemView {
     return sessionPath.replace(/\\/g, "/").toLowerCase();
   }
 
+  private normalizeAgySessionTitleKey(conversationId: string): string {
+    return conversationId.trim().toLowerCase();
+  }
+
+  private getCurrentAgyWorkspacePath(): string {
+    const vaultPath = (this.app.vault.adapter as any).getBasePath?.();
+    return AgyAgentClient.normalizeWorkspacePath(
+      typeof vaultPath === "string" ? vaultPath : ""
+    );
+  }
+
+  private getAgyConversationIndex(): Record<string, AgyConversationIndexEntry> {
+    const settings = this.plugin.settings as typeof this.plugin.settings & {
+      agyConversationIndex?: Record<string, AgyConversationIndexEntry>;
+    };
+    if (!settings.agyConversationIndex || typeof settings.agyConversationIndex !== "object") {
+      settings.agyConversationIndex = {};
+    }
+    return settings.agyConversationIndex;
+  }
+
+  private getAgyConversationIndexEntry(conversationId: string): AgyConversationIndexEntry | undefined {
+    const id = conversationId.trim();
+    if (!id) return undefined;
+    const entries = this.getAgyConversationIndex();
+    const key = this.normalizeAgySessionTitleKey(id);
+    return entries[key] || entries[id];
+  }
+
+  private isAgyConversationTrackedInCurrentVault(conversationId: string): boolean {
+    const workspacePath = this.getCurrentAgyWorkspacePath();
+    const entry = this.getAgyConversationIndexEntry(conversationId);
+    return !!workspacePath && !!entry &&
+      AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) === workspacePath;
+  }
+
+  private invalidateAgyHistoryCache(): void {
+    this.agyHistoryCache = null;
+  }
+
+  private upsertAgyConversationIndex(
+    conversationId: string,
+    source: AgyConversationIndexEntry["source"],
+    details: {
+      title?: string;
+      preview?: string;
+      clearTitle?: boolean;
+      internal?: boolean;
+    } = {}
+  ): boolean {
+    const id = conversationId.trim();
+    const workspacePath = this.getCurrentAgyWorkspacePath();
+    if (!id || !workspacePath) return false;
+
+    const entries = this.getAgyConversationIndex();
+    const key = this.normalizeAgySessionTitleKey(id);
+    const existing = entries[key] || entries[id];
+    const now = Date.now();
+    const next: AgyConversationIndexEntry = {
+      ...existing,
+      conversationId: id,
+      workspacePath,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      // Do not downgrade a session Pimate already owns to a weaker discovery
+      // signal merely because AGY metadata happens to be inspected later.
+      source:
+        existing?.internal || existing?.source === "title"
+          ? "title"
+          : existing?.source === "pimate" || existing?.source === "resumed"
+          ? existing.source
+          : source,
+    };
+    if (existing?.internal || details.internal || source === "title") {
+      next.internal = true;
+    }
+    if (details.clearTitle) {
+      delete next.title;
+    } else if (details.title?.trim()) {
+      next.title = details.title.trim();
+    }
+    if (details.preview?.trim()) next.preview = details.preview.trim();
+
+    const previous = existing ? JSON.stringify(existing) : "";
+    const updated = JSON.stringify(next);
+    if (previous === updated) return false;
+    entries[key] = next;
+    if (key !== id) delete entries[id];
+    this.invalidateAgyHistoryCache();
+    return true;
+  }
+
+  private async recordAgyConversationAfterAcceptedPrompt(
+    tab: ChatTab,
+    seed: string
+  ): Promise<void> {
+    if (tab.engine !== "antigravity") return;
+    const conversationId = this.getAgyConversationId(tab);
+    if (!conversationId) return;
+
+    tab.sessionId = conversationId;
+    const changed = this.upsertAgyConversationIndex(conversationId, "pimate", {
+      title: this.getAgySessionTitle(conversationId),
+      preview: seed,
+    });
+    const pendingTitle = this.pendingAutoTitles.get(tab.id);
+    if (pendingTitle) {
+      await this.persistAutoSessionTitle(tab, pendingTitle);
+      return;
+    }
+    if (changed) await this.plugin.saveSettings();
+  }
+
+  private async recordAgyConversationResume(
+    conversationId: string,
+    preview?: string
+  ): Promise<void> {
+    const changed = this.upsertAgyConversationIndex(conversationId, "resumed", {
+      title: this.getAgySessionTitle(conversationId),
+      preview,
+    });
+    if (changed) await this.plugin.saveSettings();
+  }
+
+  private fallbackSessionTitle(seed: string): string {
+    const compact = seed
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const firstLine = compact.split(/\r?\n/, 1)[0] || compact;
+    const title = Array.from(firstLine).slice(0, 18).join("").trim();
+    if (title) return title;
+    return this.plugin.settings.language === "en" ? "Conversation" : "对话";
+  }
+
+  private getAgySessionTitle(conversationId: string): string | undefined {
+    const id = conversationId.trim();
+    if (!id) return undefined;
+    const titles = this.plugin.settings.agySessionTitles || {};
+    const key = this.normalizeAgySessionTitleKey(id);
+    const exact = titles[key] || titles[id];
+    return exact?.trim() || this.getAgyConversationIndexEntry(id)?.title?.trim() || undefined;
+  }
+
+  private hasAgySessionTitle(conversationId: string): boolean {
+    return !!this.getAgySessionTitle(conversationId);
+  }
+
+  private deleteAgySessionTitle(conversationId: string): boolean {
+    const titles = this.plugin.settings.agySessionTitles;
+    if (!titles) return false;
+    const id = conversationId.trim();
+    if (!id) return false;
+    const key = this.normalizeAgySessionTitleKey(id);
+    let deleted = false;
+    for (const savedId of Object.keys(titles)) {
+      if (this.normalizeAgySessionTitleKey(savedId) === key) {
+        delete titles[savedId];
+        deleted = true;
+      }
+    }
+    return deleted;
+  }
+
+  private getAgyConversationId(tab: ChatTab): string {
+    const savedId = tab.sessionId?.trim();
+    if (savedId) return savedId;
+    if (tab.client?.engine === "antigravity") {
+      return (tab.client as AgyAgentClient).getConversationId()?.trim() || "";
+    }
+    return "";
+  }
+
   private getSessionTitle(sessionPath: string): string | undefined {
     const titles = this.plugin.settings.sessionTitles;
     if (!titles) return undefined;
@@ -3841,7 +4056,12 @@ export class PiAgentView extends ItemView {
     if (this.plugin.settings.autoNameSessions === false) return;
     const tab = this.activeTab;
     if (!tab || this.titleGenRequested.has(tab.id)) return;
-    if (tab.sessionFile && this.hasSessionTitle(tab.sessionFile)) return;
+    if (tab.engine === "antigravity") {
+      const conversationId = this.getAgyConversationId(tab);
+      if (conversationId && this.hasAgySessionTitle(conversationId)) return;
+    } else if (tab.sessionFile && this.hasSessionTitle(tab.sessionFile)) {
+      return;
+    }
     const cleanedSeed = seed
       .replace(/@\S+/g, "")
       .replace(/```[\s\S]*?```/g, " ")
@@ -3854,52 +4074,169 @@ export class PiAgentView extends ItemView {
 
   private async generateTitleWithLLM(seed: string, tab: ChatTab): Promise<void> {
     const settings = this.plugin.settings;
-    const provider = tab.modelProvider || settings.provider || "";
-    const modelId = tab.modelId || settings.modelId || "";
-    if (!provider || !modelId) {
-      this.titleGenRequested.delete(tab.id);
+    if (tab.engine === "antigravity") {
+      // AGY does not expose a no-session metadata request. Reuse one hidden
+      // conversation per vault instead of creating one native record per
+      // title. The queue is important because AGY cannot safely accept two
+      // independent print-mode clients writing the same conversation.
+      const queued = this.agyTitleGenerationTail.then(
+        () => this.generateAgyTitleWithFixedSession(seed, tab),
+        () => this.generateAgyTitleWithFixedSession(seed, tab)
+      );
+      this.agyTitleGenerationTail = queued.then(
+        () => undefined,
+        () => undefined
+      );
+      await queued;
       return;
     }
 
-    const engine = tab.engine || settings.defaultEngine || "antigravity";
-    const oneOff: AgentClient = engine === "antigravity"
-      ? new AgyAgentClient({
-          agyPath: settings.agyPath,
-          modelId: tab.modelId || settings.agyModel || "gemini-3.8-flash-low",
-          effort: "low",
-        })
-      : new PiAgentClient({
-          piPath: settings.piPath,
-          provider,
-          modelId,
-          thinkingLevel: tab.thinkingLevel || settings.thinkingLevel,
-          apiKey: this.readProviderApiKey(provider) || settings.apiKey,
-          // noSession=true keeps the title-generation prompt out of the user's
-          // main session jsonl — the prompt never lands in chat history.
-          noSession: true,
-        });
+    const provider = tab.modelProvider || settings.provider || "";
+    const modelId = tab.modelId || settings.modelId || "";
+    if (!provider || !modelId) {
+      await this.persistAutoSessionTitle(tab, this.fallbackSessionTitle(seed));
+      return;
+    }
+
+    const oneOff = new PiAgentClient({
+      piPath: settings.piPath,
+      provider,
+      modelId,
+      thinkingLevel: tab.thinkingLevel || settings.thinkingLevel,
+      apiKey: this.readProviderApiKey(provider) || settings.apiKey,
+      // Pi supports noSession, so this metadata-only request never becomes a
+      // visible Pi or AGY conversation.
+      noSession: true,
+    });
 
     try {
       await oneOff.start();
       const prompt = this.buildTitlePrompt(seed);
       const title = await this.raceTitleFetch(oneOff, prompt, 15_000);
       const cleaned = this.cleanTitleOutput(title);
-      if (cleaned) await this.persistAutoSessionTitle(tab, cleaned);
+      await this.persistAutoSessionTitle(tab, cleaned || this.fallbackSessionTitle(seed));
     } catch (err) {
       console.warn("[pi-agent] auto title generation failed:", err);
+      await this.persistAutoSessionTitle(tab, this.fallbackSessionTitle(seed));
     } finally {
       await oneOff.destroy().catch(() => undefined);
     }
   }
 
+  private async generateAgyTitleWithFixedSession(
+    seed: string,
+    tab: ChatTab
+  ): Promise<void> {
+    const settings = this.plugin.settings;
+    const workspacePath = this.getCurrentAgyWorkspacePath();
+    if (!workspacePath) {
+      await this.persistAutoSessionTitle(tab, this.fallbackSessionTitle(seed));
+      return;
+    }
+
+    let conversationId = settings.agyTitleConversationId?.trim() || "";
+    let turns = Number(settings.agyTitleConversationTurns);
+    if (!Number.isFinite(turns) || turns < 0) turns = 0;
+
+    // Rotate occasionally so the helper's own old prompts do not become a
+    // large hidden context that makes later titles less precise or slower.
+    if (
+      conversationId &&
+      (turns >= AGY_TITLE_SESSION_MAX_TURNS ||
+        !AgyAgentClient.conversationExists(conversationId))
+    ) {
+      conversationId = "";
+      turns = 0;
+      settings.agyTitleConversationId = "";
+      settings.agyTitleConversationTurns = 0;
+    }
+
+    const titleClient = new AgyAgentClient({
+      agyPath: settings.agyPath,
+      modelId: tab.modelId || settings.agyModel || "gemini-3.8-flash-high",
+      effort: tab.thinkingLevel || settings.agyEffort || "high",
+      cwd: workspacePath,
+      conversationId: conversationId || undefined,
+      // A title request must not run tools, even if a model interprets the
+      // surrounding conversation as an implementation task.
+      dangerouslySkipPermissions: false,
+      // Do not charge the internal title helper into Pimate's usage journal.
+      trackUsage: false,
+    });
+
+    try {
+      await titleClient.start();
+      const actualConversationId = titleClient.getConversationId()?.trim();
+      if (!actualConversationId) {
+        throw new Error("AGY did not return a title conversation id");
+      }
+
+      const sameConversation =
+        conversationId.toLowerCase() === actualConversationId.toLowerCase();
+      settings.agyTitleConversationId = actualConversationId;
+      settings.agyTitleConversationTurns = sameConversation ? turns : 0;
+
+      const existing = this.getAgyConversationIndexEntry(actualConversationId);
+      const indexChanged = existing?.internal
+        ? false
+        : this.upsertAgyConversationIndex(actualConversationId, "title", {
+            internal: true,
+            preview: "Pimate internal auto-title session",
+          });
+      if (!sameConversation || indexChanged) {
+        await this.plugin.saveSettings();
+      }
+
+      const title = await this.raceTitleFetch(
+        titleClient,
+        this.buildTitlePrompt(seed),
+        15_000
+      );
+      const cleaned = this.cleanTitleOutput(title);
+      settings.agyTitleConversationTurns += 1;
+      await this.plugin.saveSettings();
+      await this.persistAutoSessionTitle(
+        tab,
+        cleaned || this.fallbackSessionTitle(seed)
+      );
+    } catch (err) {
+      console.warn("[pimate] AGY auto title generation failed:", err);
+      await this.persistAutoSessionTitle(tab, this.fallbackSessionTitle(seed));
+    } finally {
+      await titleClient.destroy().catch(() => undefined);
+    }
+  }
+
   private async persistAutoSessionTitle(tab: ChatTab, title: string): Promise<void> {
-    if (!tab.sessionFile) {
-      if (tab.engine === "antigravity") {
+    if (tab.engine === "antigravity") {
+      const conversationId = this.getAgyConversationId(tab);
+      if (!conversationId || !this.isAgyConversationTrackedInCurrentVault(conversationId)) {
+        this.pendingAutoTitles.set(tab.id, title);
         tab.label = title;
         this.renderTabs();
         await this.persistSessionTabs();
         return;
       }
+
+      tab.sessionId = conversationId;
+      const existing = this.getAgySessionTitle(conversationId);
+      if (!existing) {
+        if (!this.plugin.settings.agySessionTitles) this.plugin.settings.agySessionTitles = {};
+        this.plugin.settings.agySessionTitles[
+          this.normalizeAgySessionTitleKey(conversationId)
+        ] = title;
+      }
+      this.upsertAgyConversationIndex(conversationId, "pimate", {
+        title: existing || title,
+      });
+      this.pendingAutoTitles.delete(tab.id);
+      tab.label = existing || title;
+      this.renderTabs();
+      await this.persistSessionTabs();
+      return;
+    }
+
+    if (!tab.sessionFile) {
       this.pendingAutoTitles.set(tab.id, title);
       return;
     }
@@ -3942,6 +4279,7 @@ export class PiAgentView extends ItemView {
     return isZh
       ? [
           "你是一个会话标题生成器。",
+          "这是一个可复用的内部命名会话；本次请求与之前的命名请求完全独立。只处理本次提供的用户首条消息，不要引用或延续之前的内容。",
           "",
           "用户输入是一条对话的首条消息，请输出 4-12 个字的简洁标题。",
           "",
@@ -3957,6 +4295,7 @@ export class PiAgentView extends ItemView {
         ].join("\n")
       : [
           "You are a session title generator.",
+          "This is a reusable internal title session. Treat this request as fully independent from earlier title requests; use only the first user message provided below.",
           "",
           "Given the user's first message of a conversation, output a concise 3-8 word title.",
           "",
@@ -4185,7 +4524,7 @@ export class PiAgentView extends ItemView {
             : "Tokens: unavailable until AGY completes a turn",
           data.costKnown === false
             ? "Cost: unavailable"
-            : `${data.costEstimated ? "Estimated cost" : "Cost"}: ${data.costEstimated ? "~" : ""}$${(data.cost || 0).toFixed(4)}`,
+            : `Cost: $${(data.cost || 0).toFixed(4)}`,
         ];
         if (data.contextUsage?.percent != null) {
           info.push(
@@ -4395,7 +4734,7 @@ export class PiAgentView extends ItemView {
   private async showResumeSelector(): Promise<void> {
     try {
       const isAgy = this.activeTab?.engine === "antigravity";
-      const sessions = this.listResumeSessionsForActiveEngine();
+      const sessions = await this.listResumeSessionsForActiveEngine();
       if (sessions.length === 0) {
         new Notice("No previous sessions found");
         return;
@@ -4415,21 +4754,130 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private listResumeSessionsForActiveEngine(): ResumeSessionItem[] {
-    if (this.activeTab?.engine === "antigravity") {
-      const vaultPath = (this.app.vault.adapter as any).getBasePath?.() || undefined;
-      return AgyAgentClient.listConversations(vaultPath).map((conversation) => ({
+  private async listAgyHistoryBuckets(): Promise<AgyHistoryBuckets> {
+    const workspacePath = this.getCurrentAgyWorkspacePath();
+    const empty: AgyHistoryBuckets = { current: [], unassigned: [], all: [] };
+    if (!workspacePath) return empty;
+
+    const cached = this.agyHistoryCache;
+    if (
+      cached &&
+      cached.workspacePath === workspacePath &&
+      Date.now() - cached.createdAt < AGY_HISTORY_LIST_CACHE_MS
+    ) {
+      return cached.buckets;
+    }
+
+    const [usageSnapshots] = await Promise.all([
+      AgyUsageStore.readAll(),
+    ]);
+    // AGY's metadata cache is global. Do the one synchronous scan once, then
+    // classify it against Pimate's vault-owned index and usage journal.
+    const summaries = AgyAgentClient.listConversations();
+    const summaryById = new Map(
+      summaries.map((summary) => [this.normalizeAgySessionTitleKey(summary.conversationId), summary])
+    );
+    const currentIds = new Set<string>();
+    let indexChanged = false;
+
+    for (const entry of Object.values(this.getAgyConversationIndex())) {
+      const id = entry?.conversationId?.trim();
+      if (!id) continue;
+      if (AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) !== workspacePath) continue;
+      const key = this.normalizeAgySessionTitleKey(id);
+      if (summaryById.has(key)) currentIds.add(key);
+    }
+
+    // Migrate conversations that Pimate's existing usage journal can prove
+    // were run from this vault. This recovers pre-index AGY sessions without
+    // guessing about every global, unscoped AGY record.
+    for (const snapshot of usageSnapshots) {
+      const key = this.normalizeAgySessionTitleKey(snapshot.conversationId);
+      if (
+        AgyAgentClient.normalizeWorkspacePath(snapshot.cwd) !== workspacePath ||
+        !summaryById.has(key)
+      ) {
+        continue;
+      }
+      currentIds.add(key);
+      if (!this.isAgyConversationTrackedInCurrentVault(snapshot.conversationId)) {
+        indexChanged = this.upsertAgyConversationIndex(snapshot.conversationId, "usage") || indexChanged;
+      }
+    }
+
+    for (const summary of summaries) {
+      const key = this.normalizeAgySessionTitleKey(summary.conversationId);
+      if (!AgyAgentClient.belongsToWorkspace(summary, workspacePath)) continue;
+      currentIds.add(key);
+      if (!this.isAgyConversationTrackedInCurrentVault(summary.conversationId)) {
+        indexChanged = this.upsertAgyConversationIndex(summary.conversationId, "provider") || indexChanged;
+      }
+    }
+
+    const toItem = (
+      summary: ReturnType<typeof AgyAgentClient.listConversations>[number],
+      agyHistoryScope: ResumeSessionItem["agyHistoryScope"]
+    ): ResumeSessionItem => {
+      const indexed = this.getAgyConversationIndexEntry(summary.conversationId);
+      const customTitle = this.getAgySessionTitle(summary.conversationId);
+      return {
         path: "",
         label:
-          conversation.title ||
-          (conversation.preview
-            ? conversation.preview.slice(0, 24)
-            : conversation.conversationId.slice(0, 12)),
-        mtime: conversation.mtime,
-        preview: conversation.preview,
+          customTitle ||
+          indexed?.title ||
+          summary.title ||
+          (summary.preview
+            ? summary.preview.slice(0, 24)
+            : summary.conversationId.slice(0, 12)),
+        mtime: Math.max(summary.mtime, indexed?.updatedAt || 0),
+        preview: indexed?.preview || summary.preview,
         engine: "antigravity",
-        conversationId: conversation.conversationId,
-      }));
+        conversationId: summary.conversationId,
+        agyHistoryScope,
+      };
+    };
+
+    const current: ResumeSessionItem[] = [];
+    const unassigned: ResumeSessionItem[] = [];
+    const all: ResumeSessionItem[] = [];
+    for (const summary of summaries) {
+      const indexed = this.getAgyConversationIndexEntry(summary.conversationId);
+      if (indexed?.internal || indexed?.source === "title") {
+        // The reusable AGY title session is a real native conversation, but it
+        // is implementation detail rather than user history.
+        continue;
+      }
+      const key = this.normalizeAgySessionTitleKey(summary.conversationId);
+      const scope: NonNullable<ResumeSessionItem["agyHistoryScope"]> = currentIds.has(key)
+        ? "current"
+        : summary.workspaceUris.length === 0
+          ? "unassigned"
+          : "other";
+      const item = toItem(summary, scope);
+      all.push(item);
+      if (scope === "current") current.push(item);
+      if (scope === "unassigned") unassigned.push(item);
+    }
+
+    const sortNewest = (items: ResumeSessionItem[]) =>
+      items.sort((a, b) => b.mtime - a.mtime);
+    const buckets: AgyHistoryBuckets = {
+      current: sortNewest(current),
+      unassigned: sortNewest(unassigned),
+      all: sortNewest(all),
+    };
+    this.agyHistoryCache = {
+      workspacePath,
+      createdAt: Date.now(),
+      buckets,
+    };
+    if (indexChanged) void this.plugin.saveSettings();
+    return buckets;
+  }
+
+  private async listResumeSessionsForActiveEngine(): Promise<ResumeSessionItem[]> {
+    if (this.activeTab?.engine === "antigravity") {
+      return (await this.listAgyHistoryBuckets()).current;
     }
 
     const directory = this.getSessionDirectory();
@@ -4559,6 +5007,7 @@ export class PiAgentView extends ItemView {
         active.restored = true;
         this.client = active.client;
         await this.applyTabRuntimePreferences(active);
+        await this.recordAgyConversationResume(conversationId, session.preview);
         await this.reloadAfterSessionRebind();
         this.setStatus("Ready", "ok");
         this.updateButtons();
@@ -4585,6 +5034,10 @@ export class PiAgentView extends ItemView {
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
     await this.switchToTab(active.id);
+    const restoredClient = active.client as AgentClient | null;
+    if (restoredClient?.isRunning()) {
+      await this.recordAgyConversationResume(conversationId, session.preview);
+    }
   }
 
   private async toggleModelPopup(anchorEl: HTMLElement): Promise<void> {
@@ -5027,12 +5480,60 @@ export class PiAgentView extends ItemView {
     header.createDiv({ text: "CONVERSATIONS", cls: "pi-agent-history-title" });
 
     try {
-      // Keep the custom History UI in sync with the Resume action. Pi reads
-      // its JSONL directory; AGY reads its conversation metadata cache.
-      const sessions = this.listResumeSessionsForActiveEngine();
+      const isAgy = this.activeTab?.engine === "antigravity";
+      const agyBuckets = isAgy ? await this.listAgyHistoryBuckets() : null;
+      // Pi reads its current-workspace JSONL directory. AGY records are
+      // classified by Pimate before display, rather than trusting AGY's
+      // global metadata cache as this vault's history list.
+      const sessions = agyBuckets
+        ? agyBuckets[this.agyHistoryScope]
+        : await this.listResumeSessionsForActiveEngine();
+
+      if (agyBuckets) {
+        const scopeRow = this.historyPanelEl.createDiv("pi-agent-history-scope");
+        const scopes: Array<{
+          id: "current" | "unassigned" | "all";
+          label: string;
+          count: number;
+        }> = [
+          {
+            id: "current",
+            label: isZh ? "当前空间" : "This vault",
+            count: agyBuckets.current.length,
+          },
+          {
+            id: "unassigned",
+            label: isZh ? "未归属" : "Unassigned",
+            count: agyBuckets.unassigned.length,
+          },
+          {
+            id: "all",
+            label: isZh ? "全部 AGY" : "All AGY",
+            count: agyBuckets.all.length,
+          },
+        ];
+        for (const scope of scopes) {
+          const button = scopeRow.createEl("button", {
+            text: `${scope.label} ${scope.count}`,
+            cls: "pi-agent-history-scope-btn",
+          });
+          button.toggleClass("is-active", this.agyHistoryScope === scope.id);
+          button.onclick = () => {
+            if (this.agyHistoryScope === scope.id) return;
+            this.agyHistoryScope = scope.id;
+            void this.renderHistoryPanel();
+          };
+        }
+      }
+
       if (sessions.length === 0) {
         this.historyPanelEl.createDiv({
-          text: isZh ? "暂无会话历史" : "No conversation history",
+          text:
+            agyBuckets && this.agyHistoryScope === "current" && agyBuckets.unassigned.length > 0
+              ? (isZh
+                  ? "当前空间暂无已归属会话；可在“未归属”中手动导入。"
+                  : "No conversations belong to this vault yet. Import one from Unassigned if needed.")
+              : (isZh ? "暂无会话历史" : "No conversation history"),
           cls: "pi-agent-history-empty",
         });
         return;
@@ -5069,7 +5570,6 @@ export class PiAgentView extends ItemView {
           return;
         }
 
-        const isAgy = this.activeTab?.engine === "antigravity";
         const currentConversationId = isAgy
           ? this.activeTab?.sessionId ||
             (this.activeTab?.client?.engine === "antigravity"
@@ -5117,8 +5617,6 @@ export class PiAgentView extends ItemView {
             });
           };
 
-          if (session.engine === "antigravity") continue;
-
           itemEl.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -5132,15 +5630,17 @@ export class PiAgentView extends ItemView {
                   await this.renderHistoryPanel();
                 }));
             });
-            menu.addItem((item: any) => {
-              item
-                .setTitle(isZh ? "删除此会话" : "Delete session")
-                .setIcon("trash-2")
-                .onClick(() => this.runAsync(async () => {
-                  await this.deleteResumeSession(session);
-                  await this.renderHistoryPanel();
-                }));
-            });
+            if (session.engine !== "antigravity") {
+              menu.addItem((item: any) => {
+                item
+                  .setTitle(isZh ? "删除此会话" : "Delete session")
+                  .setIcon("trash-2")
+                  .onClick(() => this.runAsync(async () => {
+                    await this.deleteResumeSession(session);
+                    await this.renderHistoryPanel();
+                  }));
+              });
+            }
             menu.showAtMouseEvent(e);
           });
         }
@@ -5181,11 +5681,42 @@ export class PiAgentView extends ItemView {
   private async renameResumeSession(session: ResumeSessionItem): Promise<void> {
     const isZh = this.plugin.settings.language === "zh";
     if (session.engine === "antigravity") {
-      new Notice(
-        isZh
-          ? "AGY 历史会话的重命名请在 AGY 原生 /resume 中进行"
-          : "Rename Antigravity conversations from AGY's native /resume picker"
-      );
+      const conversationId = session.conversationId?.trim();
+      if (!conversationId) return;
+      const current = this.getAgySessionTitle(conversationId) || session.label || "";
+      const value = await new Promise<string | null>((resolve) => {
+        new PiAgentEditorModal(
+          this.app,
+          isZh ? "重命名会话" : "Rename session",
+          current,
+          resolve
+        ).open();
+      });
+      if (value === null) return;
+      const title = value.trim();
+      if (title) {
+        if (!this.plugin.settings.agySessionTitles) this.plugin.settings.agySessionTitles = {};
+        this.plugin.settings.agySessionTitles[
+          this.normalizeAgySessionTitleKey(conversationId)
+        ] = title;
+        this.upsertAgyConversationIndex(conversationId, "resumed", {
+          title,
+          preview: session.preview,
+        });
+        session.label = title;
+      } else {
+        this.deleteAgySessionTitle(conversationId);
+        this.upsertAgyConversationIndex(conversationId, "resumed", {
+          clearTitle: true,
+          preview: session.preview,
+        });
+        const fallback = AgyAgentClient.listConversations().find(
+          (conversation) => conversation.conversationId === conversationId
+        );
+        session.label = fallback?.title || fallback?.preview?.slice(0, 24) || conversationId.slice(0, 12);
+      }
+      await this.plugin.saveSettings();
+      new Notice(isZh ? "会话已重命名" : "Session renamed");
       return;
     }
     const current = this.getSessionTitle(session.path) || session.label || "";
@@ -5549,7 +6080,7 @@ export class PiAgentView extends ItemView {
     if (this.chatContainer) this.chatContainer.empty();
     this.renderedMessages = [];
     this.activeBranchHistory = null;
-    await this.loadMessages({ forceRpc: true });
+    await this.loadMessages({ forceRpc: tab.engine !== "antigravity" });
     if (
       this.activeTab !== tab ||
       this.client !== client ||
@@ -5979,6 +6510,88 @@ export class PiAgentView extends ItemView {
     });
   }
 
+  /**
+   * AGY's documented stream-json input accepts text content blocks only. Save
+   * pasted/drop images into the vault and send their relative paths as text so
+   * AGY can open them with its workspace file tools.
+   */
+  private async persistAgyImageAttachments(
+    images: Array<{ data: string; mimeType: string }>
+  ): Promise<string[]> {
+    if (images.length === 0) return [];
+
+    const existingFolder = this.app.vault.getAbstractFileByPath(AGY_IMAGE_ATTACHMENT_DIR);
+    if (existingFolder && !(existingFolder instanceof TFolder)) {
+      throw new Error(`Vault path is not a folder: ${AGY_IMAGE_ATTACHMENT_DIR}`);
+    }
+    if (!existingFolder) {
+      await this.app.vault.createFolder(AGY_IMAGE_ATTACHMENT_DIR);
+    }
+
+    const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+    const paths: string[] = [];
+    for (const [index, image] of images.entries()) {
+      const extension = this.getAgyImageExtension(image.mimeType);
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const imagePath = `${AGY_IMAGE_ATTACHMENT_DIR}/agy-${stamp}-${index + 1}-${suffix}.${extension}`;
+      await this.app.vault.createBinary(
+        imagePath,
+        this.decodeBase64ToArrayBuffer(image.data)
+      );
+      paths.push(imagePath);
+    }
+    return paths;
+  }
+
+  private getAgyImageExtension(mimeType: string): string {
+    const normalized = mimeType.toLowerCase().split(";", 1)[0];
+    switch (normalized) {
+      case "image/jpeg":
+      case "image/jpg":
+        return "jpg";
+      case "image/gif":
+        return "gif";
+      case "image/webp":
+        return "webp";
+      case "image/bmp":
+        return "bmp";
+      case "image/svg+xml":
+        return "svg";
+      case "image/avif":
+        return "avif";
+      case "image/tiff":
+        return "tiff";
+      default:
+        return "png";
+    }
+  }
+
+  private decodeBase64ToArrayBuffer(value: string): ArrayBuffer {
+    const commaIndex = value.indexOf(",");
+    const base64 = (commaIndex >= 0 ? value.slice(commaIndex + 1) : value).replace(/\s/g, "");
+    if (!base64) throw new Error("Image data is empty");
+
+    let binary: string;
+    try {
+      binary = atob(base64);
+    } catch {
+      throw new Error("Image data is not valid base64");
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
+  private buildAgyImagePrefix(paths: string[]): string {
+    if (paths.length === 0) return "";
+    const references = paths.map((imagePath) => `@${imagePath}`).join("\n");
+    // The @-references are sufficient context for AGY. Avoid adding an
+    // implementation-oriented sentence to the user's visible prompt/history.
+    return `${references}\n\n`;
+  }
+
   private addContextItem(item: ContextItem): void {
     if (this.contextItems.some((existing) => existing.value === item.value)) return;
     this.contextItems.push(item);
@@ -6189,7 +6802,9 @@ export class PiAgentView extends ItemView {
     const client = expectedClient;
     if (!tab || !client || !this.footerContextEl) return;
     try {
-      const result = await client.getSessionStats();
+      const result = client.engine === "antigravity"
+        ? await (client as AgyAgentClient).getSessionStats({ includeHistory: false })
+        : await client.getSessionStats();
       if (!this.isCurrentTabClient(tab, client)) return;
       if (result.success) {
         this.updateActiveTabSessionInfo(result.data as any, tab);
@@ -6242,7 +6857,8 @@ export class PiAgentView extends ItemView {
     if (typeof data.sessionFile === "string") tab.sessionFile = data.sessionFile;
     if (typeof data.sessionId === "string") tab.sessionId = data.sessionId;
     const pendingTitle = this.pendingAutoTitles.get(tab.id);
-    if (pendingTitle && tab.sessionFile) {
+    const agyConversationId = tab.engine === "antigravity" ? this.getAgyConversationId(tab) : "";
+    if (pendingTitle && (tab.sessionFile || agyConversationId)) {
       this.pendingAutoTitles.delete(tab.id);
       void this.persistAutoSessionTitle(tab, pendingTitle);
     }
@@ -6546,11 +7162,16 @@ export class PiAgentView extends ItemView {
     }
     if (!options.forceRpc && !usedFile) {
       try {
-        const result = await client.getMessages();
+        const result = client.engine === "antigravity"
+          ? await (client as AgyAgentClient).getMessages({ limit })
+          : await client.getMessages();
         if (!isCurrentRequest()) return;
         if (result.success && result.data) {
           const rpcMessages = (result.data as any).messages || [];
-          total = rpcMessages.length;
+          const reportedTotal = Number((result.data as any).totalMessages);
+          total = Number.isFinite(reportedTotal) && reportedTotal >= rpcMessages.length
+            ? reportedTotal
+            : rpcMessages.length;
           messages = limit > 0 ? rpcMessages.slice(-limit) : rpcMessages;
         }
       } catch {
@@ -6747,13 +7368,18 @@ export class PiAgentView extends ItemView {
       this.finalizeAssistantMessageVisibility(rendered);
       this.currentAssistantMsg = null;
     } else if (msg.role === "toolResult") {
+      const toolResultContent = Array.isArray(msg.content)
+        ? msg.content
+        : typeof msg.content === "string"
+          ? [{ type: "text", text: msg.content }]
+          : [];
       this.handleToolEnd({
         type: "tool_execution_end",
         toolName: msg.toolName,
         toolCallId: msg.toolCallId,
         isError: msg.isError,
         result: {
-          content: msg.content,
+          content: toolResultContent,
           isError: msg.isError,
           details: msg.details
         }
@@ -8436,8 +9062,8 @@ function fmtDateCompact(iso: string | null): string {
   const d = new Date(iso);
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
-function computeHitRate(input: number, cacheRead: number): number | null {
-  const denom = input + cacheRead;
+function computeHitRate(input: number, cacheRead: number, cacheWrite = 0): number | null {
+  const denom = input + cacheRead + cacheWrite;
   if (denom <= 0) return null;
   return cacheRead / denom;
 }
@@ -8734,7 +9360,7 @@ function aggregateUsage(
     if (touched) sessionCount += 1;
   }
   for (const row of byModel.values()) {
-    row.hitRate = computeHitRate(row.input, row.cacheRead);
+    row.hitRate = computeHitRate(row.input, row.cacheRead, row.cacheWrite);
   }
   totals.cacheTotal = totals.cacheRead + totals.cacheWrite;
   const list = Array.from(byModel.values()).sort(
@@ -8915,6 +9541,10 @@ async function scanAgyUsageRange(
     sessions.add(snapshot.conversationId);
   }
 
+  for (const row of byModel.values()) {
+    row.hitRate = computeHitRate(row.input, row.cacheRead, row.cacheWrite);
+  }
+
   return {
     from,
     to,
@@ -8978,6 +9608,10 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
         existing.lastUsed = row.lastUsed;
       }
     }
+  }
+
+  for (const row of byModel.values()) {
+    row.hitRate = computeHitRate(row.input, row.cacheRead, row.cacheWrite);
   }
 
   return {
@@ -9183,16 +9817,16 @@ class UsageStatsModal extends Modal {
     if (!this.data) return;
     const isZh = this.lang === "zh";
     const t = this.data.totals;
-    const hr = computeHitRate(t.input, t.cacheRead);
+    const hr = computeHitRate(t.input, t.cacheRead, t.cacheWrite);
     const estimatedCost = t.estimatedCostMessages > 0;
     const costSub = t.unknownCostMessages > 0
       ? (t.costKnownMessages > 0
         ? (estimatedCost
-          ? (isZh ? "部分按 Gemini API 官方价估算；AGY 部分未知" : "Partly estimated at Gemini API list price; some AGY costs unavailable")
+          ? (isZh ? "部分按 Gemini API 官方价计算；AGY 部分未知" : "Partly calculated at Gemini API list price; some AGY costs unavailable")
           : (isZh ? "AGY 费用未提供" : "AGY cost unavailable"))
         : (isZh ? "AGY 未提供费用" : "AGY does not provide cost"))
       : estimatedCost
-        ? (isZh ? "按 Gemini API Standard 官方价估算" : "Estimated at Gemini API Standard list price")
+        ? (isZh ? "按 Gemini API Standard 官方价计算" : "Calculated at Gemini API Standard list price")
       : `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`;
     const cards = [
       { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
@@ -9207,7 +9841,7 @@ class UsageStatsModal extends Modal {
       },
       {
         label: isZh ? "费用" : "Cost",
-        value: t.costKnownMessages > 0 ? `${estimatedCost ? "~" : ""}${fmtCost(t.cost)}` : "—",
+        value: t.costKnownMessages > 0 ? fmtCost(t.cost) : "—",
         sub: costSub,
       },
     ];
@@ -9316,7 +9950,7 @@ class UsageStatsModal extends Modal {
         [fmtNum(m.cacheWrite), "right"],
         [fmtNum(m.totalTokens), "right"],
         [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
-        [m.costKnown ? `${m.provider === "Antigravity" ? "~" : ""}${fmtCost(m.cost)}` : "—", "right"],
+        [m.costKnown ? fmtCost(m.cost) : "—", "right"],
       ];
       for (const [val, align, color] of cells) {
         const td = tr.createEl("td", { text: val });

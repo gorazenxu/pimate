@@ -5,7 +5,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { exec } from "child_process";
-import { AgyAgentClient } from "./AgyAgentClient";
+import { AgyAgentClient, type AgyQuotaStatus } from "./AgyAgentClient";
 
 // OpenAI Codex (ChatGPT) device-code flow constants, reverse-engineered from
 // @earendil-works/pi-ai/dist/utils/oauth/openai-codex.js
@@ -65,6 +65,25 @@ export interface PersistedSessionTab {
   thinkingLevel?: string;
 }
 
+/**
+ * Pimate-owned metadata for an Antigravity native conversation.
+ *
+ * AGY keeps its own global conversation cache. This lightweight index only
+ * records which native conversation belongs to this Obsidian vault; it is not
+ * a replacement for AGY's actual transcript or model context.
+ */
+export interface AgyConversationIndexEntry {
+  conversationId: string;
+  workspacePath: string;
+  createdAt: number;
+  updatedAt: number;
+  source: "pimate" | "resumed" | "usage" | "provider" | "title";
+  /** Internal AGY helper session; never show it in Pimate history. */
+  internal?: boolean;
+  title?: string;
+  preview?: string;
+}
+
 export interface PiAgentSettings {
   enableAntigravity: boolean;
   defaultEngine: "pi" | "antigravity";
@@ -92,6 +111,11 @@ export interface PiAgentSettings {
   maxTabs: number;
   streamingRenderMode: "auto" | "pretty" | "fast";
   sessionTitles: Record<string, string>;
+  agySessionTitles: Record<string, string>;
+  agyConversationIndex: Record<string, AgyConversationIndexEntry>;
+  /** One reusable AGY conversation per Obsidian vault for auto-title prompts. */
+  agyTitleConversationId: string;
+  agyTitleConversationTurns: number;
 }
 
 export const DEFAULT_SETTINGS: PiAgentSettings = {
@@ -121,6 +145,10 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   maxTabs: 3,
   streamingRenderMode: "pretty",
   sessionTitles: {},
+  agySessionTitles: {},
+  agyConversationIndex: {},
+  agyTitleConversationId: "",
+  agyTitleConversationTurns: 0,
 };
 
 export interface DiscoveredSkill {
@@ -653,6 +681,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
       statusDesc.setText(isZh ? "请检查系统权限或在下方配置正确的可执行路径。" : "Please verify permissions or configure the executable path below.");
     });
 
+    this.renderAgyQuotaCard(containerEl, isZh);
+
     // agy path setting
     new Setting(containerEl)
       .setName(isZh ? "agy 可执行路径" : "agy Executable Path")
@@ -739,6 +769,102 @@ export class PiAgentSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+  }
+
+  private renderAgyQuotaCard(containerEl: HTMLElement, isZh: boolean): void {
+    const card = containerEl.createDiv("agy-quota-card");
+    const header = card.createDiv("agy-quota-card-header");
+    header.createDiv({
+      text: isZh ? "AGY 剩余用量" : "AGY quota remaining",
+      cls: "agy-quota-card-title",
+    });
+    const refreshButton = header.createEl("button", {
+      text: isZh ? "刷新" : "Refresh",
+      cls: "agy-quota-refresh",
+    });
+    const content = card.createDiv("agy-quota-card-content");
+    const footer = card.createDiv("agy-quota-card-footer");
+    content.setText(isZh ? "正在读取 AGY 配额..." : "Reading AGY quota...");
+
+    const formatResetTime = (resetTime: string | undefined): string => {
+      const timestamp = Date.parse(resetTime || "");
+      if (!Number.isFinite(timestamp)) return "";
+      const remainingMinutes = Math.max(0, Math.ceil((timestamp - Date.now()) / 60_000));
+      if (remainingMinutes === 0) return isZh ? "即将刷新" : "Refreshing soon";
+      const hours = Math.floor(remainingMinutes / 60);
+      const minutes = remainingMinutes % 60;
+      const relative = hours > 0
+        ? (isZh ? `${hours} 小时 ${minutes} 分钟后重置` : `Resets in ${hours}h ${minutes}m`)
+        : (isZh ? `${minutes} 分钟后重置` : `Resets in ${minutes}m`);
+      const clock = new Date(timestamp).toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      return `${relative} · ${clock}`;
+    };
+
+    const renderQuota = (data: AgyQuotaStatus | null, error?: string): void => {
+      content.empty();
+      footer.empty();
+      card.toggleClass("is-error", !data);
+      if (!data) {
+        content.createDiv({
+          text: isZh
+            ? `暂时无法读取 AGY 剩余用量：${error || "未知错误"}`
+            : `Unable to read AGY quota: ${error || "Unknown error"}`,
+          cls: "agy-quota-error",
+        });
+        return;
+      }
+
+      for (const group of data.groups) {
+        const groupEl = content.createDiv("agy-quota-group");
+        groupEl.createDiv({ text: group.name, cls: "agy-quota-group-name" });
+        for (const bucket of group.buckets) {
+          const percentage = Math.round(
+            Math.max(0, Math.min(1, bucket.remainingFraction)) * 100
+          );
+          const row = groupEl.createDiv("agy-quota-row");
+          row.createSpan({ text: bucket.name, cls: "agy-quota-bucket-name" });
+          row.createSpan({ text: `${percentage}%`, cls: "agy-quota-bucket-value" });
+          const track = groupEl.createDiv("agy-quota-bar");
+          const fill = track.createDiv("agy-quota-bar-fill");
+          fill.style.width = `${percentage}%`;
+          fill.toggleClass("is-low", percentage <= 20);
+          const resetText = formatResetTime(bucket.resetTime);
+          if (resetText) {
+            groupEl.createDiv({ text: resetText, cls: "agy-quota-reset" });
+          }
+        }
+      }
+      footer.setText(
+        isZh
+          ? `来自 AGY /usage · 更新于 ${new Date(data.fetchedAt).toLocaleTimeString()} · 查询不消耗额度、不创建会话`
+          : `From AGY /usage · Updated ${new Date(data.fetchedAt).toLocaleTimeString()} · Read-only; no quota or session consumed`
+      );
+    };
+
+    const refresh = async (force: boolean): Promise<void> => {
+      refreshButton.disabled = true;
+      refreshButton.setText(isZh ? "查询中..." : "Loading...");
+      try {
+        const result = await AgyAgentClient.getQuotaStatus(
+          this.plugin.settings.agyPath,
+          { force }
+        );
+        renderQuota(result.success ? result.data || null : null, result.error);
+      } catch (err) {
+        renderQuota(null, err instanceof Error ? err.message : String(err));
+      } finally {
+        refreshButton.disabled = false;
+        refreshButton.setText(isZh ? "刷新" : "Refresh");
+      }
+    };
+
+    refreshButton.onclick = () => {
+      void refresh(true);
+    };
+    void refresh(false);
   }
 
   private renderPiSettings(containerEl: HTMLElement, isZh: boolean): void {
@@ -1271,8 +1397,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setName(isZh ? "自动起标题" : "Auto-name sessions")
       .setDesc(
         isZh
-          ? "开启后，用户首次发送消息时自动用 LLM 为当前 Tab 起一个 4-12 字的标题（不污染主会话历史）。失败时降级为首条消息截断。"
-          : "When enabled, the plugin auto-generates a 4-12 char title for the current tab on first user message (without polluting the main session). Falls back to first-message truncation on failure."
+          ? "开启后，用户首次发送消息时自动为当前 Tab 起一个 4-12 字的标题；AGY 会复用一个隐藏的命名会话，避免每次生成一条新历史。失败时降级为首条消息截断。"
+          : "When enabled, the plugin auto-generates a 4-12 char title for the current tab on first user message. AGY reuses one hidden title conversation instead of creating one per request. Falls back to first-message truncation on failure."
       )
       .addToggle((toggle) =>
         toggle

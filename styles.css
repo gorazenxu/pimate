@@ -652,7 +652,7 @@ summary.pi-agent-skill-details-summary:hover {
 
 .pi-agent-usage-summary {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 1px;
   background: var(--background-modifier-border);
   flex-shrink: 0;
@@ -661,6 +661,7 @@ summary.pi-agent-skill-details-summary:hover {
 .pi-agent-usage-card {
   background: var(--background-secondary);
   padding: 10px 14px;
+  min-width: 0;
 }
 
 .pi-agent-usage-card-label {
@@ -676,6 +677,7 @@ summary.pi-agent-skill-details-summary:hover {
   font-weight: 600;
   color: var(--text-normal);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .pi-agent-usage-card-sub {
@@ -683,6 +685,7 @@ summary.pi-agent-skill-details-summary:hover {
   color: var(--text-muted);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .pi-agent-usage-table {
@@ -2112,6 +2115,35 @@ summary.pi-agent-skill-details-summary:hover {
   text-transform: uppercase;
 }
 
+.pi-agent-history-scope {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 0 2px;
+}
+
+.pi-agent-history-scope-btn {
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.pi-agent-history-scope-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pi-agent-history-scope-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-secondary));
+  color: var(--interactive-accent);
+}
+
 .pi-agent-history-search-wrap {
   flex-shrink: 0;
   padding: 8px 0 10px;
@@ -2968,6 +3000,105 @@ summary.pi-agent-history-group-title:hover {
   gap: 8px;
 }
 
+.agy-quota-card {
+  padding: 14px 16px;
+  margin: 0 0 16px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.agy-quota-card.is-error {
+  border-color: rgba(var(--color-yellow-rgb, 210, 153, 34), 0.4);
+  background: rgba(var(--color-yellow-rgb, 210, 153, 34), 0.08);
+}
+
+.agy-quota-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.agy-quota-card-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.agy-quota-refresh {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+.agy-quota-card-content {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 20px;
+}
+
+.agy-quota-group {
+  min-width: 0;
+}
+
+.agy-quota-group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 7px;
+}
+
+.agy-quota-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.agy-quota-bucket-name {
+  color: var(--text-muted);
+}
+
+.agy-quota-bucket-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.agy-quota-bar {
+  height: 5px;
+  margin: 5px 0 2px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--background-modifier-border);
+}
+
+.agy-quota-bar-fill {
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--color-green);
+  transition: width 0.25s ease;
+}
+
+.agy-quota-bar-fill.is-low {
+  background: var(--color-red);
+}
+
+.agy-quota-reset {
+  margin-bottom: 7px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agy-quota-card-footer,
+.agy-quota-error {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 /* ─── Footer Engine Selector & Badge ───────────────────────── */
 .pi-agent-engine-selector {
   display: flex;
@@ -3050,5 +3181,3 @@ summary.pi-agent-history-group-title:hover {
   font-size: 13px;
   line-height: 1.6;
 }
-
-

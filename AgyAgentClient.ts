@@ -24,6 +24,8 @@ export interface AgyAgentClientOptions {
   cwd?: string;
   conversationId?: string;
   dangerouslySkipPermissions?: boolean;
+  /** Disable Pimate's usage journal for internal helper conversations. */
+  trackUsage?: boolean;
 }
 
 export interface AgyConversationSummary {
@@ -35,6 +37,49 @@ export interface AgyConversationSummary {
   workspaceUris: string[];
 }
 
+export interface AgyQuotaBucket {
+  id: string;
+  name: string;
+  window: string;
+  remainingFraction: number;
+  resetTime?: string;
+}
+
+export interface AgyQuotaGroup {
+  name: string;
+  description?: string;
+  buckets: AgyQuotaBucket[];
+}
+
+export interface AgyQuotaStatus {
+  groups: AgyQuotaGroup[];
+  fetchedAt: number;
+}
+
+type AgyHistoryBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string }
+  | {
+      type: "toolCall";
+      id: string;
+      name: string;
+      arguments: Record<string, unknown>;
+    };
+
+type AgyHistoryMessage =
+  | {
+      role: "user" | "assistant";
+      content: AgyHistoryBlock[];
+    }
+  | {
+      role: "toolResult";
+      toolName: string;
+      toolCallId: string;
+      content: string;
+      isError?: boolean;
+      details?: Record<string, unknown>;
+    };
+
 type AgyPromptOptions = {
   streamingBehavior?: "steer" | "followUp";
   images?: Array<{ type: string; data: string; mimeType: string }>;
@@ -45,6 +90,12 @@ interface PendingAgyPrompt {
   options?: AgyPromptOptions;
   kind: "steering" | "followUp";
 }
+
+// Transcript files can grow very large. Pimate only renders the recent
+// history on first paint, so avoid synchronously parsing an entire AGY
+// transcript before the user can see a restored conversation.
+const DEFAULT_AGY_HISTORY_MESSAGES = 100;
+const AGY_HISTORY_TAIL_BYTES = 2 * 1024 * 1024;
 
 /**
  * Resolve the agy executable path on Windows and POSIX.
@@ -111,6 +162,16 @@ export function resolveAgySpawn(
 export class AgyAgentClient extends EventEmitter {
   readonly engine = "antigravity" as const;
 
+  private static quotaCache: {
+    path: string;
+    expiresAt: number;
+    data: AgyQuotaStatus;
+  } | null = null;
+  private static quotaRequest: {
+    path: string;
+    promise: Promise<RpcResponse<AgyQuotaStatus>>;
+  } | null = null;
+
   private process: ChildProcess | null = null;
   private buffer = "";
   private decoder = new StringDecoder("utf8");
@@ -129,6 +190,8 @@ export class AgyAgentClient extends EventEmitter {
   private availableTools: string[] = [];
   private pendingPrompts: PendingAgyPrompt[] = [];
   private historyLoadedConversationId: string | null = null;
+  private historyLoadedLimit: number | null = null;
+  private historyIsPartial = false;
   private toolCallStates = new Map<string, "active" | "done">();
 
   private lastAssistantText = "";
@@ -144,11 +207,9 @@ export class AgyAgentClient extends EventEmitter {
   private usageModelId: string | null = null;
   private usageLoadPromise: Promise<void> = Promise.resolve();
   private usageStateRevision = 0;
+  private readonly trackUsage: boolean;
 
-  private historyMessages: Array<{
-    role: "user" | "assistant";
-    content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
-  }> = [];
+  private historyMessages: AgyHistoryMessage[] = [];
 
   private initResolve: ((value?: unknown) => void) | null = null;
   private initReject: ((reason?: unknown) => void) | null = null;
@@ -165,7 +226,10 @@ export class AgyAgentClient extends EventEmitter {
     this.conversationId = options.conversationId || null;
     this.currentModelId = options.modelId || "gemini-3.8-flash-high";
     this.currentEffort = options.effort || "high";
-    this.usageLoadPromise = this.restorePersistedUsage(this.conversationId);
+    this.trackUsage = options.trackUsage !== false;
+    this.usageLoadPromise = this.trackUsage
+      ? this.restorePersistedUsage(this.conversationId)
+      : Promise.resolve();
   }
 
   getConversationId(): string | null {
@@ -176,10 +240,37 @@ export class AgyAgentClient extends EventEmitter {
     return this.process !== null && !this.process.killed;
   }
 
-  private loadTranscriptHistory(): Array<{
-    role: "user" | "assistant";
-    content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
-  }> {
+  private readTranscriptForHistory(transcriptPath: string, maxMessages: number): string {
+    const useTail = maxMessages > 0;
+    try {
+      const size = fs.statSync(transcriptPath).size;
+      if (!useTail || size <= AGY_HISTORY_TAIL_BYTES) {
+        return fs.readFileSync(transcriptPath, "utf-8");
+      }
+
+      const length = Math.min(size, AGY_HISTORY_TAIL_BYTES);
+      const offset = Math.max(0, size - length);
+      const buffer = Buffer.alloc(length);
+      const fd = fs.openSync(transcriptPath, "r");
+      try {
+        const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
+        let raw = buffer.subarray(0, bytesRead).toString("utf-8");
+        // The first record is normally cut in half when reading a tail. Drop
+        // it so every remaining line remains valid JSONL.
+        if (offset > 0) {
+          const firstNewline = raw.indexOf("\n");
+          raw = firstNewline >= 0 ? raw.slice(firstNewline + 1) : "";
+        }
+        return raw;
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return "";
+    }
+  }
+
+  private loadTranscriptHistory(maxMessages = DEFAULT_AGY_HISTORY_MESSAGES): AgyHistoryMessage[] {
     if (!this.conversationId) return [];
     try {
       const transcriptPath = path.join(
@@ -191,16 +282,37 @@ export class AgyAgentClient extends EventEmitter {
         "transcript.jsonl"
       );
       if (!fs.existsSync(transcriptPath)) return [];
-      const raw = fs.readFileSync(transcriptPath, "utf-8");
+      const raw = this.readTranscriptForHistory(transcriptPath, maxMessages);
       const lines = raw.split("\n").filter(Boolean);
-      const messages: Array<{
-        role: "user" | "assistant";
-        content: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }>;
+      const messages: AgyHistoryMessage[] = [];
+      const pendingToolCalls: Array<{
+        id: string;
+        name: string;
+        arguments: Record<string, unknown>;
       }> = [];
+      const parseToolArguments = (raw: unknown): Record<string, unknown> => {
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          return raw as Record<string, unknown>;
+        }
+        if (typeof raw === "string") {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              return parsed as Record<string, unknown>;
+            }
+          } catch {
+            // Keep an opaque string argument readable in the restored tool row.
+          }
+          return { command: raw };
+        }
+        return {};
+      };
+
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
           if (entry.type === "USER_INPUT" && entry.content) {
+            pendingToolCalls.length = 0;
             let text = String(entry.content);
             const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
             if (reqMatch) text = reqMatch[1].trim();
@@ -208,31 +320,72 @@ export class AgyAgentClient extends EventEmitter {
               role: "user",
               content: [{ type: "text", text }],
             });
-          } else if (entry.type === "PLANNER_RESPONSE" && entry.content) {
-            const blocks: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }> = [];
-            if (entry.thinking) {
-              blocks.push({ type: "thinking", thinking: String(entry.thinking) });
+          } else if (entry.type === "PLANNER_RESPONSE") {
+            // A planner response can contain assistant text, thinking, tool
+            // calls, or a combination. Keep all of those in restored history.
+            pendingToolCalls.length = 0;
+            const blocks: AgyHistoryBlock[] = [];
+            if (typeof entry.thinking === "string" && entry.thinking.trim()) {
+              blocks.push({ type: "thinking", thinking: entry.thinking });
             }
-            blocks.push({ type: "text", text: String(entry.content) });
-            messages.push({
-              role: "assistant",
-              content: blocks,
-            });
+            if (typeof entry.content === "string" && entry.content.trim()) {
+              blocks.push({ type: "text", text: entry.content });
+            }
+            if (Array.isArray(entry.tool_calls)) {
+              for (const [index, toolCall] of entry.tool_calls.entries()) {
+                const name = String(toolCall?.name || toolCall?.tool_name || "tool");
+                const id = `agy-history-tool-${entry.step_index ?? messages.length}-${index}`;
+                const argumentsValue = parseToolArguments(toolCall?.args ?? toolCall?.arguments);
+                blocks.push({
+                  type: "toolCall",
+                  id,
+                  name,
+                  arguments: argumentsValue,
+                });
+                pendingToolCalls.push({ id, name, arguments: argumentsValue });
+              }
+            }
+            if (blocks.length > 0) {
+              messages.push({ role: "assistant", content: blocks });
+            }
+          } else if (
+            entry.type === "GENERIC" &&
+            typeof entry.content === "string" &&
+            pendingToolCalls.length > 0
+          ) {
+            const toolCall = pendingToolCalls.shift();
+            if (toolCall) {
+              messages.push({
+                role: "toolResult",
+                toolName: toolCall.name,
+                toolCallId: toolCall.id,
+                content: entry.content,
+                isError: entry.status === "ERROR",
+                details: toolCall.arguments,
+              });
+            }
           }
         } catch {}
       }
-      return messages;
+      return maxMessages > 0 ? messages.slice(-maxMessages) : messages;
     } catch {
       return [];
     }
   }
 
-  private ensureHistoryLoaded(): void {
-    if (!this.conversationId || this.historyLoadedConversationId === this.conversationId) {
+  private ensureHistoryLoaded(maxMessages = DEFAULT_AGY_HISTORY_MESSAGES): void {
+    const requestedLimit = Math.max(0, Math.floor(maxMessages));
+    const alreadyLoaded =
+      this.historyLoadedConversationId === this.conversationId &&
+      this.historyLoadedLimit !== null &&
+      (this.historyLoadedLimit === 0 || this.historyLoadedLimit >= requestedLimit);
+    if (!this.conversationId || alreadyLoaded) {
       return;
     }
-    this.historyMessages = this.loadTranscriptHistory();
+    this.historyMessages = this.loadTranscriptHistory(requestedLimit);
     this.historyLoadedConversationId = this.conversationId;
+    this.historyLoadedLimit = requestedLimit;
+    this.historyIsPartial = requestedLimit > 0;
   }
 
   private emitQueueUpdate(): void {
@@ -339,6 +492,8 @@ export class AgyAgentClient extends EventEmitter {
   private resetHistoryCache(): void {
     this.historyMessages = [];
     this.historyLoadedConversationId = null;
+    this.historyLoadedLimit = null;
+    this.historyIsPartial = false;
   }
 
   private resetUsageState(): void {
@@ -354,6 +509,7 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   private async restorePersistedUsage(conversationId: string | null): Promise<void> {
+    if (!this.trackUsage) return;
     this.resetUsageState();
     if (!conversationId) return;
     const loadRevision = this.usageStateRevision;
@@ -380,7 +536,7 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   private persistUsageSnapshot(numTurns: unknown): void {
-    if (!this.conversationId || !this.usageKnown) return;
+    if (!this.trackUsage || !this.conversationId || !this.usageKnown) return;
     AgyUsageStore.record({
       conversationId: this.conversationId,
       cwd: this.options.cwd || process.cwd(),
@@ -747,7 +903,7 @@ export class AgyAgentClient extends EventEmitter {
 
       if (result?.status === "SUCCESS") {
         const responseText = result.response || this.lastAssistantText;
-        const blocks: Array<{ type: "text" | "thinking"; text?: string; thinking?: string }> = [];
+        const blocks: AgyHistoryBlock[] = [];
         if (this.lastAssistantThinking) {
           blocks.push({ type: "thinking", thinking: this.lastAssistantThinking });
         }
@@ -1119,13 +1275,22 @@ export class AgyAgentClient extends EventEmitter {
     };
   }
 
-  async getMessages(): Promise<RpcResponse> {
-    this.ensureHistoryLoaded();
+  async getMessages(options: { limit?: number } = {}): Promise<RpcResponse> {
+    const limit = options.limit;
+    this.ensureHistoryLoaded(
+      typeof limit === "number" && Number.isFinite(limit)
+        ? limit
+        : DEFAULT_AGY_HISTORY_MESSAGES
+    );
     return {
       type: "response",
       command: "get_messages",
       success: true,
-      data: { messages: this.historyMessages },
+      data: {
+        messages: this.historyMessages,
+        totalMessages: this.historyMessages.length,
+        partialHistory: this.historyIsPartial,
+      },
     };
   }
 
@@ -1138,9 +1303,10 @@ export class AgyAgentClient extends EventEmitter {
     };
   }
 
-  async getSessionStats(): Promise<RpcResponse> {
+  async getSessionStats(options: { includeHistory?: boolean } = {}): Promise<RpcResponse> {
     await this.usageLoadPromise;
-    this.ensureHistoryLoaded();
+    const includeHistory = options.includeHistory !== false;
+    if (includeHistory) this.ensureHistoryLoaded();
     const cost = this.usageKnown
       ? calculateAgyCost(this.usageModelId || this.currentModelId, {
         input: this.inputTokens,
@@ -1155,7 +1321,7 @@ export class AgyAgentClient extends EventEmitter {
       command: "get_session_stats",
       success: true,
       data: {
-        totalMessages: this.historyMessages.length,
+        totalMessages: includeHistory ? this.historyMessages.length : undefined,
         tokens: {
           total: this.totalTokens,
           input: this.inputTokens,
@@ -1174,6 +1340,7 @@ export class AgyAgentClient extends EventEmitter {
         cacheReadTokens: this.cacheReadTokens,
         usageKnown: this.usageKnown,
         usageObservedAt: this.usageObservedAt || undefined,
+        partialHistory: includeHistory ? this.historyIsPartial : undefined,
       },
     };
   }
@@ -1444,6 +1611,27 @@ export class AgyAgentClient extends EventEmitter {
     );
   }
 
+  /** Normalize an AGY workspace URI/path into the same form as process.cwd(). */
+  static normalizeWorkspacePath(workspace?: string): string {
+    const raw = workspace?.trim() || "";
+    if (!raw) return "";
+    try {
+      const filePath = raw.startsWith("file://")
+        ? raw.slice("file://".length)
+        : raw;
+      return path.resolve(decodeURIComponent(filePath)).replace(/\\/g, "/");
+    } catch {
+      return raw.replace(/\\/g, "/");
+    }
+  }
+
+  static belongsToWorkspace(summary: AgyConversationSummary, workspace?: string): boolean {
+    const target = AgyAgentClient.normalizeWorkspacePath(workspace);
+    return !!target && summary.workspaceUris.some(
+      (uri) => AgyAgentClient.normalizeWorkspacePath(uri) === target
+    );
+  }
+
   /**
    * Read AGY's persistent conversation metadata cache. The cache is the same
    * source used by the native `/resume` picker; the actual `.db` file check
@@ -1452,7 +1640,6 @@ export class AgyAgentClient extends EventEmitter {
   static listConversations(cwd?: string): AgyConversationSummary[] {
     const dataDir = AgyAgentClient.getAgyDataDir();
     const metadataPath = path.join(dataDir, "cache", "conversation_metadata.json");
-    const lastConversationsPath = path.join(dataDir, "cache", "last_conversations.json");
     const conversationsDir = path.join(dataDir, "conversations");
 
     let metadata: Record<string, any> = {};
@@ -1465,22 +1652,7 @@ export class AgyAgentClient extends EventEmitter {
       // AGY may be updating the cache, or an older version may not have it.
     }
 
-    let lastConversationId = "";
-    try {
-      const parsed = JSON.parse(fs.readFileSync(lastConversationsPath, "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const target = cwd ? path.resolve(cwd) : "";
-        const match = Object.entries(parsed).find(([workspace]) => {
-          if (!target) return false;
-          return path.resolve(workspace) === target;
-        });
-        if (typeof match?.[1] === "string") lastConversationId = match[1];
-      }
-    } catch {
-      // The metadata list below is still useful without the last-session map.
-    }
-
-    const dbMtimes = new Map<string, number>();
+    const conversationMtimes = new Map<string, number>();
     try {
       for (const name of fs.readdirSync(conversationsDir)) {
         const match = name.match(
@@ -1489,13 +1661,31 @@ export class AgyAgentClient extends EventEmitter {
         if (!match) continue;
         try {
           const stat = fs.statSync(path.join(conversationsDir, name));
-          if (stat.isFile()) dbMtimes.set(match[1], stat.mtimeMs);
+          if (stat.isFile()) conversationMtimes.set(match[1].toLowerCase(), stat.mtimeMs);
         } catch {
           // A conversation can be removed while the directory is scanned.
         }
       }
     } catch {
-      // Return an empty list if AGY's local store is not available.
+      // The brain directory below may still contain recoverable sessions.
+    }
+    try {
+      const brainDir = path.join(dataDir, "brain");
+      for (const name of fs.readdirSync(brainDir)) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(name)) {
+          continue;
+        }
+        const key = name.toLowerCase();
+        if (conversationMtimes.has(key)) continue;
+        try {
+          const stat = fs.statSync(path.join(brainDir, name));
+          if (stat.isDirectory()) conversationMtimes.set(key, stat.mtimeMs);
+        } catch {
+          // A conversation can be removed while the directory is scanned.
+        }
+      }
+    } catch {
+      // Return records backed by the conversations directory when brain is unavailable.
     }
 
     const summaries: AgyConversationSummary[] = [];
@@ -1505,7 +1695,8 @@ export class AgyAgentClient extends EventEmitter {
 
       const conversationId =
         typeof summary.ID === "string" && summary.ID.trim() ? summary.ID.trim() : key;
-      if (!dbMtimes.has(conversationId)) continue;
+      const conversationKey = conversationId.toLowerCase();
+      if (!conversationMtimes.has(conversationKey)) continue;
 
       const stepCount = Number(summary.NumSteps) || 0;
       // Match AGY's native picker behavior: empty startup shells are not
@@ -1526,44 +1717,21 @@ export class AgyAgentClient extends EventEmitter {
         conversationId,
         title: typeof summary.Title === "string" ? summary.Title.trim() : "",
         preview: typeof summary.Preview === "string" ? summary.Preview.trim() : "",
-        mtime: Number.isFinite(updatedAt) ? updatedAt : dbMtimes.get(conversationId) || 0,
+        mtime: Number.isFinite(updatedAt) ? updatedAt : conversationMtimes.get(conversationKey) || 0,
         stepCount,
         workspaceUris,
       });
     }
 
-    const normalizedCwd = cwd ? path.resolve(cwd) : "";
-    const workspaceFromUri = (uri: string): string => {
-      try {
-        const filePath = uri.startsWith("file://")
-          ? uri.slice("file://".length)
-          : uri;
-        return path.resolve(decodeURIComponent(filePath));
-      } catch {
-        return uri;
-      }
-    };
-    const belongsToWorkspace = (summary: AgyConversationSummary): boolean =>
-      !!normalizedCwd && summary.workspaceUris.some(
-        (uri) => workspaceFromUri(uri) === normalizedCwd
-      );
-
     let filtered = summaries;
-    if (normalizedCwd) {
-      const explicitMatches = summaries.filter(belongsToWorkspace);
-      if (explicitMatches.length > 0) {
-        filtered = summaries.filter(
-          (summary) => belongsToWorkspace(summary) || summary.conversationId === lastConversationId
-        );
-      } else {
-        // AGY 1.1.x sometimes leaves WorkspaceURIs empty for print-mode
-        // conversations. Keep those unscoped records visible instead of
-        // showing a blank history panel, while still excluding conversations
-        // explicitly tied to another workspace.
-        filtered = summaries.filter(
-          (summary) => summary.workspaceUris.length === 0 || summary.conversationId === lastConversationId
-        );
-      }
+    if (cwd) {
+      // Do not treat AGY's unscoped print-mode records as belonging to the
+      // current vault. Pimate has its own ownership index for records it
+      // created or the user explicitly imports; this low-level method only
+      // trusts an explicit AGY workspace URI.
+      filtered = summaries.filter((summary) =>
+        AgyAgentClient.belongsToWorkspace(summary, cwd)
+      );
     }
 
     return filtered.sort((a, b) => b.mtime - a.mtime);
@@ -1688,5 +1856,119 @@ export class AgyAgentClient extends EventEmitter {
       version: versionRes.version,
       error: authRes.error,
     };
+  }
+
+  /**
+   * Query AGY's read-only `/usage` command in print mode. AGY 1.1.x returns a
+   * structured quota payload here without starting an agent turn, consuming
+   * quota, or creating a conversation record.
+   */
+  static getQuotaStatus(
+    userAgyPath?: string,
+    options: { force?: boolean } = {}
+  ): Promise<RpcResponse<AgyQuotaStatus>> {
+    const resolved = resolveAgySpawn(userAgyPath);
+    const cacheKey = [resolved.cmd, ...resolved.scriptArgs].join("\u0000");
+    const now = Date.now();
+    if (
+      !options.force &&
+      this.quotaCache &&
+      this.quotaCache.path === cacheKey &&
+      this.quotaCache.expiresAt > now
+    ) {
+      return Promise.resolve({
+        type: "response",
+        command: "usage",
+        success: true,
+        data: this.quotaCache.data,
+      });
+    }
+    if (!options.force && this.quotaRequest?.path === cacheKey) {
+      return this.quotaRequest.promise;
+    }
+
+    const promise = new Promise<RpcResponse<AgyQuotaStatus>>((resolve) => {
+      execFile(
+        resolved.cmd,
+        [...resolved.scriptArgs, "-p", "/usage", "--output-format", "json"],
+        { timeout: 30_000, env: process.env, maxBuffer: 2 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          const diagnostic = [stderr?.trim(), err?.message].filter(Boolean).join(" ");
+          if (err && !stdout?.trim()) {
+            resolve({
+              type: "response",
+              command: "usage",
+              success: false,
+              error: diagnostic || "Could not query AGY quota",
+            });
+            return;
+          }
+
+          try {
+            const payload = JSON.parse(stdout.trim());
+            if (payload?.status !== "SUCCESS") {
+              throw new Error(payload?.error || diagnostic || "AGY quota query failed");
+            }
+            const rawGroups = payload?.command?.data?.groups;
+            if (!Array.isArray(rawGroups)) {
+              throw new Error("AGY returned no quota groups");
+            }
+            const groups: AgyQuotaGroup[] = rawGroups
+              .filter((group: any) => group && typeof group.name === "string")
+              .map((group: any) => ({
+                name: group.name.trim(),
+                description:
+                  typeof group.description === "string" ? group.description.trim() : undefined,
+                buckets: Array.isArray(group.buckets)
+                  ? group.buckets
+                      .filter((bucket: any) => bucket && typeof bucket.name === "string")
+                      .map((bucket: any) => ({
+                        id: typeof bucket.id === "string" ? bucket.id : bucket.name,
+                        name: bucket.name.trim(),
+                        window: typeof bucket.window === "string" ? bucket.window : "",
+                        remainingFraction: Math.max(
+                          0,
+                          Math.min(1, Number(bucket.remaining_fraction) || 0)
+                        ),
+                        resetTime:
+                          typeof bucket.reset_time === "string" ? bucket.reset_time : undefined,
+                      }))
+                  : [],
+              }))
+              .filter((group: AgyQuotaGroup) => group.buckets.length > 0);
+            if (groups.length === 0) throw new Error("AGY returned no quota buckets");
+
+            const data: AgyQuotaStatus = { groups, fetchedAt: Date.now() };
+            this.quotaCache = {
+              path: cacheKey,
+              expiresAt: Date.now() + 30_000,
+              data,
+            };
+            resolve({ type: "response", command: "usage", success: true, data });
+          } catch (parseError) {
+            resolve({
+              type: "response",
+              command: "usage",
+              success: false,
+              error:
+                parseError instanceof Error
+                  ? parseError.message
+                  : diagnostic || "Invalid AGY quota response",
+            });
+          }
+        }
+      );
+    });
+
+    this.quotaRequest = { path: cacheKey, promise };
+    void promise.then(
+      () => {
+        if (this.quotaRequest?.promise === promise) this.quotaRequest = null;
+      },
+      () => {
+        if (this.quotaRequest?.promise === promise) this.quotaRequest = null;
+      }
+    );
+    return promise;
   }
 }
