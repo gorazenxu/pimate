@@ -24,10 +24,10 @@
   <circle cx="180" cy="41" r="8" class="icon"/>
   <path class="icon" d="M186 47l6 6"/>
   <rect class="pane" x="510" y="25" width="330" height="32" rx="7"/>
-  <text class="muted small" x="532" y="46">番外01-全网认赛博义父 OpenAI…</text>
+  <text class="muted small" x="532" y="46">Example note – Pimate…</text>
   <path class="icon" d="M814 35l7 7-7 7"/>
   <path class="icon" d="M864 41h26M877 28v26"/>
-  <text class="muted small" x="1410" y="46">66MyMind · Obsidian</text>
+  <text class="muted small" x="1410" y="46">DemoVault · Obsidian</text>
 
   <!-- Left ribbon and vault explorer -->
   <rect class="rail" x="20" y="66" width="58" height="852"/>
@@ -40,55 +40,55 @@
   <text class="brand" x="42" y="339" font-size="22">π</text>
 
   <rect class="pane" x="78" y="66" width="330" height="852"/>
-  <text class="text title" x="102" y="106">66MyMind</text>
+  <text class="text title" x="102" y="106">DemoVault</text>
   <path class="icon" d="M352 93h17v17h-17zM354 91v6M367 91v6"/>
   <path class="icon" d="M382 96l8 8M390 96l-8 8"/>
   <line class="divider" x1="96" y1="124" x2="390" y2="124"/>
-  <text class="muted body" x="102" y="154">⌄  _目录盘点</text>
-  <text class="muted body" x="102" y="188">⌄  01知识素材</text>
-  <text class="muted body" x="102" y="222">⌄  02学习资料</text>
-  <text class="muted body" x="102" y="256">⌄  08章鱼哥</text>
-  <text class="muted body" x="126" y="290">⌄  01AI学习</text>
-  <text class="muted body" x="150" y="324">⌄  00-文案草稿</text>
-  <text class="muted body" x="174" y="358">⌄  番外篇</text>
+  <text class="muted body" x="102" y="154">⌄  00Inbox</text>
+  <text class="muted body" x="102" y="188">⌄  01Notes</text>
+  <text class="muted body" x="102" y="222">⌄  02Projects</text>
+  <text class="muted body" x="102" y="256">⌄  03Resources</text>
+  <text class="muted body" x="126" y="290">⌄  Project A</text>
+  <text class="muted body" x="150" y="324">⌄  01Drafts</text>
+  <text class="muted body" x="174" y="358">⌄  Working notes</text>
   <rect class="active" x="164" y="374" width="224" height="31" rx="5"/>
-  <text class="text small" x="180" y="395">番外01-全网认赛博义父…</text>
-  <text class="muted body" x="174" y="438">封面</text>
-  <text class="muted body" x="126" y="474">⌄  07-PPT素材</text>
-  <text class="muted body" x="150" y="508">07-播放检查-第06页-截图阅读态</text>
-  <text class="muted body" x="150" y="542">07-播放检查-第06页-方案原图</text>
-  <text class="muted body" x="126" y="594">⌄  07素材</text>
-  <text class="muted body" x="126" y="628">⌄  A产品与项目</text>
-  <text class="muted body" x="126" y="662">⌄  B客户与反馈</text>
-  <text class="muted body" x="126" y="696">⌄  C运营与市场</text>
-  <text class="muted body" x="126" y="730">⌄  F临时_待归档</text>
+  <text class="text small" x="180" y="395">Example note…</text>
+  <text class="muted body" x="174" y="438">Assets</text>
+  <text class="muted body" x="126" y="474">⌄  04Archive</text>
+  <text class="muted body" x="150" y="508">meeting-notes.md</text>
+  <text class="muted body" x="150" y="542">project-brief.md</text>
+  <text class="muted body" x="126" y="594">⌄  Templates</text>
+  <text class="muted body" x="126" y="628">⌄  APlanning</text>
+  <text class="muted body" x="126" y="662">⌄  BResearch</text>
+  <text class="muted body" x="126" y="696">⌄  CDelivery</text>
+  <text class="muted body" x="126" y="730">⌄  ZArchive</text>
   <line class="divider" x1="96" y1="780" x2="390" y2="780"/>
-  <text class="muted small" x="102" y="814">当前 Vault · 本地文件树</text>
+  <text class="muted small" x="102" y="814">DemoVault · 本地文件树</text>
 
   <!-- Active note/editor -->
   <rect class="pane" x="408" y="66" width="460" height="852"/>
-  <text class="muted small" x="434" y="102">08章鱼哥 / 01AI学习 / 00-文案草稿</text>
+  <text class="muted small" x="434" y="102">02Projects / 01Drafts / Example note</text>
   <line class="divider" x1="434" y1="120" x2="842" y2="120"/>
-  <text class="text title" x="434" y="168">番外01-全网认赛博义父</text>
-  <text class="text title" x="434" y="198">OpenAI每天一张重置卡</text>
-  <text class="text title" x="434" y="228">的顶级套路</text>
+  <text class="text title" x="434" y="168">整理项目资料与</text>
+  <text class="text title" x="434" y="198">下一步计划</text>
+  <text class="text title" x="434" y="228">Example note</text>
   <text class="muted label" x="434" y="274">笔记属性</text>
   <line class="divider" x1="434" y1="288" x2="842" y2="288"/>
   <text class="muted small" x="454" y="322">title</text>
-  <text class="text small" x="586" y="322">番外01-全网认赛博义父？OpenAI每天…</text>
+  <text class="text small" x="586" y="322">Example note – project planning…</text>
   <text class="muted small" x="454" y="356">type</text>
-  <text class="text small" x="586" y="356">发布版主文稿（Remotion 渲染版）</text>
+  <text class="text small" x="586" y="356">Project working note</text>
   <text class="muted small" x="454" y="390">updated</text>
-  <text class="text small" x="586" y="390">2026/09/04</text>
+  <text class="text small" x="586" y="390">2026/01/01</text>
   <text class="muted small" x="454" y="424">series</text>
-  <text class="text small" x="586" y="424">01AI学习</text>
+  <text class="text small" x="586" y="424">Project A</text>
   <text class="muted small" x="454" y="458">pipeline</text>
-  <text class="text small" x="586" y="458">Remotion (React + TypeScript)</text>
+  <text class="text small" x="586" y="458">Obsidian + Pimate</text>
   <line class="divider" x1="434" y1="494" x2="842" y2="494"/>
-  <text class="text body" x="434" y="538">番外 01 集：全网认“赛博义父”？</text>
-  <text class="muted body" x="434" y="574">系列归属：《AI学习》热点番外篇</text>
-  <text class="muted body" x="434" y="610">核心判断：表面是磕头，本质是算力紧缺</text>
-  <text class="muted body" x="434" y="646">被包装成手游体力拉新。</text>
+  <text class="text body" x="434" y="538">本周项目进展与下一步计划</text>
+  <text class="muted body" x="434" y="574">项目归属：Project A</text>
+  <text class="muted body" x="434" y="610">核心判断：先整理信息，再安排执行顺序</text>
+  <text class="muted body" x="434" y="646">让下一步工作清晰、可追踪。</text>
   <rect class="subtle" x="434" y="690" width="408" height="100" rx="8"/>
   <text class="muted small" x="454" y="720">当前笔记可直接作为 Pimate 上下文</text>
   <text class="muted small" x="454" y="750">@ 文件 / 文件夹 / 选中文本 → 发送到右侧 Agent</text>
@@ -107,9 +107,9 @@
   <rect class="active" x="896" y="204" width="132" height="38" rx="8"/>
   <text class="accent body" x="913" y="229">当前空间 3</text>
   <rect class="subtle" x="1038" y="204" width="116" height="38" rx="8"/>
-  <text class="text body" x="1052" y="229">未归属 42</text>
+  <text class="text body" x="1052" y="229">未归属 4</text>
   <rect class="subtle" x="1164" y="204" width="126" height="38" rx="8"/>
-  <text class="text body" x="1177" y="229">全部 AGY 55</text>
+  <text class="text body" x="1177" y="229">全部 AGY 5</text>
   <rect class="subtle" x="896" y="258" width="658" height="42" rx="8"/>
   <text class="muted body" x="915" y="285">搜索历史会话...</text>
   <path class="icon" d="M1515 272a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM1520 282l7 7"/>
@@ -117,7 +117,7 @@
   <!-- history row 1 -->
   <rect class="active" x="896" y="320" width="658" height="82" rx="7"/>
   <path class="accent icon" d="M918 345h19v15h-19zM918 345l9 8 10-8"/>
-  <text class="text label" x="960" y="348">认知改变与短视频自检</text>
+  <text class="text label" x="960" y="348">项目资料整理</text>
   <text class="muted small" x="960" y="374">Current session</text>
   <rect class="action" x="1504" y="344" width="30" height="30" rx="6"/>
   <path class="icon" d="M1512 351h14v15h-14zM1510 354h-3v15h14v-3"/>
@@ -125,20 +125,20 @@
   <!-- history row 2 -->
   <rect class="pane" x="896" y="402" width="658" height="82" rx="7"/>
   <path class="icon" d="M918 429h19v15h-19zM918 429l9 8 10-8"/>
-  <text class="text label" x="960" y="432">AI客户推荐长图规划</text>
-  <text class="muted small" x="960" y="458">20:38</text>
+  <text class="text label" x="960" y="432">下一步行动清单</text>
+  <text class="muted small" x="960" y="458">09:38</text>
   <rect class="action" x="1504" y="426" width="30" height="30" rx="6"/>
   <path class="icon" d="M1512 433h14v15h-14zM1510 436h-3v15h14v-3"/>
 
   <!-- history row 3 -->
   <rect class="pane" x="896" y="484" width="658" height="82" rx="7"/>
   <path class="icon" d="M918 511h19v15h-19zM918 511l9 8 10-8"/>
-  <text class="text label" x="960" y="514">联网查询Skill使用</text>
-  <text class="muted small" x="960" y="540">18:11</text>
+  <text class="text label" x="960" y="514">查询插件使用方法</text>
+  <text class="muted small" x="960" y="540">昨天</text>
   <rect class="action" x="1504" y="508" width="30" height="30" rx="6"/>
   <path class="icon" d="M1512 515h14v15h-14zM1510 518h-3v15h14v-3"/>
 
-  <text class="note" x="896" y="602">历史范围和数量来自当前 Vault / AGY 数据，示例数字会随使用变化</text>
+  <text class="note" x="896" y="602">界面内容与数量均为通用示例，不包含用户 Vault 数据</text>
   <line class="divider" x1="896" y1="626" x2="1554" y2="626"/>
 
   <!-- session tabs and composer -->

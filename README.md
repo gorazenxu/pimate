@@ -15,7 +15,7 @@
 
 Pimate embeds local coding agents directly into your Obsidian workspace. Rather than acting as a standard text-completion chatbot, Pimate acts as a full-fledged agent capable of inspecting vault files, running grep/find searches, drafting precise diffs, executing shell tools, and maintaining multi-turn task state — all within Obsidian.
 
-> The interface map above is based on the current Pimate page in Obsidian: the Vault file tree and active note remain visible on the left, while Pimate runs in the right pane. The history counts and note text are representative and change with the current Vault.
+> The interface map above is based on the current Pimate page in Obsidian: the Vault file tree and active note remain visible on the left, while Pimate runs in the right pane. All names, note text, and counts shown in the image are generic examples and contain no user Vault data.
 
 ### Actual interface at a glance
 
