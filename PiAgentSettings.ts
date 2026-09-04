@@ -84,6 +84,12 @@ export interface AgyConversationIndexEntry {
   preview?: string;
 }
 
+/**
+ * Per-vault classification overrides for AGY's global conversation list.
+ * These do not modify AGY's native conversation data.
+ */
+export type AgyConversationScopeOverride = "current" | "unassigned";
+
 export interface PiAgentSettings {
   enableAntigravity: boolean;
   defaultEngine: "pi" | "antigravity";
@@ -113,6 +119,7 @@ export interface PiAgentSettings {
   sessionTitles: Record<string, string>;
   agySessionTitles: Record<string, string>;
   agyConversationIndex: Record<string, AgyConversationIndexEntry>;
+  agyConversationScopeOverrides: Record<string, AgyConversationScopeOverride>;
   /** One reusable AGY conversation per Obsidian vault for auto-title prompts. */
   agyTitleConversationId: string;
   agyTitleConversationTurns: number;
@@ -147,6 +154,7 @@ export const DEFAULT_SETTINGS: PiAgentSettings = {
   sessionTitles: {},
   agySessionTitles: {},
   agyConversationIndex: {},
+  agyConversationScopeOverrides: {},
   agyTitleConversationId: "",
   agyTitleConversationTurns: 0,
 };

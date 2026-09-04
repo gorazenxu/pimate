@@ -911,6 +911,37 @@ summary.pi-agent-skill-details-summary:hover {
 .pi-agent-error-block {
   color: var(--pi-error);
   font-size: 13px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.pi-agent-error-detail {
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.pi-agent-error-retry {
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 65%, transparent);
+  background: transparent;
+  color: var(--interactive-accent);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pi-agent-error-retry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+.pi-agent-error-retry:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 /* Tool calls: copied proportions from Claudian tool rows */
@@ -2235,6 +2266,43 @@ summary.pi-agent-skill-details-summary:hover {
   gap: 4px;
   min-width: 0;
   flex: 1;
+}
+
+.pi-agent-history-item-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.pi-agent-history-item:hover .pi-agent-history-item-actions,
+.pi-agent-history-item:focus-within .pi-agent-history-item-actions {
+  opacity: 1;
+}
+
+.pi-agent-history-item-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.pi-agent-history-item-action:hover {
+  color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.pi-agent-history-item-action svg {
+  width: 16px;
+  height: 16px;
 }
 
 .pi-agent-history-item-name {

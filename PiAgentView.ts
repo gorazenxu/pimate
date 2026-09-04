@@ -27,7 +27,10 @@ import {
 import { basename, dirname, join, relative } from "path";
 import { homedir } from "os";
 import type PiAgentPlugin from "./main";
-import type { AgyConversationIndexEntry } from "./PiAgentSettings";
+import type {
+  AgyConversationIndexEntry,
+  AgyConversationScopeOverride,
+} from "./PiAgentSettings";
 import {
   PiAgentClient,
   type RpcEvent,
@@ -37,7 +40,11 @@ import {
   type SessionEntry,
   type PiModel as PiModelFromClient,
 } from "./PiAgentClient";
-import { AgyAgentClient } from "./AgyAgentClient";
+import {
+  AgyAgentClient,
+  type AgyConversationSummary,
+  type AgyConversationWorkspaceStatus,
+} from "./AgyAgentClient";
 import {
   AGY_GEMINI_PRICING_SOURCE,
   calculateAgyCost,
@@ -1117,6 +1124,30 @@ export class PiAgentView extends ItemView {
     tab: ChatTab,
     options: { requireSessionRestore?: boolean } = {}
   ): Promise<void> {
+    if (tab.engine === "antigravity" && tab.sessionId) {
+      const conversationId = tab.sessionId.trim();
+      const workspaceStatus = this.getAgyConversationWorkspaceStatus(conversationId);
+      if (workspaceStatus === "foreign" || workspaceStatus === "missing") {
+        const reason = workspaceStatus === "foreign"
+          ? "another workspace"
+          : "no longer exists";
+        console.warn(
+          `[pimate] Unbinding AGY conversation ${conversationId}: ${reason}.`
+        );
+        const staleClient = tab.client;
+        if (staleClient) {
+          await staleClient.destroy().catch(() => undefined);
+          if (tab.client === staleClient) tab.client = null;
+          if (this.client === staleClient) this.client = null;
+        }
+        // Keep the AGY transcript and Pimate title metadata. Only remove the
+        // tab's runtime binding so the next client starts a new conversation
+        // in the current Vault.
+        tab.sessionId = undefined;
+        tab.restored = false;
+      }
+    }
+
     if (tab.sessionFile && !this.isSessionFileInCurrentWorkspace(tab.sessionFile)) {
       console.log(`[pi-agent] SessionFile ${tab.sessionFile} belongs to another workspace, unbinding to start fresh.`);
       tab.sessionFile = undefined;
@@ -1205,6 +1236,7 @@ export class PiAgentView extends ItemView {
         modelId,
         effort,
         cwd: vaultBasePath,
+        workspacePath: vaultBasePath,
         conversationId: tab?.sessionId,
         dangerouslySkipPermissions: settings.agyAutoApproveTools === true,
       });
@@ -1682,11 +1714,20 @@ export class PiAgentView extends ItemView {
     const message = event.message as {
       role: string;
       content?: string | MessageContent[];
+      retry?: boolean;
     };
     if (!message) return;
     const tab = sourceTab || this.activeTab;
 
     if (message.role === "user") {
+      if (message.retry) {
+        this.addSystemMessage(
+          this.plugin.settings.language !== "en"
+            ? "↻ 正在重试上一轮 AGY 请求…"
+            : "↻ Retrying the previous AGY request…"
+        );
+        return;
+      }
       const content =
         typeof message.content === "string"
           ? message.content
@@ -1873,12 +1914,85 @@ export class PiAgentView extends ItemView {
 
       case "error": {
         const message = this.ensureAssistantStreamMessage();
-        message.contentEl.createDiv(
-          "pi-agent-error-block"
-        ).textContent = `⚠️ Error: ${delta.reason || "Unknown error"}`;
+        const errorEl = message.contentEl.createDiv("pi-agent-error-block");
+        const isAgyFailure = !!delta.errorCategory;
+        const isZh = this.plugin.settings.language !== "en";
+        const summary = isAgyFailure
+          ? this.getAgyFailureSummary(delta.errorCategory || "unknown", isZh)
+          : `Error: ${delta.reason || "Unknown error"}`;
+        errorEl.createSpan({ text: `⚠️ ${summary}` });
+
+        if (isAgyFailure && delta.reason) {
+          errorEl.createDiv("pi-agent-error-detail").setText(
+            `${isZh ? "AGY 原始信息：" : "AGY detail: "}${delta.reason}`
+          );
+        }
+        if (delta.diagnostic) {
+          errorEl.createDiv("pi-agent-error-detail").setText(delta.diagnostic);
+        }
+        if (delta.retryable) {
+          const retryBtn = errorEl.createEl("button", {
+            text: isZh ? "↻ 重试本轮" : "↻ Retry this turn",
+            cls: "pi-agent-error-retry",
+            attr: {
+              title: isZh
+                ? "仅重新发送本轮请求；Pimate 不会自动重试。"
+                : "Resend this turn only. Pimate never retries automatically.",
+            },
+          });
+          retryBtn.onclick = () => this.retryLastAgyTurn(retryBtn);
+        }
         break;
       }
     }
+  }
+
+  private getAgyFailureSummary(category: string, isZh: boolean): string {
+    if (!isZh) {
+      switch (category) {
+        case "network": return "AGY connection was interrupted; the session is preserved.";
+        case "authentication": return "AGY authentication failed.";
+        case "quota": return "AGY quota or rate limit was reached.";
+        case "permission": return "AGY denied this operation.";
+        case "process": return "AGY process exited unexpectedly; the session is preserved.";
+        case "cancelled": return "Operation stopped by user.";
+        default: return "AGY could not complete this turn; the session is preserved.";
+      }
+    }
+    switch (category) {
+      case "network": return "AGY 连接中断，会话已保留。";
+      case "authentication": return "AGY 登录或鉴权失败。";
+      case "quota": return "AGY 用量额度或请求频率受限。";
+      case "permission": return "AGY 拒绝了这项操作。";
+      case "process": return "AGY 进程意外退出，会话已保留。";
+      case "cancelled": return "已停止本轮任务。";
+      default: return "AGY 未能完成本轮，会话已保留。";
+    }
+  }
+
+  private retryLastAgyTurn(button: HTMLButtonElement): void {
+    const tab = this.activeTab;
+    const client = tab?.client;
+    if (!tab || !client || client.engine !== "antigravity") return;
+
+    button.disabled = true;
+    this.runAsync(async () => {
+      try {
+        if (tab.isStreaming) {
+          throw new Error("Wait for the current turn to finish before retrying");
+        }
+        const isZh = this.plugin.settings.language !== "en";
+        this.setStatus(isZh ? "↻ 正在重试本轮…" : "↻ Retrying this turn…", "thinking");
+        const response = await (client as AgyAgentClient).retryLastFailedPrompt();
+        if (!response.success) throw new Error(response.error || "AGY did not accept the retry");
+        button.remove();
+      } catch (err) {
+        button.disabled = false;
+        new Notice(
+          `❌ ${this.plugin.settings.language !== "en" ? "重试失败：" : "Retry failed: "}${(err as Error).message}`
+        );
+      }
+    });
   }
 
   private handleMessageEnd(event: RpcEvent): void {
@@ -3520,9 +3634,33 @@ export class PiAgentView extends ItemView {
   private async sendMessage(streamingBehavior?: "steer" | "followUp"): Promise<void> {
     const tab = this.activeTab;
     const client = tab?.client;
-    if (!tab || !client || !client.isRunning() || !this.inputEl) {
+    if (!tab || !client || !this.inputEl) {
       if (tab) new Notice("当前对话正在切换或尚未就绪，请稍后再发送");
       return;
+    }
+    // AGY print-mode processes may exit after an interrupted turn. Do not
+    // reconnect proactively: only revive the same client when the user sends
+    // a new message, preserving its conversation ID and avoiding background
+    // work after an error.
+    if (!client.isRunning()) {
+      if (client.engine !== "antigravity" || tab.isStreaming) {
+        new Notice("当前对话正在切换或尚未就绪，请稍后再发送");
+        return;
+      }
+      const isZh = this.plugin.settings.language !== "en";
+      try {
+        this.setStatus(
+          isZh ? "↻ 正在恢复 AGY 会话…" : "↻ Restoring AGY session…",
+          "thinking"
+        );
+        await client.start();
+      } catch (err) {
+        this.setStatus(
+          `❌ ${isZh ? "无法恢复 AGY 会话：" : "Could not restore AGY session: "}${(err as Error).message}`,
+          "error"
+        );
+        return;
+      }
     }
     // The visible composer belongs to the tab selected at the instant Enter
     // was pressed. Repair the legacy shared pointer if an older async tab
@@ -3860,6 +3998,15 @@ export class PiAgentView extends ItemView {
     );
   }
 
+  private getAgyConversationWorkspaceStatus(
+    conversationId: string
+  ): AgyConversationWorkspaceStatus {
+    return AgyAgentClient.getConversationWorkspaceStatus(
+      conversationId,
+      this.getCurrentAgyWorkspacePath()
+    );
+  }
+
   private getAgyConversationIndex(): Record<string, AgyConversationIndexEntry> {
     const settings = this.plugin.settings as typeof this.plugin.settings & {
       agyConversationIndex?: Record<string, AgyConversationIndexEntry>;
@@ -3870,6 +4017,53 @@ export class PiAgentView extends ItemView {
     return settings.agyConversationIndex;
   }
 
+  private getAgyConversationScopeOverrides(): Record<string, AgyConversationScopeOverride> {
+    const settings = this.plugin.settings as typeof this.plugin.settings & {
+      agyConversationScopeOverrides?: Record<string, AgyConversationScopeOverride>;
+    };
+    if (
+      !settings.agyConversationScopeOverrides ||
+      typeof settings.agyConversationScopeOverrides !== "object"
+    ) {
+      settings.agyConversationScopeOverrides = {};
+    }
+    return settings.agyConversationScopeOverrides;
+  }
+
+  private getAgyConversationScopeOverride(
+    conversationId: string
+  ): AgyConversationScopeOverride | undefined {
+    const id = conversationId.trim();
+    if (!id) return undefined;
+    const key = this.normalizeAgySessionTitleKey(id);
+    const overrides = this.getAgyConversationScopeOverrides();
+    const value = overrides[key] || overrides[id];
+    return value === "current" || value === "unassigned" ? value : undefined;
+  }
+
+  private setAgyConversationScopeOverride(
+    conversationId: string,
+    scope: AgyConversationScopeOverride | null
+  ): boolean {
+    const id = conversationId.trim();
+    if (!id) return false;
+    const key = this.normalizeAgySessionTitleKey(id);
+    const overrides = this.getAgyConversationScopeOverrides();
+    let changed = false;
+    for (const savedId of Object.keys(overrides)) {
+      if (this.normalizeAgySessionTitleKey(savedId) !== key) continue;
+      if (scope && savedId === key && overrides[savedId] === scope) continue;
+      delete overrides[savedId];
+      changed = true;
+    }
+    if (scope && overrides[key] !== scope) {
+      overrides[key] = scope;
+      changed = true;
+    }
+    if (changed) this.invalidateAgyHistoryCache();
+    return changed;
+  }
+
   private getAgyConversationIndexEntry(conversationId: string): AgyConversationIndexEntry | undefined {
     const id = conversationId.trim();
     if (!id) return undefined;
@@ -3878,11 +4072,42 @@ export class PiAgentView extends ItemView {
     return entries[key] || entries[id];
   }
 
-  private isAgyConversationTrackedInCurrentVault(conversationId: string): boolean {
+  private isAgyConversationTrackedInCurrentVault(
+    conversationId: string,
+    knownSummary?: AgyConversationSummary
+  ): boolean {
     const workspacePath = this.getCurrentAgyWorkspacePath();
+    const scopeOverride = this.getAgyConversationScopeOverride(conversationId);
+    const summary = knownSummary || AgyAgentClient.getConversationSummary(conversationId);
+
+    // An explicit AGY workspace remains authoritative for safety. A local
+    // override can classify unscoped sessions, but cannot import a session
+    // that AGY explicitly says belongs to another vault.
+    if (
+      summary &&
+      summary.workspaceUris.length > 0 &&
+      !AgyAgentClient.belongsToWorkspace(summary, workspacePath)
+    ) {
+      return false;
+    }
+    if (scopeOverride === "unassigned") return false;
+    if (scopeOverride === "current") return !!workspacePath;
+
     const entry = this.getAgyConversationIndexEntry(conversationId);
-    return !!workspacePath && !!entry &&
-      AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) === workspacePath;
+    if (
+      !workspacePath ||
+      !entry ||
+      AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) !== workspacePath
+    ) {
+      return false;
+    }
+
+    // The local index is only a Pimate hint. AGY's own workspace metadata is
+    // authoritative whenever it is available; this prevents a stale resume
+    // record from reassigning a conversation created in another Vault.
+    return !summary ||
+      summary.workspaceUris.length === 0 ||
+      AgyAgentClient.belongsToWorkspace(summary, workspacePath);
   }
 
   private invalidateAgyHistoryCache(): void {
@@ -3897,11 +4122,24 @@ export class PiAgentView extends ItemView {
       preview?: string;
       clearTitle?: boolean;
       internal?: boolean;
-    } = {}
+    } = {},
+    knownSummary?: AgyConversationSummary
   ): boolean {
     const id = conversationId.trim();
     const workspacePath = this.getCurrentAgyWorkspacePath();
     if (!id || !workspacePath) return false;
+
+    const summary = knownSummary || AgyAgentClient.getConversationSummary(id);
+    if (
+      summary &&
+      summary.workspaceUris.length > 0 &&
+      !AgyAgentClient.belongsToWorkspace(summary, workspacePath)
+    ) {
+      console.warn(
+        `[pimate] Refusing to bind AGY conversation ${id} from another workspace.`
+      );
+      return false;
+    }
 
     const entries = this.getAgyConversationIndex();
     const key = this.normalizeAgySessionTitleKey(id);
@@ -4156,6 +4394,7 @@ export class PiAgentView extends ItemView {
       modelId: tab.modelId || settings.agyModel || "gemini-3.8-flash-high",
       effort: tab.thinkingLevel || settings.agyEffort || "high",
       cwd: workspacePath,
+      workspacePath,
       conversationId: conversationId || undefined,
       // A title request must not run tools, even if a model interprets the
       // surrounding conversation as an implementation task.
@@ -4346,6 +4585,14 @@ export class PiAgentView extends ItemView {
           // the adapter. Remove their optimistic bubbles instead of leaving
           // them in the transcript as if they had been sent.
           this.discardQueuedMessageBubbles(queuedBeforeAbort);
+          if (client.isRunning()) {
+            this.setStatus(isZh ? "✅ 已停止，连接保留" : "✅ Stopped; session kept", "ok");
+          } else {
+            this.setStatus(
+              isZh ? "⏸ 已停止，下次发送时重连" : "⏸ Stopped; reconnects on next message",
+              "warning"
+            );
+          }
         }
       } catch (err) {
         new Notice(`❌ ${isZh ? "停止失败：" : "Could not stop: "}${(err as Error).message}`);
@@ -4774,18 +5021,52 @@ export class PiAgentView extends ItemView {
     // AGY's metadata cache is global. Do the one synchronous scan once, then
     // classify it against Pimate's vault-owned index and usage journal.
     const summaries = AgyAgentClient.listConversations();
+    const indexedEntries = Object.values(this.getAgyConversationIndex());
+    const currentWorkspace = indexedEntries.filter(
+      (entry) =>
+        !!entry &&
+        AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) === workspacePath
+    );
     const summaryById = new Map(
       summaries.map((summary) => [this.normalizeAgySessionTitleKey(summary.conversationId), summary])
     );
+    // AGY may create the transcript immediately but update its global
+    // conversation_metadata.json only later (or after the process exits). A
+    // Pimate-owned index entry is enough to show that just-created session in
+    // this Vault while AGY's cache catches up. The actual backing file check
+    // prevents stale local index entries from becoming ghost history items.
+    for (const entry of currentWorkspace) {
+      if (!entry) continue;
+      const id = entry.conversationId?.trim();
+      if (!id) continue;
+      const key = this.normalizeAgySessionTitleKey(id);
+      if (summaryById.has(key) || !AgyAgentClient.conversationExists(id)) continue;
+      const synthetic: AgyConversationSummary = {
+        conversationId: id,
+        title: entry.title?.trim() || "",
+        preview: entry.preview?.trim() || "",
+        mtime: Math.max(entry.updatedAt || 0, entry.createdAt || 0),
+        stepCount: 1,
+        workspaceUris: [],
+      };
+      summaries.push(synthetic);
+      summaryById.set(key, synthetic);
+    }
+    const isExplicitlyForeign = (summary: AgyConversationSummary | undefined): boolean =>
+      !!summary &&
+      summary.workspaceUris.length > 0 &&
+      !AgyAgentClient.belongsToWorkspace(summary, workspacePath);
     const currentIds = new Set<string>();
     let indexChanged = false;
 
-    for (const entry of Object.values(this.getAgyConversationIndex())) {
+    for (const entry of indexedEntries) {
       const id = entry?.conversationId?.trim();
       if (!id) continue;
       if (AgyAgentClient.normalizeWorkspacePath(entry.workspacePath) !== workspacePath) continue;
       const key = this.normalizeAgySessionTitleKey(id);
-      if (summaryById.has(key)) currentIds.add(key);
+      if (this.getAgyConversationScopeOverride(id) === "unassigned") continue;
+      const summary = summaryById.get(key);
+      if (summary && !isExplicitlyForeign(summary)) currentIds.add(key);
     }
 
     // Migrate conversations that Pimate's existing usage journal can prove
@@ -4793,24 +5074,46 @@ export class PiAgentView extends ItemView {
     // guessing about every global, unscoped AGY record.
     for (const snapshot of usageSnapshots) {
       const key = this.normalizeAgySessionTitleKey(snapshot.conversationId);
+      const summary = summaryById.get(key);
       if (
         AgyAgentClient.normalizeWorkspacePath(snapshot.cwd) !== workspacePath ||
-        !summaryById.has(key)
+        !summary ||
+        isExplicitlyForeign(summary)
       ) {
         continue;
       }
+      if (this.getAgyConversationScopeOverride(snapshot.conversationId) === "unassigned") {
+        continue;
+      }
       currentIds.add(key);
-      if (!this.isAgyConversationTrackedInCurrentVault(snapshot.conversationId)) {
-        indexChanged = this.upsertAgyConversationIndex(snapshot.conversationId, "usage") || indexChanged;
+      if (!this.isAgyConversationTrackedInCurrentVault(snapshot.conversationId, summary)) {
+        indexChanged = this.upsertAgyConversationIndex(
+          snapshot.conversationId,
+          "usage",
+          {},
+          summary
+        ) || indexChanged;
       }
     }
 
     for (const summary of summaries) {
       const key = this.normalizeAgySessionTitleKey(summary.conversationId);
+      const scopeOverride = this.getAgyConversationScopeOverride(summary.conversationId);
+      if (scopeOverride === "unassigned") continue;
+      if (scopeOverride === "current") {
+        if (isExplicitlyForeign(summary)) continue;
+        currentIds.add(key);
+        continue;
+      }
       if (!AgyAgentClient.belongsToWorkspace(summary, workspacePath)) continue;
       currentIds.add(key);
-      if (!this.isAgyConversationTrackedInCurrentVault(summary.conversationId)) {
-        indexChanged = this.upsertAgyConversationIndex(summary.conversationId, "provider") || indexChanged;
+      if (!this.isAgyConversationTrackedInCurrentVault(summary.conversationId, summary)) {
+        indexChanged = this.upsertAgyConversationIndex(
+          summary.conversationId,
+          "provider",
+          {},
+          summary
+        ) || indexChanged;
       }
     }
 
@@ -4819,18 +5122,24 @@ export class PiAgentView extends ItemView {
       agyHistoryScope: ResumeSessionItem["agyHistoryScope"]
     ): ResumeSessionItem => {
       const indexed = this.getAgyConversationIndexEntry(summary.conversationId);
-      const customTitle = this.getAgySessionTitle(summary.conversationId);
+      const useIndexedMetadata =
+        agyHistoryScope !== "other" &&
+        !!indexed &&
+        AgyAgentClient.normalizeWorkspacePath(indexed.workspacePath) === workspacePath;
+      const customTitle = useIndexedMetadata
+        ? this.getAgySessionTitle(summary.conversationId)
+        : undefined;
       return {
         path: "",
         label:
           customTitle ||
-          indexed?.title ||
+          (useIndexedMetadata ? indexed?.title : undefined) ||
           summary.title ||
           (summary.preview
             ? summary.preview.slice(0, 24)
             : summary.conversationId.slice(0, 12)),
-        mtime: Math.max(summary.mtime, indexed?.updatedAt || 0),
-        preview: indexed?.preview || summary.preview,
+        mtime: Math.max(summary.mtime, useIndexedMetadata ? indexed?.updatedAt || 0 : 0),
+        preview: useIndexedMetadata ? indexed?.preview || summary.preview : summary.preview,
         engine: "antigravity",
         conversationId: summary.conversationId,
         agyHistoryScope,
@@ -4848,11 +5157,17 @@ export class PiAgentView extends ItemView {
         continue;
       }
       const key = this.normalizeAgySessionTitleKey(summary.conversationId);
-      const scope: NonNullable<ResumeSessionItem["agyHistoryScope"]> = currentIds.has(key)
-        ? "current"
-        : summary.workspaceUris.length === 0
-          ? "unassigned"
-          : "other";
+      const scopeOverride = this.getAgyConversationScopeOverride(summary.conversationId);
+      const scope: NonNullable<ResumeSessionItem["agyHistoryScope"]> =
+        scopeOverride === "current"
+          ? "current"
+          : scopeOverride === "unassigned"
+            ? "unassigned"
+            : currentIds.has(key)
+              ? "current"
+              : summary.workspaceUris.length === 0
+                ? "unassigned"
+                : "other";
       const item = toItem(summary, scope);
       all.push(item);
       if (scope === "current") current.push(item);
@@ -4968,6 +5283,14 @@ export class PiAgentView extends ItemView {
     }
     if (!AgyAgentClient.conversationExists(conversationId)) {
       new Notice(isZh ? "AGY 历史会话不存在或已被删除" : "Antigravity conversation was not found");
+      return;
+    }
+    if (this.getAgyConversationWorkspaceStatus(conversationId) === "foreign") {
+      new Notice(
+        isZh
+          ? "该 AGY 会话属于其他工作区，不能载入当前 Vault"
+          : "This Antigravity conversation belongs to another workspace and cannot be loaded here"
+      );
       return;
     }
 
@@ -5606,6 +5929,39 @@ export class PiAgentView extends ItemView {
             contentEl.createDiv({ text: timeText, cls: "pi-agent-history-item-time" });
           }
 
+          const agyScopeAction: AgyConversationScopeOverride | null =
+            isAgy && session.engine === "antigravity" && session.agyHistoryScope === "current"
+              ? "unassigned"
+              : isAgy && session.engine === "antigravity" && session.agyHistoryScope === "unassigned"
+                ? "current"
+                : null;
+          const runAgyScopeAction = () => {
+            if (!agyScopeAction) return;
+            this.runAsync(async () => {
+              await this.setAgyConversationHistoryScope(session, agyScopeAction);
+              await this.renderHistoryPanel();
+            });
+          };
+          if (agyScopeAction) {
+            const actionsEl = itemEl.createDiv("pi-agent-history-item-actions");
+            const actionBtn = actionsEl.createEl("button", {
+              cls: "pi-agent-history-item-action",
+              attr: {
+                "aria-label": agyScopeAction === "unassigned"
+                  ? (isZh ? "移至未归属" : "Move to unassigned")
+                  : (isZh ? "归入当前空间" : "Assign to this vault"),
+                title: agyScopeAction === "unassigned"
+                  ? (isZh ? "移至未归属" : "Move to unassigned")
+                  : (isZh ? "归入当前空间" : "Assign to this vault"),
+              },
+            });
+            setIcon(actionBtn, agyScopeAction === "unassigned" ? "archive" : "folder-plus");
+            actionBtn.onclick = (event) => {
+              event.stopPropagation();
+              runAgyScopeAction();
+            };
+          }
+
           itemEl.onclick = () => {
             this.runAsync(async () => {
               await this.openResumeSession(session);
@@ -5630,6 +5986,18 @@ export class PiAgentView extends ItemView {
                   await this.renderHistoryPanel();
                 }));
             });
+            if (agyScopeAction) {
+              menu.addItem((item: any) => {
+                item
+                  .setTitle(
+                    agyScopeAction === "unassigned"
+                      ? (isZh ? "移至未归属" : "Move to unassigned")
+                      : (isZh ? "归入当前空间" : "Assign to this vault")
+                  )
+                  .setIcon(agyScopeAction === "unassigned" ? "archive" : "folder-plus")
+                  .onClick(runAgyScopeAction);
+              });
+            }
             if (session.engine !== "antigravity") {
               menu.addItem((item: any) => {
                 item
@@ -5739,6 +6107,48 @@ export class PiAgentView extends ItemView {
     }
     await this.plugin.saveSettings();
     new Notice(isZh ? "会话已重命名" : "Session renamed");
+  }
+
+  private async setAgyConversationHistoryScope(
+    session: ResumeSessionItem,
+    scope: AgyConversationScopeOverride
+  ): Promise<void> {
+    const isZh = this.plugin.settings.language === "zh";
+    const conversationId = session.conversationId?.trim();
+    if (session.engine !== "antigravity" || !conversationId) return;
+
+    if (scope === "current") {
+      const workspaceStatus = this.getAgyConversationWorkspaceStatus(conversationId);
+      if (workspaceStatus === "missing") {
+        new Notice(isZh ? "AGY 历史会话不存在或已被删除" : "Antigravity conversation was not found");
+        return;
+      }
+      if (workspaceStatus === "foreign") {
+        new Notice(
+          isZh
+            ? "该 AGY 会话属于其他工作区，不能归入当前空间"
+            : "This Antigravity conversation belongs to another workspace"
+        );
+        return;
+      }
+    }
+
+    const overrideChanged = this.setAgyConversationScopeOverride(conversationId, scope);
+    const indexChanged = scope === "current"
+      ? this.upsertAgyConversationIndex(conversationId, "resumed", {
+          title: this.getAgySessionTitle(conversationId) || session.label,
+          preview: session.preview,
+        })
+      : false;
+    if (overrideChanged || indexChanged) await this.plugin.saveSettings();
+
+    new Notice(
+      scope === "unassigned"
+        ? (isZh
+            ? "已移至未归属（不会删除 AGY 原始会话）"
+            : "Moved to Unassigned; the native AGY conversation was not deleted")
+        : (isZh ? "已归入当前空间" : "Conversation assigned to this vault")
+    );
   }
 
   private async deleteResumeSession(session: ResumeSessionItem): Promise<void> {

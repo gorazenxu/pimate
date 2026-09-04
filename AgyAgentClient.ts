@@ -22,6 +22,8 @@ export interface AgyAgentClientOptions {
   modelId?: string;
   effort?: string;
   cwd?: string;
+  /** Obsidian Vault root that AGY should explicitly register as a workspace. */
+  workspacePath?: string;
   conversationId?: string;
   dangerouslySkipPermissions?: boolean;
   /** Disable Pimate's usage journal for internal helper conversations. */
@@ -36,6 +38,12 @@ export interface AgyConversationSummary {
   stepCount: number;
   workspaceUris: string[];
 }
+
+export type AgyConversationWorkspaceStatus =
+  | "current"
+  | "foreign"
+  | "unassigned"
+  | "missing";
 
 export interface AgyQuotaBucket {
   id: string;
@@ -91,11 +99,46 @@ interface PendingAgyPrompt {
   kind: "steering" | "followUp";
 }
 
+type AgyFailureCategory =
+  | "cancelled"
+  | "network"
+  | "authentication"
+  | "quota"
+  | "permission"
+  | "process"
+  | "unknown";
+
+interface ActiveAgyPrompt {
+  message: string;
+  options?: AgyPromptOptions;
+  retryAttempt: number;
+  receivedModelOutput: boolean;
+  hadToolActivity: boolean;
+}
+
+interface RetryableAgyPrompt {
+  message: string;
+  options?: AgyPromptOptions;
+  retryAttempt: number;
+}
+
+interface AgyFailureInfo {
+  category: AgyFailureCategory;
+  retryable: boolean;
+  diagnostic?: string;
+}
+
 // Transcript files can grow very large. Pimate only renders the recent
 // history on first paint, so avoid synchronously parsing an entire AGY
 // transcript before the user can see a restored conversation.
 const DEFAULT_AGY_HISTORY_MESSAGES = 100;
 const AGY_HISTORY_TAIL_BYTES = 2 * 1024 * 1024;
+// Give AGY enough time to turn SIGINT into a turn-level cancellation before
+// falling back to a hard process stop. This keeps the normal Stop action close
+// to the interactive CLI's Esc behavior without allowing a stuck agent to run
+// indefinitely in the background.
+const AGY_ABORT_GRACE_MS = 2_000;
+const AGY_ABORT_CLOSE_GRACE_MS = 250;
 
 /**
  * Resolve the agy executable path on Windows and POSIX.
@@ -173,6 +216,7 @@ export class AgyAgentClient extends EventEmitter {
   } | null = null;
 
   private process: ChildProcess | null = null;
+  private abortingProcess: ChildProcess | null = null;
   private buffer = "";
   private decoder = new StringDecoder("utf8");
   private destroyed = false;
@@ -189,6 +233,13 @@ export class AgyAgentClient extends EventEmitter {
   private currentEffort: string;
   private availableTools: string[] = [];
   private pendingPrompts: PendingAgyPrompt[] = [];
+  private activePrompt: ActiveAgyPrompt | null = null;
+  private retryablePrompt: RetryableAgyPrompt | null = null;
+  private recentTurnStderr = "";
+  // AGY writes detailed transport errors to its rotating log. Keep per-process
+  // byte offsets so a failed turn only reads diagnostics appended by this
+  // invocation and never reuses stale errors from an older process.
+  private agyLogOffsets = new Map<string, number>();
   private historyLoadedConversationId: string | null = null;
   private historyLoadedLimit: number | null = null;
   private historyIsPartial = false;
@@ -590,12 +641,26 @@ export class AgyAgentClient extends EventEmitter {
     const resolved = resolveAgySpawn(this.options.agyPath);
     const args: string[] = [
       ...resolved.scriptArgs,
-      // `--print` consumes the next argv item as its prompt. An empty
-      // assignment selects print mode without stealing `--input-format`.
-      "--print=",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
     ];
+
+    // `cwd` controls the child process directory, but AGY's workspace and
+    // permission context is established separately. Register the active
+    // Obsidian Vault explicitly so AGY resolves files/searches against the
+    // same workspace that Pimate is displaying.
+    const workspacePath = this.options.workspacePath?.trim();
+    if (workspacePath) {
+      const resolvedWorkspacePath = path.resolve(workspacePath);
+      try {
+        if (fs.statSync(resolvedWorkspacePath).isDirectory()) {
+          args.push("--add-dir", resolvedWorkspacePath);
+        }
+      } catch {
+        // A non-filesystem Obsidian adapter may not expose a local directory.
+        // Keep the existing cwd behavior and let AGY report any real error.
+      }
+    }
 
     if (this.options.dangerouslySkipPermissions === true) {
       args.push("--dangerously-skip-permissions");
@@ -648,6 +713,7 @@ export class AgyAgentClient extends EventEmitter {
       };
 
       try {
+        this.snapshotAgyLogFiles();
         const child = spawn(resolved.cmd, args, spawnOptions);
         this.process = child;
         const generation = ++this.processGeneration;
@@ -677,7 +743,26 @@ export class AgyAgentClient extends EventEmitter {
 
         child.stderr!.on("data", (chunk: Buffer) => {
           if (this.process !== child || this.processGeneration !== generation) return;
-          console.warn("[agy stderr]", chunk.toString());
+          const stderr = chunk.toString();
+          this.recordTurnStderr(stderr);
+          console.warn("[agy stderr]", stderr);
+        });
+
+        child.stdin!.on("error", (err) => {
+          if (this.process !== child || this.processGeneration !== generation) return;
+          console.error("[agy] Input stream error:", err);
+          if (!settled) {
+            settle(err);
+            return;
+          }
+          // SIGINT/destroy can legitimately close stdin. Do not turn that
+          // expected shutdown into a second user-visible failure.
+          if (this.abortingProcess === child || this.destroyed) return;
+          if (this.isTurnStreaming) {
+            this.finishActiveTurnWithError(`AGY input stream error: ${err.message}`);
+          } else {
+            this.emit("error", err);
+          }
         });
 
         child.on("error", (err) => {
@@ -691,6 +776,8 @@ export class AgyAgentClient extends EventEmitter {
           if (this.process !== child || this.processGeneration !== generation) return;
           console.log(`[agy] Process closed with code ${code}`);
           const wasRunningTurn = this.isTurnStreaming;
+          const wasExpectedAbort = this.abortingProcess === child;
+          if (wasExpectedAbort) this.abortingProcess = null;
           this.process = null;
 
           if (!settled) {
@@ -701,14 +788,20 @@ export class AgyAgentClient extends EventEmitter {
             settle(new Error(`agy exited with code ${code} before initialization`));
           } else {
             if (wasRunningTurn) {
-              this.finishActiveTurnWithError(`Process exited with code ${code}`);
+              this.finishActiveTurnWithError(
+                wasExpectedAbort
+                  ? "Operation aborted by user"
+                  : `Process exited with code ${code}`
+              );
             } else {
               this.isTurnStreaming = false;
               this.pendingPrompts = [];
               this.toolCallStates.clear();
               this.emitQueueUpdate();
             }
-            this.emit("close");
+            // An unexpected close is surfaced. The view restores this same
+            // conversation lazily when the user sends the next message.
+            if (!wasExpectedAbort) this.emit("close");
           }
         });
       } catch (err) {
@@ -783,6 +876,9 @@ export class AgyAgentClient extends EventEmitter {
 
       // Tool call execution
       if (step.step_type === "tool") {
+        // Never offer a replay after AGY has started a tool. A disconnected
+        // stream cannot prove whether that tool completed remotely.
+        if (this.activePrompt) this.activePrompt.hadToolActivity = true;
         const toolCallId = `agy-tool-${step.step_index ?? Date.now()}`;
         const toolName = step.tool_name || step.tool_info?.name || "tool";
         const args = { ...(step.tool_info?.parameters || {}) };
@@ -849,6 +945,9 @@ export class AgyAgentClient extends EventEmitter {
 
       // Model assistant streaming
       if (step.step_type === "agent_response") {
+        if ((step.thinking_delta || step.text_delta) && this.activePrompt) {
+          this.activePrompt.receivedModelOutput = true;
+        }
         if (step.thinking_delta) {
           this.lastAssistantThinking += step.thinking_delta;
           this.emit("event", {
@@ -902,6 +1001,8 @@ export class AgyAgentClient extends EventEmitter {
       }
 
       if (result?.status === "SUCCESS") {
+        this.activePrompt = null;
+        this.retryablePrompt = null;
         const responseText = result.response || this.lastAssistantText;
         const blocks: AgyHistoryBlock[] = [];
         if (this.lastAssistantThinking) {
@@ -927,12 +1028,32 @@ export class AgyAgentClient extends EventEmitter {
           },
         });
       } else {
-        const errorMsg = result?.error || "Agent execution failed";
+        const resultError =
+          typeof result?.error === "string" ? result.error : "";
+        const resultStatus = String(result?.status || "");
+        const wasCancelled = /(cancel|abort|interrupt)/i.test(
+          `${resultStatus} ${resultError}`
+        );
+        const errorMsg = wasCancelled
+          ? "Operation aborted by user"
+          : resultError || "Agent execution failed";
+        // Some AGY versions provide a final response only on the result
+        // frame. Treat it as output too, so it can never qualify for replay.
+        if ((this.lastAssistantText || result?.response) && this.activePrompt) {
+          this.activePrompt.receivedModelOutput = true;
+        }
+        const failure = this.prepareFailure(
+          errorMsg,
+          this.pendingPrompts.length === 0
+        );
         this.emit("event", {
           type: "message_update",
           assistantMessageEvent: {
             type: "error",
             reason: errorMsg,
+            errorCategory: failure.category,
+            retryable: failure.retryable,
+            diagnostic: failure.diagnostic,
           },
         });
         this.emit("event", {
@@ -965,13 +1086,20 @@ export class AgyAgentClient extends EventEmitter {
 
   private finishActiveTurnWithError(reason: string): void {
     const partialText = this.lastAssistantText;
+    const failure = this.prepareFailure(reason, this.pendingPrompts.length === 0);
     this.pendingPrompts = [];
     this.toolCallStates.clear();
     this.emitQueueUpdate();
     this.isTurnStreaming = false;
     this.emit("event", {
       type: "message_update",
-      assistantMessageEvent: { type: "error", reason },
+      assistantMessageEvent: {
+        type: "error",
+        reason,
+        errorCategory: failure.category,
+        retryable: failure.retryable,
+        diagnostic: failure.diagnostic,
+      },
     });
     this.emit("event", {
       type: "message_end",
@@ -982,12 +1110,177 @@ export class AgyAgentClient extends EventEmitter {
     this.emit("event", { type: "agent_settled" });
   }
 
-  private beginPrompt(message: string, options?: AgyPromptOptions): void {
+  /**
+   * Retain only enough diagnostics to explain a failed turn. AGY normally
+   * writes its detailed Go log to disk, but some builds also write useful
+   * transport errors to stderr.
+   */
+  private recordTurnStderr(stderr: string): void {
+    if (!this.isTurnStreaming || !stderr) return;
+    this.recentTurnStderr = `${this.recentTurnStderr}${stderr}`.slice(-8_000);
+  }
+
+  private snapshotAgyLogFiles(): void {
+    this.agyLogOffsets.clear();
+    const logDir = path.join(AgyAgentClient.getAgyDataDir(), "log");
+    let names: string[];
+    try {
+      names = fs.readdirSync(logDir);
+    } catch {
+      return;
+    }
+
+    for (const name of names) {
+      if (name !== "cli.log" && !/^cli-.*\.log$/i.test(name)) continue;
+      const filePath = path.join(logDir, name);
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) this.agyLogOffsets.set(filePath, stat.size);
+      } catch {
+        // The CLI can rotate a log between readdir and stat.
+      }
+    }
+  }
+
+  private readNewAgyLogDiagnostics(): string | undefined {
+    const logDir = path.join(AgyAgentClient.getAgyDataDir(), "log");
+    let names: string[];
+    try {
+      names = fs.readdirSync(logDir);
+    } catch {
+      return undefined;
+    }
+
+    const relevant: string[] = [];
+    for (const name of names) {
+      if (name !== "cli.log" && !/^cli-.*\.log$/i.test(name)) continue;
+      const filePath = path.join(logDir, name);
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) continue;
+
+        let previousOffset = this.agyLogOffsets.get(filePath) || 0;
+        if (stat.size < previousOffset) {
+          previousOffset = 0;
+        }
+        if (stat.size <= previousOffset) continue;
+
+        const contents = fs.readFileSync(filePath);
+        const start = Math.min(previousOffset, contents.length);
+        this.agyLogOffsets.set(filePath, contents.length);
+        for (const rawLine of contents.subarray(start).toString("utf8").split(/\r?\n/)) {
+          const line = rawLine
+            .trim()
+            .replace(/^ERROR: logging before google\.Init:\s*/, "");
+          if (!line) continue;
+          if (
+            /agent executor error|calling model: request failed|broken pipe|connection (?:reset|refused|closed)|timeout|timed out|failed to install playwright|browser context|not logged in|unauthenticated|quota|permission denied|access denied/i.test(
+              line
+            )
+          ) {
+            relevant.push(line);
+          }
+        }
+      } catch {
+        // Log rotation or an in-progress write must not break the turn UI.
+      }
+    }
+
+    return relevant.slice(-3).join(" · ").slice(-1_200) || undefined;
+  }
+
+  private classifyFailure(reason: string): AgyFailureCategory {
+    const normalized = reason.toLowerCase();
+    if (/(cancel|abort|interrupt|context canceled)/i.test(normalized)) {
+      return "cancelled";
+    }
+    if (/(quota|rate limit|resource exhausted|too many requests|\b429\b)/i.test(normalized)) {
+      return "quota";
+    }
+    if (/(auth|sign[ -]?in|login|credential|unauthenticated|\b401\b|\b403\b)/i.test(normalized)) {
+      return "authentication";
+    }
+    if (/(permission|access denied|not allowed)/i.test(normalized)) {
+      return "permission";
+    }
+    if (/(broken pipe|connection (?:reset|refused|closed)|network|i\/o timeout|timed out|\beof\b|stream (?:was )?interrupted|temporarily unavailable)/i.test(normalized)) {
+      return "network";
+    }
+    if (/(process exited|agy exited|child process|exit code|signal)/i.test(normalized)) {
+      return "process";
+    }
+    return "unknown";
+  }
+
+  private getTurnDiagnostic(): string | undefined {
+    const stderrRelevant = this.recentTurnStderr
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /error|fail|broken pipe|timeout|reset|denied|quota/i.test(line));
+    const logDetail = this.readNewAgyLogDiagnostics();
+    const detail = [...stderrRelevant.slice(-2), ...(logDetail ? [logDetail] : [])]
+      .join(" · ")
+      .slice(-1_000);
+    return detail || undefined;
+  }
+
+  /**
+   * A retry is intentionally opt-in and offered once only. It is eligible
+   * solely when this adapter received neither model output nor a tool event,
+   * and when there are no queued prompts that would change turn ordering.
+   */
+  private prepareFailure(reason: string, noQueuedPrompts: boolean): AgyFailureInfo {
+    const diagnostic = this.getTurnDiagnostic();
+    const category = this.classifyFailure(`${reason}\n${diagnostic || ""}`);
+    const activePrompt = this.activePrompt;
+    const retryable =
+      category !== "cancelled" &&
+      category !== "authentication" &&
+      category !== "quota" &&
+      category !== "permission" &&
+      noQueuedPrompts &&
+      !!activePrompt &&
+      activePrompt.retryAttempt === 0 &&
+      !activePrompt.receivedModelOutput &&
+      !activePrompt.hadToolActivity;
+
+    if (retryable && activePrompt) {
+      this.retryablePrompt = {
+        message: activePrompt.message,
+        options: activePrompt.options,
+        retryAttempt: activePrompt.retryAttempt,
+      };
+    } else {
+      this.retryablePrompt = null;
+    }
+    this.activePrompt = null;
+
+    return {
+      category,
+      retryable,
+      diagnostic,
+    };
+  }
+
+  private beginPrompt(
+    message: string,
+    options?: AgyPromptOptions,
+    retryAttempt = 0
+  ): void {
     this.ensureHistoryLoaded();
     this.lastAssistantText = "";
     this.lastAssistantThinking = "";
     this.isTurnStreaming = true;
     this.toolCallStates.clear();
+    this.retryablePrompt = null;
+    this.recentTurnStderr = "";
+    this.activePrompt = {
+      message,
+      options,
+      retryAttempt,
+      receivedModelOutput: false,
+      hadToolActivity: false,
+    };
 
     this.historyMessages.push({
       role: "user",
@@ -999,7 +1292,7 @@ export class AgyAgentClient extends EventEmitter {
     this.emit("event", { type: "agent_start" });
     this.emit("event", {
       type: "message_start",
-      message: { role: "user", content: message },
+      message: { role: "user", content: message, retry: retryAttempt > 0 },
     });
     this.emit("event", {
       type: "message_start",
@@ -1011,7 +1304,11 @@ export class AgyAgentClient extends EventEmitter {
       message: { content: message },
     }) + "\n";
 
-    this.process!.stdin!.write(payload);
+    const input = this.process?.stdin;
+    if (!input || input.destroyed || input.writableEnded) {
+      throw new Error("AGY input stream is not writable");
+    }
+    input.write(payload);
   }
 
   private updateUsage(usage: {
@@ -1099,6 +1396,57 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   /**
+   * Retry the immediately preceding failed turn once, only after
+   * `prepareFailure` established that no model output or tool event reached
+   * this adapter. This is deliberately user-invoked; Pimate never retries a
+   * potentially side-effecting turn on its own.
+   */
+  async retryLastFailedPrompt(): Promise<RpcResponse> {
+    if (this.destroyed) {
+      return {
+        type: "response",
+        command: "retry_last_failed_prompt",
+        success: false,
+        error: "Antigravity client is no longer available",
+      };
+    }
+    if (this.isTurnStreaming) {
+      return {
+        type: "response",
+        command: "retry_last_failed_prompt",
+        success: false,
+        error: "Wait for the current Antigravity turn to finish before retrying",
+      };
+    }
+    const retry = this.retryablePrompt;
+    if (!retry) {
+      return {
+        type: "response",
+        command: "retry_last_failed_prompt",
+        success: false,
+        error: "This Antigravity turn is not safe to retry automatically",
+      };
+    }
+
+    this.retryablePrompt = null;
+    if (!this.isRunning()) {
+      await this.start();
+    }
+    try {
+      this.beginPrompt(retry.message, retry.options, retry.retryAttempt + 1);
+      return {
+        type: "response",
+        command: "retry_last_failed_prompt",
+        success: true,
+      };
+    } catch (err) {
+      this.historyMessages.pop();
+      this.finishActiveTurnWithError(`Failed to retry prompt: ${(err as Error).message}`);
+      throw err;
+    }
+  }
+
+  /**
    * Queue steer message (equivalent to prompt for AGY).
    */
   async steer(
@@ -1125,10 +1473,11 @@ export class AgyAgentClient extends EventEmitter {
     const hadActiveTurn = this.isTurnStreaming;
     const partialText = this.lastAssistantText;
     const child = this.process;
+    this.retryablePrompt = null;
     this.pendingPrompts = [];
     this.emitQueueUpdate();
 
-    if (!child || child.killed) {
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
       if (hadActiveTurn) {
         this.lastAssistantText = partialText;
         this.finishActiveTurnWithError("Operation aborted by user");
@@ -1136,17 +1485,43 @@ export class AgyAgentClient extends EventEmitter {
       return { type: "response", command: "abort", success: true };
     }
 
-    // AGY print mode does not expose a turn-level abort protocol. Terminate
-    // this child and resume the same conversation on the next prompt. The
-    // generation guard prevents a late result from the old child being routed
-    // into the replacement turn.
-    this.invalidateProcess(child);
-    this.isTurnStreaming = false;
-    await this.terminateChild(child, "SIGINT");
+    // Interactive AGY maps its interrupt key to a turn-level cancellation.
+    // Headless mode does not document a separate cancel frame, so first send
+    // SIGINT and keep routing events while AGY has a chance to emit its normal
+    // terminal result. Only a non-responsive child is force-terminated below.
+    this.abortingProcess = child;
+    const outcomePromise = this.waitForAbortOutcome(child, AGY_ABORT_GRACE_MS);
+    try {
+      child.kill("SIGINT");
+    } catch {
+      // The close/timeout path below still provides a safe fallback.
+    }
 
-    if (hadActiveTurn) {
-      this.lastAssistantText = partialText;
-      this.finishActiveTurnWithError("Operation aborted by user");
+    const outcome = await outcomePromise;
+    if (outcome === "settled" || outcome === "closed") {
+      if (outcome === "settled" && this.process === child) {
+        // A headless AGY build may emit its cancellation result immediately
+        // and close the process on the following event-loop turn. Keep the
+        // expected-abort marker alive long enough to cover that race.
+        await this.waitForProcessClose(child, AGY_ABORT_CLOSE_GRACE_MS);
+      }
+      if (this.abortingProcess === child) {
+        this.abortingProcess = null;
+      }
+      return { type: "response", command: "abort", success: true };
+    }
+
+    // A stuck headless process must not continue running tools after the user
+    // presses Stop. Invalidate it before the hard kill so late output cannot
+    // be routed into a later prompt.
+    if (this.process === child) {
+      this.invalidateProcess(child);
+      if (this.abortingProcess === child) this.abortingProcess = null;
+      await this.terminateChild(child, "SIGKILL");
+      if (hadActiveTurn) {
+        this.lastAssistantText = partialText;
+        this.finishActiveTurnWithError("Operation aborted by user");
+      }
     }
 
     return { type: "response", command: "abort", success: true };
@@ -1350,12 +1725,25 @@ export class AgyAgentClient extends EventEmitter {
    */
   async switchSession(conversationId: string): Promise<RpcResponse> {
     const nextConversationId = conversationId.trim();
-    if (!AgyAgentClient.conversationExists(nextConversationId)) {
+    const workspacePath = this.options.workspacePath || this.options.cwd;
+    const workspaceStatus = AgyAgentClient.getConversationWorkspaceStatus(
+      nextConversationId,
+      workspacePath
+    );
+    if (workspaceStatus === "missing") {
       return {
         type: "response",
         command: "switch_session",
         success: false,
         error: "Antigravity conversation was not found",
+      };
+    }
+    if (workspacePath && workspaceStatus === "foreign") {
+      return {
+        type: "response",
+        command: "switch_session",
+        success: false,
+        error: "Antigravity conversation belongs to another workspace",
       };
     }
 
@@ -1536,6 +1924,52 @@ export class AgyAgentClient extends EventEmitter {
     });
   }
 
+  private waitForAbortOutcome(
+    child: ChildProcess,
+    timeoutMs: number
+  ): Promise<"settled" | "closed" | "timeout"> {
+    return new Promise((resolve) => {
+      let finished = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const finish = (outcome: "settled" | "closed" | "timeout") => {
+        if (finished) return;
+        finished = true;
+        if (timeout) clearTimeout(timeout);
+        this.off("event", onEvent);
+        child.off("close", onClose);
+        resolve(outcome);
+      };
+      const onEvent = (event: RpcEvent) => {
+        if (event.type === "agent_settled") finish("settled");
+      };
+      const onClose = () => finish("closed");
+
+      timeout = setTimeout(() => finish("timeout"), timeoutMs);
+      this.on("event", onEvent);
+      child.once("close", onClose);
+    });
+  }
+
+  private waitForProcessClose(
+    child: ChildProcess,
+    timeoutMs: number
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (closed: boolean) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        child.off("close", onClose);
+        resolve(closed);
+      };
+      const onClose = () => finish(true);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+
+      child.once("close", onClose);
+    });
+  }
+
   sendUIResponse(id: string, response: Record<string, unknown>): void {
     // AGY runs headlessly without the Pi extension UI protocol.
   }
@@ -1566,6 +2000,9 @@ export class AgyAgentClient extends EventEmitter {
     if (this.destroyed && !this.process && !this.startPromise) return;
     this.destroyed = true;
     this.pendingPrompts = [];
+    this.activePrompt = null;
+    this.retryablePrompt = null;
+    this.recentTurnStderr = "";
     this.emitQueueUpdate();
     this.isTurnStreaming = false;
     this.toolCallStates.clear();
@@ -1580,6 +2017,7 @@ export class AgyAgentClient extends EventEmitter {
     if (this.process) {
       const p = this.process;
       this.process = null;
+      if (this.abortingProcess === p) this.abortingProcess = null;
 
       await this.terminateChild(p);
     }
@@ -1611,6 +2049,14 @@ export class AgyAgentClient extends EventEmitter {
     );
   }
 
+  static getConversationSummary(conversationId: string): AgyConversationSummary | undefined {
+    const key = conversationId.trim().toLowerCase();
+    if (!key) return undefined;
+    return AgyAgentClient.listConversations().find(
+      (summary) => summary.conversationId.toLowerCase() === key
+    );
+  }
+
   /** Normalize an AGY workspace URI/path into the same form as process.cwd(). */
   static normalizeWorkspacePath(workspace?: string): string {
     const raw = workspace?.trim() || "";
@@ -1630,6 +2076,21 @@ export class AgyAgentClient extends EventEmitter {
     return !!target && summary.workspaceUris.some(
       (uri) => AgyAgentClient.normalizeWorkspacePath(uri) === target
     );
+  }
+
+  static getConversationWorkspaceStatus(
+    conversationId: string,
+    workspace?: string
+  ): AgyConversationWorkspaceStatus {
+    const id = conversationId.trim();
+    if (!id || !AgyAgentClient.conversationExists(id)) return "missing";
+
+    const target = AgyAgentClient.normalizeWorkspacePath(workspace);
+    if (!target) return "unassigned";
+
+    const summary = AgyAgentClient.getConversationSummary(id);
+    if (!summary || summary.workspaceUris.length === 0) return "unassigned";
+    return AgyAgentClient.belongsToWorkspace(summary, target) ? "current" : "foreign";
   }
 
   /**

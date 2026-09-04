@@ -245,6 +245,12 @@ export interface AssistantMessageEvent {
   content?: string;
   toolCall?: ToolCall;
   reason?: string;
+  /** Optional classification supplied by adapters that can distinguish failures. */
+  errorCategory?: string;
+  /** A user-triggered retry is available; adapters must never retry implicitly. */
+  retryable?: boolean;
+  /** Short technical detail retained from the underlying process, when available. */
+  diagnostic?: string;
 }
 
 export interface ToolCall {
