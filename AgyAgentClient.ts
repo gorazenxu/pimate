@@ -102,6 +102,7 @@ interface PendingAgyPrompt {
 type AgyFailureCategory =
   | "cancelled"
   | "network"
+  | "timeout"
   | "authentication"
   | "quota"
   | "permission"
@@ -139,6 +140,12 @@ const AGY_HISTORY_TAIL_BYTES = 2 * 1024 * 1024;
 // indefinitely in the background.
 const AGY_ABORT_GRACE_MS = 2_000;
 const AGY_ABORT_CLOSE_GRACE_MS = 250;
+// AGY's stream-json transport runs through print mode, whose default wait is
+// only five minutes. Long tool chains can legitimately exceed that window;
+// keep the process alive until the user stops it or this generous guardrail is
+// reached.
+const AGY_PRINT_TIMEOUT = "15m";
+const AGY_PROMPT_WAIT_TIMEOUT_MS = 15 * 60 * 1_000;
 
 /**
  * Resolve the agy executable path on Windows and POSIX.
@@ -643,6 +650,7 @@ export class AgyAgentClient extends EventEmitter {
       ...resolved.scriptArgs,
       "--input-format", "stream-json",
       "--output-format", "stream-json",
+      "--print-timeout", AGY_PRINT_TIMEOUT,
     ];
 
     // `cwd` controls the child process directory, but AGY's workspace and
@@ -1202,6 +1210,9 @@ export class AgyAgentClient extends EventEmitter {
     }
     if (/(permission|access denied|not allowed)/i.test(normalized)) {
       return "permission";
+    }
+    if (/(timeout|timed out|deadline exceeded)/i.test(normalized)) {
+      return "timeout";
     }
     if (/(broken pipe|connection (?:reset|refused|closed)|network|i\/o timeout|timed out|\beof\b|stream (?:was )?interrupted|temporarily unavailable)/i.test(normalized)) {
       return "network";
@@ -1906,7 +1917,7 @@ export class AgyAgentClient extends EventEmitter {
     return this.getLastAssistantText();
   }
 
-  private waitForAgentSettled(timeoutMs = 120_000): Promise<void> {
+  private waitForAgentSettled(timeoutMs = AGY_PROMPT_WAIT_TIMEOUT_MS): Promise<void> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.off("event", onEvent);

@@ -1,6 +1,6 @@
 {
   "name": "pimate",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Embeds Pi Coding Agent and Antigravity CLI as dual-engine AI collaborators for your vault.",
   "main": "main.js",
   "scripts": {

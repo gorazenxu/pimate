@@ -60,7 +60,9 @@
   padding: 12px 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* Tool-heavy AGY turns can contain many assistant wrappers. Keep the
+     separation visible without multiplying a large gap for every tool row. */
+  gap: 6px;
 }
 
 .pi-agent-chat::-webkit-scrollbar { width: 6px; }
@@ -298,9 +300,25 @@
   background: transparent;
   border-left: 2px solid var(--background-modifier-border);
   border-radius: 0;
-  padding: 4px 0 4px 10px;
+  padding: 2px 0 2px 10px;
   text-align: start;
   color: var(--text-normal);
+}
+
+/* A single AGY turn may be split into several assistant wrappers as each
+   tool call starts. These wrappers are intentionally denser than prose
+   replies, especially while the stream is still running. */
+.pi-agent-message-assistant.has-tool-content {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.pi-agent-message-assistant.has-tool-content .pi-agent-message-badge {
+  margin-bottom: 1px;
+}
+
+.pi-agent-message-assistant.has-tool-content .pi-agent-message-content {
+  line-height: 1.35;
 }
 
 .pi-agent-message-content {
@@ -406,7 +424,7 @@ summary.pi-agent-skill-details-summary:hover {
 
 .pi-agent-text-block + .pi-agent-tool-block,
 .pi-agent-tool-block + .pi-agent-text-block {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .pi-agent-streaming-block {
@@ -848,8 +866,8 @@ summary.pi-agent-skill-details-summary:hover {
 
 /* Thinking block - tree-branch style */
 .pi-agent-thinking-block {
-  margin: 4px 0;
-  padding: 2px 0 2px 14px;
+  margin: 1px 0;
+  padding: 1px 0 1px 14px;
   margin-inline-start: 7px;
   border-inline-start: 2px solid var(--background-modifier-border);
 }
@@ -858,7 +876,7 @@ summary.pi-agent-skill-details-summary:hover {
   font-family: var(--font-monospace);
   font-size: 12px;
   color: var(--pi-brand);
-  margin-bottom: 4px;
+  margin-bottom: 1px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -945,15 +963,15 @@ summary.pi-agent-skill-details-summary:hover {
 }
 
 /* Tool calls: copied proportions from Claudian tool rows */
-.pi-agent-tool-block { margin: 4px 0; }
-.pi-agent-tool-block + .pi-agent-tool-block { margin-top: 3px; }
+.pi-agent-tool-block { margin: 1px 0; }
+.pi-agent-tool-block + .pi-agent-tool-block { margin-top: 0; }
 
 .pi-agent-tool-header {
   display: grid;
   grid-template-columns: 18px auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
+  padding: 2px 0;
   cursor: pointer;
   overflow: hidden;
 }

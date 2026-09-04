@@ -1798,6 +1798,9 @@ export class PiAgentView extends ItemView {
 
       case "text_delta": {
         const message = this.ensureAssistantStreamMessage();
+        // A tool-only assistant wrapper is compact and has no role badge;
+        // restore the normal badge if AGY later emits visible text in it.
+        message.el.removeClass("is-tool-only");
         if (!this.currentTextBlock) {
           const usePretty = this.shouldUsePrettyStreaming(0);
           this.currentTextBlock =
@@ -1836,6 +1839,7 @@ export class PiAgentView extends ItemView {
       case "thinking_start":
         if (this.plugin.settings.showThinking) {
           const message = this.ensureAssistantStreamMessage();
+          message.el.removeClass("is-tool-only");
           this.thinkingStartedAt = Date.now();
           this.currentThinkingBlock =
             message.contentEl.createDiv(
@@ -1914,6 +1918,7 @@ export class PiAgentView extends ItemView {
 
       case "error": {
         const message = this.ensureAssistantStreamMessage();
+        message.el.removeClass("is-tool-only");
         const errorEl = message.contentEl.createDiv("pi-agent-error-block");
         const isAgyFailure = !!delta.errorCategory;
         const isZh = this.plugin.settings.language !== "en";
@@ -1951,6 +1956,7 @@ export class PiAgentView extends ItemView {
     if (!isZh) {
       switch (category) {
         case "network": return "AGY connection was interrupted; the session is preserved.";
+        case "timeout": return "AGY timed out waiting for this turn; the session is preserved.";
         case "authentication": return "AGY authentication failed.";
         case "quota": return "AGY quota or rate limit was reached.";
         case "permission": return "AGY denied this operation.";
@@ -1961,6 +1967,7 @@ export class PiAgentView extends ItemView {
     }
     switch (category) {
       case "network": return "AGY 连接中断，会话已保留。";
+      case "timeout": return "AGY 等待本轮响应超时，会话已保留。";
       case "authentication": return "AGY 登录或鉴权失败。";
       case "quota": return "AGY 用量额度或请求频率受限。";
       case "permission": return "AGY 拒绝了这项操作。";
@@ -2209,6 +2216,16 @@ export class PiAgentView extends ItemView {
 
     if (!this.currentAssistantMsg) {
       this.currentAssistantMsg = this.addMessage("assistant", "");
+    }
+
+    const hasVisibleContent = !!this.currentAssistantMsg.contentEl.querySelector(
+      ".pi-agent-text-block, .pi-agent-thinking-block, .pi-agent-error-block"
+    );
+    this.currentAssistantMsg.el.addClass("has-tool-content");
+    if (!hasVisibleContent) {
+      // Match the finalized tool-only rendering while the stream is live so
+      // every AGY tool row does not carry an otherwise empty Pi badge.
+      this.currentAssistantMsg.el.addClass("is-tool-only");
     }
 
     const toolBlock = this.currentAssistantMsg.contentEl.createDiv(
