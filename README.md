@@ -3,7 +3,7 @@
 > **An autonomous coding & knowledge agent for Obsidian, powered by [Pi Coding Agent](https://pi.dev) and Google Antigravity CLI.**
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/gorazenxu/pimate/main/docs/pi-agent-ui-guide.svg" alt="Pimate Architecture & UI" width="92%" />
+  <img src="https://raw.githubusercontent.com/gorazenxu/pimate/main/docs/pimate-real-ui.svg" alt="Pimate running inside Obsidian: real interface map" width="96%" />
 </p>
 
 <p align="center">
@@ -14,6 +14,16 @@
 </p>
 
 Pimate embeds local coding agents directly into your Obsidian workspace. Rather than acting as a standard text-completion chatbot, Pimate acts as a full-fledged agent capable of inspecting vault files, running grep/find searches, drafting precise diffs, executing shell tools, and maintaining multi-turn task state — all within Obsidian.
+
+> The interface map above is based on the current Pimate page in Obsidian: the Vault file tree and active note remain visible on the left, while Pimate runs in the right pane. The history counts and note text are representative and change with the current Vault.
+
+### Actual interface at a glance
+
+1. **Vault context** — Keep the active note and file tree visible while sending a file, folder, or selection to the agent.
+2. **Pimate history** — Browse `当前空间` (This vault), `未归属` (Unassigned), or `全部 AGY` (All AGY) conversations and search by title or preview.
+3. **Conversation scope** — Move an AGY conversation to `未归属` without deleting its native AGY record; assign it back to the current Vault when needed.
+4. **Session cards** — Keep multiple Pi or Antigravity conversations open as numbered tabs.
+5. **Composer controls** — Select the engine, model, effort, file context, and send messages from the bottom composer.
 
 ---
 
