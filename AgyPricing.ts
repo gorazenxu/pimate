@@ -77,12 +77,29 @@ export function getAgyModelPricing(
 }
 
 /**
+ * AGY reports `total_tokens` without adding `cache_read_tokens` to it. Cache
+ * reads are exposed as a separate counter, so the raw AGY total cannot be
+ * compared directly with Pi's total (Pi's usage total includes cache reads).
+ *
+ * Keep the raw `total` for AGY snapshot/delta bookkeeping, and use this helper
+ * when presenting a cross-provider token total in Pimate. Thinking tokens are
+ * already part of AGY's output accounting and must not be added again.
+ */
+export function getAgyAccountingTotal(usage: Pick<AgyCostUsage, "input" | "output" | "thinking" | "cacheRead" | "total">): number {
+  const input = Math.max(0, Number(usage.input) || 0);
+  const output = Math.max(0, Number(usage.output) || 0);
+  const cacheRead = Math.max(0, Number(usage.cacheRead) || 0);
+  const rawTotal = Math.max(0, Number(usage.total) || 0);
+  const baseTotal = rawTotal > 0 ? rawTotal : input + output;
+  return baseTotal + cacheRead;
+}
+
+/**
  * Estimate a completed AGY session/turn in USD.
  *
- * AGY's input_tokens includes cache_read_tokens. Subtract the cached portion
- * before applying the normal input rate, then price the cached portion at the
- * context-cache rate. Google prices output tokens including thinking tokens,
- * so thinking is not added a second time.
+ * AGY exposes uncached input and cache reads as separate counters. Price each
+ * counter with its own rate. Google prices output tokens including thinking
+ * tokens, so thinking is not added a second time.
  */
 export function calculateAgyCost(
   modelId: string,
@@ -94,10 +111,9 @@ export function calculateAgyCost(
 
   const input = Math.max(0, Number(usage.input) || 0);
   const output = Math.max(0, Number(usage.output) || 0);
-  const cacheRead = Math.min(input, Math.max(0, Number(usage.cacheRead) || 0));
-  const uncachedInput = input - cacheRead;
+  const cacheRead = Math.max(0, Number(usage.cacheRead) || 0);
   return (
-    uncachedInput * pricing.inputPerMillion
+    input * pricing.inputPerMillion
     + cacheRead * pricing.cacheReadPerMillion
     + output * pricing.outputPerMillion
   ) / MILLION;

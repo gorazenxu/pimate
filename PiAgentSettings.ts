@@ -623,7 +623,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     const statusDesc = agyStatusCard.createDiv("agy-status-card-desc");
     statusDesc.setText(isZh ? "正在检查系统 PATH 中的 agy 命令及 Google 账号授权态..." : "Checking agy in PATH and Google account credentials...");
     const statusActions = agyStatusCard.createDiv("agy-status-card-actions");
-    statusActions.style.display = "none";
+    statusActions.setCssProps({ display: "none" });
 
     // 异步探测
     AgyAgentClient.checkAuthStatus(this.plugin.settings.agyPath).then((status) => {
@@ -660,7 +660,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             ? "已找到 agy 工具，但尚未完成 Google 账号授权。只需在系统终端执行一次 agy 并在浏览器完成登录即可。"
             : "agy found, but Google account is not authenticated. Run `agy` in your terminal once to authorize via browser."
         );
-        statusActions.style.display = "flex";
+        statusActions.setCssProps({ display: "flex" });
         const copyBtn = statusActions.createEl("button", {
           text: isZh ? "复制登录命令: agy" : "Copy Login Command: agy",
           cls: "mod-cta",
@@ -837,7 +837,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           row.createSpan({ text: `${percentage}%`, cls: "agy-quota-bucket-value" });
           const track = groupEl.createDiv("agy-quota-bar");
           const fill = track.createDiv("agy-quota-bar-fill");
-          fill.style.width = `${percentage}%`;
+          fill.setCssProps({ width: `${percentage}%` });
           fill.toggleClass("is-low", percentage <= 20);
           const resetText = formatResetTime(bucket.resetTime);
           if (resetText) {

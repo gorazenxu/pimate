@@ -27,6 +27,7 @@ import {
 import { basename, dirname, join, relative } from "path";
 import { homedir } from "os";
 import type PiAgentPlugin from "./main";
+import { ChatScrollFollower } from "./ChatScrollFollower";
 import type {
   AgyConversationIndexEntry,
   AgyConversationScopeOverride,
@@ -48,6 +49,7 @@ import {
 import {
   AGY_GEMINI_PRICING_SOURCE,
   calculateAgyCost,
+  getAgyAccountingTotal,
 } from "./AgyPricing";
 import {
   AgyUsageStore,
@@ -512,7 +514,9 @@ export class PiAgentView extends ItemView {
       }
     };
 
+    this.scrollFollower?.dispose();
     this.chatContainer = container.createDiv("pi-agent-chat");
+    this.scrollFollower = new ChatScrollFollower(this.chatContainer, () => this.plugin.settings.autoScroll);
     this.renderEmptyState();
 
     this.historyPanelEl = container.createDiv("pi-agent-history-panel");
@@ -1717,6 +1721,7 @@ export class PiAgentView extends ItemView {
       retry?: boolean;
     };
     if (!message) return;
+    const followBottom = this.captureBottomFollow();
     const tab = sourceTab || this.activeTab;
 
     if (message.role === "user") {
@@ -1765,7 +1770,7 @@ export class PiAgentView extends ItemView {
         window.clearTimeout(this.renderTimeout);
         this.renderTimeout = null;
       }
-      this.scrollToBottom(true, true);
+      followBottom();
     } else if (message.role === "toolResult") {
       // Tool results are handled by tool_execution_end
     }
@@ -1880,9 +1885,9 @@ export class PiAgentView extends ItemView {
 
       case "thinking_delta":
         if (this.currentThinkingContent) {
-          const shouldStickToBottom = this.isNearBottom();
+          const followBottom = this.captureBottomFollow();
           this.currentThinkingContent.appendText(delta.delta || "");
-          if (shouldStickToBottom) this.scrollToBottom(true, true);
+          followBottom();
         }
         break;
 
@@ -1917,25 +1922,28 @@ export class PiAgentView extends ItemView {
         break;
 
       case "error": {
+        const followBottom = this.captureBottomFollow();
         const message = this.ensureAssistantStreamMessage();
         message.el.removeClass("is-tool-only");
         const errorEl = message.contentEl.createDiv("pi-agent-error-block");
         const isAgyFailure = !!delta.errorCategory;
+        const isCancelled = delta.errorCategory === "cancelled";
         const isZh = this.plugin.settings.language !== "en";
         const summary = isAgyFailure
           ? this.getAgyFailureSummary(delta.errorCategory || "unknown", isZh)
           : `Error: ${delta.reason || "Unknown error"}`;
-        errorEl.createSpan({ text: `⚠️ ${summary}` });
+        errorEl.toggleClass("is-cancelled", isCancelled);
+        errorEl.createSpan({ text: isCancelled ? summary : `⚠️ ${summary}` });
 
-        if (isAgyFailure && delta.reason) {
-          errorEl.createDiv("pi-agent-error-detail").setText(
-            `${isZh ? "AGY 原始信息：" : "AGY detail: "}${delta.reason}`
-          );
+        if (!isCancelled && ((isAgyFailure && delta.reason) || delta.diagnostic)) {
+          const details = errorEl.createEl("details", { cls: "pi-agent-error-detail" });
+          details.createEl("summary", { text: isZh ? "查看诊断信息" : "Show diagnostics" });
+          if (isAgyFailure && delta.reason) {
+            details.createDiv().setText(`${isZh ? "AGY 信息（已脱敏）：" : "AGY detail (redacted): "}${delta.reason}`);
+          }
+          if (delta.diagnostic) details.createDiv().setText(delta.diagnostic);
         }
-        if (delta.diagnostic) {
-          errorEl.createDiv("pi-agent-error-detail").setText(delta.diagnostic);
-        }
-        if (delta.retryable) {
+        if (!isCancelled && delta.retryable) {
           const retryBtn = errorEl.createEl("button", {
             text: isZh ? "↻ 重试本轮" : "↻ Retry this turn",
             cls: "pi-agent-error-retry",
@@ -1947,6 +1955,7 @@ export class PiAgentView extends ItemView {
           });
           retryBtn.onclick = () => this.retryLastAgyTurn(retryBtn);
         }
+        followBottom();
         break;
       }
     }
@@ -1962,6 +1971,7 @@ export class PiAgentView extends ItemView {
         case "permission": return "AGY denied this operation.";
         case "process": return "AGY process exited unexpectedly; the session is preserved.";
         case "cancelled": return "Operation stopped by user.";
+        case "interrupted": return "AGY interrupted this turn; the session is preserved.";
         default: return "AGY could not complete this turn; the session is preserved.";
       }
     }
@@ -1973,6 +1983,7 @@ export class PiAgentView extends ItemView {
       case "permission": return "AGY 拒绝了这项操作。";
       case "process": return "AGY 进程意外退出，会话已保留。";
       case "cancelled": return "已停止本轮任务。";
+      case "interrupted": return "AGY 本轮被中断，会话已保留。";
       default: return "AGY 未能完成本轮，会话已保留。";
     }
   }
@@ -2014,7 +2025,7 @@ export class PiAgentView extends ItemView {
 
     if (this.currentAssistantMsg) {
       this.currentAssistantMsg.el.setAttribute("data-raw-content", this.currentRawText);
-      const shouldStickToBottom = this.isNearBottom();
+      const followBottom = this.captureBottomFollow();
       const renderPromises: Promise<unknown>[] = [];
 
       // Finalize all streaming text blocks: replace the cheap <pre>-style buffer
@@ -2060,10 +2071,8 @@ export class PiAgentView extends ItemView {
       }
       this.finalizeAssistantMessageVisibility(this.currentAssistantMsg);
 
-      if (shouldStickToBottom) {
-        this.scrollToBottom(true, true);
-        void Promise.all(renderPromises).then(() => this.scrollToBottom(true, true));
-      }
+      followBottom();
+      void Promise.all(renderPromises).then(followBottom);
     } else {
       this.scrollToBottom();
     }
@@ -2210,6 +2219,7 @@ export class PiAgentView extends ItemView {
   }
 
   private handleToolStart(event: RpcEvent): void {
+    const followBottom = this.captureBottomFollow();
     const toolName = event.toolName as string;
     const toolCallId = event.toolCallId as string;
     const args = event.args as Record<string, unknown> | undefined;
@@ -2288,6 +2298,7 @@ export class PiAgentView extends ItemView {
     toolBlock.setAttribute("data-tool-id", toolCallId);
     (toolBlock as any).__outputEl = outputEl;
     (toolBlock as any).__startedAt = Date.now();
+    followBottom();
   }
 
   private shouldWarnToolExecution(toolName: string, args?: Record<string, unknown>): boolean {
@@ -2300,6 +2311,7 @@ export class PiAgentView extends ItemView {
   }
 
   private handleToolUpdate(event: RpcEvent): void {
+    const followBottom = this.captureBottomFollow();
     const toolCallId = event.toolCallId as string;
     const partialResult = event.partialResult as
       | { content?: Array<{ type: string; text: string }> }
@@ -2314,13 +2326,16 @@ export class PiAgentView extends ItemView {
         const text = partialResult.content.map((c) => c.text).join("");
         const preview = text.trim();
         outputEl.setText(preview.length > 1200 ? preview.slice(0, 1200) + "\n…" : preview);
-        outputEl.toggleClass("is-visible", preview.length > 0);
-        this.scrollToBottom();
+        // Keep command output collapsed while streaming. The header remains
+        // clickable, and opening it shows the latest partial result without
+        // making a long tool chain expand to hundreds of lines by itself.
+        followBottom();
       }
     }
   }
 
   private handleToolEnd(event: RpcEvent): void {
+    const followBottom = this.captureBottomFollow();
     const toolCallId = event.toolCallId as string;
     const result = event.result as
       | { content?: Array<{ type: string; text: string }>; isError?: boolean }
@@ -2376,6 +2391,7 @@ export class PiAgentView extends ItemView {
         }
       }
     }
+    followBottom();
   }
 
   private handleQueueUpdate(event: RpcEvent, sourceTab?: ChatTab | null): void {
@@ -2532,6 +2548,7 @@ export class PiAgentView extends ItemView {
       throw new Error("Chat container not initialized");
     }
 
+    const followBottom = this.captureBottomFollow();
     this.clearEmptyState();
     const msgEl = this.chatContainer.createDiv(
       `pi-agent-message pi-agent-message-${role}`
@@ -2691,7 +2708,8 @@ export class PiAgentView extends ItemView {
         const oldest = this.renderedMessages.shift();
         if (oldest) oldest.el.remove();
       }
-      this.scrollToBottom(true, true);
+      if (role === "user") this.scrollToBottom(true, true);
+      else followBottom();
     }
     return rendered;
   }
@@ -3235,48 +3253,14 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private isNearBottom(threshold = 80): boolean {
-    if (!this.chatContainer) return true;
-    const scrollOffset =
-      this.chatContainer.scrollHeight -
-      this.chatContainer.scrollTop -
-      this.chatContainer.clientHeight;
-    return scrollOffset <= threshold;
+  private scrollFollower: ChatScrollFollower | null = null;
+
+  private captureBottomFollow(): () => void {
+    return this.scrollFollower?.capture() ?? (() => {});
   }
 
   private scrollToBottom(immediate = true, force = false): void {
-    if (!this.chatContainer || !this.plugin.settings.autoScroll) return;
-
-    if (!force) {
-      // Smart Auto-Scroll Lock: if user scrolled up more than 50px, do not hijack the view.
-      const scrollOffset = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight;
-      if (scrollOffset >= 50) {
-        return;
-      }
-    }
-
-    if (immediate) {
-      this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
-    }
-    // Compensation delays for dynamic reflow
-    window.setTimeout(() => {
-      if (this.chatContainer) {
-        if (!force) {
-          const scrollOffset = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight;
-          if (scrollOffset >= 50) return;
-        }
-        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
-      }
-    }, 50);
-    window.setTimeout(() => {
-      if (this.chatContainer) {
-        if (!force) {
-          const scrollOffset = this.chatContainer.scrollHeight - this.chatContainer.scrollTop - this.chatContainer.clientHeight;
-          if (scrollOffset >= 50) return;
-        }
-        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
-      }
-    }, 150);
+    this.scrollFollower?.scroll(immediate, force);
   }
 
   private focusAdjacentMessage(direction: -1 | 1): void {
@@ -7338,12 +7322,12 @@ export class PiAgentView extends ItemView {
   private updateEngineDisplay(): void {
     if (this.plugin.settings.enableAntigravity === false) {
       if (this.footerEngineSelector) {
-        this.footerEngineSelector.style.display = "none";
+        this.footerEngineSelector.setCssProps({ display: "none" });
       }
       return;
     }
     if (this.footerEngineSelector) {
-      this.footerEngineSelector.style.display = "";
+      this.footerEngineSelector.setCssProps({ display: "" });
     }
     if (!this.footerEngineLabel) return;
     const isZh = this.plugin.settings.language === "zh";
@@ -7991,6 +7975,8 @@ export class PiAgentView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.scrollFollower?.dispose();
+    this.scrollFollower = null;
     if (this.thinkingTimer) {
       window.clearInterval(this.thinkingTimer);
       this.thinkingTimer = null;
@@ -8085,11 +8071,11 @@ export class PiAgentView extends ItemView {
     const now = Date.now();
     const delay = 50;
     const apply = () => {
-      const shouldStickToBottom = this.isNearBottom();
+      const followBottom = this.captureBottomFollow();
       if (this.streamingTextEl) {
         this.streamingTextEl.textContent = rawText;
       }
-      if (shouldStickToBottom) this.scrollToBottom(true, true);
+      followBottom();
       this.lastRenderTime = Date.now();
     };
     if (now - this.lastRenderTime >= delay) {
@@ -8179,7 +8165,7 @@ export class PiAgentView extends ItemView {
   }
 
   private renderMarkdownWithCursor(rawText: string, targetEl: HTMLElement): void {
-    const shouldStickToBottom = this.isNearBottom();
+    const followBottom = this.captureBottomFollow();
     targetEl.empty();
 
     const normalizedText = this.normalizeAssistantMarkdown(rawText);
@@ -8196,7 +8182,7 @@ export class PiAgentView extends ItemView {
       "",
       this
     ).then(() => {
-      if (shouldStickToBottom) this.scrollToBottom(true, true);
+      followBottom();
     });
   }
 
@@ -9945,7 +9931,10 @@ async function scanAgyUsageRange(
     row.thinking += delta.thinking;
     row.cacheRead += delta.cacheRead;
     row.cacheTotal += delta.cacheRead;
-    row.totalTokens += delta.total;
+    // AGY's raw total_tokens excludes cache_read_tokens. Normalize it here so
+    // AGY rows use the same all-token total as Pi rows in the unified report.
+    const accountingTotal = getAgyAccountingTotal(delta);
+    row.totalTokens += accountingTotal;
     row.cost += cost ?? 0;
     row.costKnown = row.costKnown && cost !== null;
     if (row.firstUsed == null || snapshot.observedAt < row.firstUsed) row.firstUsed = snapshot.observedAt;
@@ -9956,7 +9945,7 @@ async function scanAgyUsageRange(
     totals.thinking += delta.thinking;
     totals.cacheRead += delta.cacheRead;
     totals.cacheTotal += delta.cacheRead;
-    totals.totalTokens += delta.total;
+    totals.totalTokens += accountingTotal;
     if (cost === null) {
       totals.unknownCostMessages += 1;
     } else {

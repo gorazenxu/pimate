@@ -14,8 +14,9 @@ import type {
   ForkMessagesResult,
   SessionEntriesResult,
 } from "./PiAgentClient";
-import { calculateAgyCost } from "./AgyPricing";
+import { calculateAgyCost, getAgyAccountingTotal } from "./AgyPricing";
 import { AgyUsageStore } from "./AgyUsageStore";
+import { AgyDiagnosticStore, classifyAgyFailure, sanitizeAgyDiagnostic, type AgyFailureCategory } from "./AgyDiagnostics";
 
 export interface AgyAgentClientOptions {
   agyPath?: string;
@@ -98,16 +99,6 @@ interface PendingAgyPrompt {
   options?: AgyPromptOptions;
   kind: "steering" | "followUp";
 }
-
-type AgyFailureCategory =
-  | "cancelled"
-  | "network"
-  | "timeout"
-  | "authentication"
-  | "quota"
-  | "permission"
-  | "process"
-  | "unknown";
 
 interface ActiveAgyPrompt {
   message: string;
@@ -243,10 +234,8 @@ export class AgyAgentClient extends EventEmitter {
   private activePrompt: ActiveAgyPrompt | null = null;
   private retryablePrompt: RetryableAgyPrompt | null = null;
   private recentTurnStderr = "";
-  // AGY writes detailed transport errors to its rotating log. Keep per-process
-  // byte offsets so a failed turn only reads diagnostics appended by this
-  // invocation and never reuses stale errors from an older process.
-  private agyLogOffsets = new Map<string, number>();
+  // Set only by a local abort request; remote error wording is not evidence.
+  private stopRequested = false;
   private historyLoadedConversationId: string | null = null;
   private historyLoadedLimit: number | null = null;
   private historyIsPartial = false;
@@ -721,7 +710,6 @@ export class AgyAgentClient extends EventEmitter {
       };
 
       try {
-        this.snapshotAgyLogFiles();
         const child = spawn(resolved.cmd, args, spawnOptions);
         this.process = child;
         const generation = ++this.processGeneration;
@@ -753,7 +741,7 @@ export class AgyAgentClient extends EventEmitter {
           if (this.process !== child || this.processGeneration !== generation) return;
           const stderr = chunk.toString();
           this.recordTurnStderr(stderr);
-          console.warn("[agy stderr]", stderr);
+          console.warn("[agy stderr]", sanitizeAgyDiagnostic(stderr));
         });
 
         child.stdin!.on("error", (err) => {
@@ -780,7 +768,7 @@ export class AgyAgentClient extends EventEmitter {
           else this.emit("error", err);
         });
 
-        child.on("close", (code) => {
+        child.on("close", (code, signal) => {
           if (this.process !== child || this.processGeneration !== generation) return;
           console.log(`[agy] Process closed with code ${code}`);
           const wasRunningTurn = this.isTurnStreaming;
@@ -799,7 +787,7 @@ export class AgyAgentClient extends EventEmitter {
               this.finishActiveTurnWithError(
                 wasExpectedAbort
                   ? "Operation aborted by user"
-                  : `Process exited with code ${code}`
+                  : `Process exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
               );
             } else {
               this.isTurnStreaming = false;
@@ -844,7 +832,7 @@ export class AgyAgentClient extends EventEmitter {
         this.handleAgyEvent(parsed);
       } catch {
         // Non-JSON diagnostic line from agy, ignore or log
-        console.debug("[agy stdout raw]", line);
+        console.debug("[agy stdout raw]", sanitizeAgyDiagnostic(line));
       }
     }
   }
@@ -1009,6 +997,7 @@ export class AgyAgentClient extends EventEmitter {
       }
 
       if (result?.status === "SUCCESS") {
+        this.recordTerminalDiagnostic("result", "SUCCESS", typeof result.error === "string" ? result.error : "", undefined, result.response);
         this.activePrompt = null;
         this.retryablePrompt = null;
         const responseText = result.response || this.lastAssistantText;
@@ -1039,12 +1028,7 @@ export class AgyAgentClient extends EventEmitter {
         const resultError =
           typeof result?.error === "string" ? result.error : "";
         const resultStatus = String(result?.status || "");
-        const wasCancelled = /(cancel|abort|interrupt)/i.test(
-          `${resultStatus} ${resultError}`
-        );
-        const errorMsg = wasCancelled
-          ? "Operation aborted by user"
-          : resultError || "Agent execution failed";
+        const errorMsg = resultError || "Agent execution failed";
         // Some AGY versions provide a final response only on the result
         // frame. Treat it as output too, so it can never qualify for replay.
         if ((this.lastAssistantText || result?.response) && this.activePrompt) {
@@ -1052,13 +1036,15 @@ export class AgyAgentClient extends EventEmitter {
         }
         const failure = this.prepareFailure(
           errorMsg,
-          this.pendingPrompts.length === 0
+          this.pendingPrompts.length === 0,
+          resultStatus,
+          "result"
         );
         this.emit("event", {
           type: "message_update",
           assistantMessageEvent: {
             type: "error",
-            reason: errorMsg,
+            reason: sanitizeAgyDiagnostic(errorMsg),
             errorCategory: failure.category,
             retryable: failure.retryable,
             diagnostic: failure.diagnostic,
@@ -1103,7 +1089,7 @@ export class AgyAgentClient extends EventEmitter {
       type: "message_update",
       assistantMessageEvent: {
         type: "error",
-        reason,
+        reason: sanitizeAgyDiagnostic(reason),
         errorCategory: failure.category,
         retryable: failure.retryable,
         diagnostic: failure.diagnostic,
@@ -1128,111 +1114,26 @@ export class AgyAgentClient extends EventEmitter {
     this.recentTurnStderr = `${this.recentTurnStderr}${stderr}`.slice(-8_000);
   }
 
-  private snapshotAgyLogFiles(): void {
-    this.agyLogOffsets.clear();
-    const logDir = path.join(AgyAgentClient.getAgyDataDir(), "log");
-    let names: string[];
-    try {
-      names = fs.readdirSync(logDir);
-    } catch {
-      return;
-    }
-
-    for (const name of names) {
-      if (name !== "cli.log" && !/^cli-.*\.log$/i.test(name)) continue;
-      const filePath = path.join(logDir, name);
-      try {
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) this.agyLogOffsets.set(filePath, stat.size);
-      } catch {
-        // The CLI can rotate a log between readdir and stat.
-      }
-    }
-  }
-
-  private readNewAgyLogDiagnostics(): string | undefined {
-    const logDir = path.join(AgyAgentClient.getAgyDataDir(), "log");
-    let names: string[];
-    try {
-      names = fs.readdirSync(logDir);
-    } catch {
-      return undefined;
-    }
-
-    const relevant: string[] = [];
-    for (const name of names) {
-      if (name !== "cli.log" && !/^cli-.*\.log$/i.test(name)) continue;
-      const filePath = path.join(logDir, name);
-      try {
-        const stat = fs.statSync(filePath);
-        if (!stat.isFile()) continue;
-
-        let previousOffset = this.agyLogOffsets.get(filePath) || 0;
-        if (stat.size < previousOffset) {
-          previousOffset = 0;
-        }
-        if (stat.size <= previousOffset) continue;
-
-        const contents = fs.readFileSync(filePath);
-        const start = Math.min(previousOffset, contents.length);
-        this.agyLogOffsets.set(filePath, contents.length);
-        for (const rawLine of contents.subarray(start).toString("utf8").split(/\r?\n/)) {
-          const line = rawLine
-            .trim()
-            .replace(/^ERROR: logging before google\.Init:\s*/, "");
-          if (!line) continue;
-          if (
-            /agent executor error|calling model: request failed|broken pipe|connection (?:reset|refused|closed)|timeout|timed out|failed to install playwright|browser context|not logged in|unauthenticated|quota|permission denied|access denied/i.test(
-              line
-            )
-          ) {
-            relevant.push(line);
-          }
-        }
-      } catch {
-        // Log rotation or an in-progress write must not break the turn UI.
-      }
-    }
-
-    return relevant.slice(-3).join(" · ").slice(-1_200) || undefined;
-  }
-
-  private classifyFailure(reason: string): AgyFailureCategory {
-    const normalized = reason.toLowerCase();
-    if (/(cancel|abort|interrupt|context canceled)/i.test(normalized)) {
-      return "cancelled";
-    }
-    if (/(quota|rate limit|resource exhausted|too many requests|\b429\b)/i.test(normalized)) {
-      return "quota";
-    }
-    if (/(auth|sign[ -]?in|login|credential|unauthenticated|\b401\b|\b403\b)/i.test(normalized)) {
-      return "authentication";
-    }
-    if (/(permission|access denied|not allowed)/i.test(normalized)) {
-      return "permission";
-    }
-    if (/(timeout|timed out|deadline exceeded)/i.test(normalized)) {
-      return "timeout";
-    }
-    if (/(broken pipe|connection (?:reset|refused|closed)|network|i\/o timeout|timed out|\beof\b|stream (?:was )?interrupted|temporarily unavailable)/i.test(normalized)) {
-      return "network";
-    }
-    if (/(process exited|agy exited|child process|exit code|signal)/i.test(normalized)) {
-      return "process";
-    }
-    return "unknown";
-  }
-
   private getTurnDiagnostic(): string | undefined {
     const stderrRelevant = this.recentTurnStderr
       .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => /error|fail|broken pipe|timeout|reset|denied|quota/i.test(line));
-    const logDetail = this.readNewAgyLogDiagnostics();
-    const detail = [...stderrRelevant.slice(-2), ...(logDetail ? [logDetail] : [])]
-      .join(" · ")
-      .slice(-1_000);
-    return detail || undefined;
+      .map((line) => line.trim().replace(/^ERROR: logging before google\.Init:\s*/, ""))
+      .filter((line) => !/^I\d{4}\s/.test(line))
+      .filter((line) => /error|fail|broken pipe|timeout|reset|denied|invalid.argument/i.test(line));
+    return sanitizeAgyDiagnostic(stderrRelevant.slice(-2).join(" · ")) || undefined;
+  }
+
+  private recordTerminalDiagnostic(
+    source: "result" | "transport", status: string, error: string,
+    category?: AgyFailureCategory, response?: unknown
+  ): void {
+    AgyDiagnosticStore.record({
+      at: new Date().toISOString(), conversationId: this.conversationId,
+      source, status, error, category, stopRequested: this.stopRequested,
+      receivedModelOutput: !!this.activePrompt?.receivedModelOutput || !!this.lastAssistantText || !!response,
+      hadToolActivity: !!this.activePrompt?.hadToolActivity,
+      responseChars: typeof response === "string" ? response.length : this.lastAssistantText.length,
+    }, this.options.cwd || process.cwd());
   }
 
   /**
@@ -1240,9 +1141,13 @@ export class AgyAgentClient extends EventEmitter {
    * solely when this adapter received neither model output nor a tool event,
    * and when there are no queued prompts that would change turn ordering.
    */
-  private prepareFailure(reason: string, noQueuedPrompts: boolean): AgyFailureInfo {
-    const diagnostic = this.getTurnDiagnostic();
-    const category = this.classifyFailure(`${reason}\n${diagnostic || ""}`);
+  private prepareFailure(
+    reason: string, noQueuedPrompts: boolean, status = "",
+    source: "result" | "transport" = "transport"
+  ): AgyFailureInfo {
+    const category = classifyAgyFailure(reason, this.stopRequested, status);
+    const diagnostic = this.stopRequested ? undefined : this.getTurnDiagnostic();
+    this.recordTerminalDiagnostic(source, status, reason, category);
     const activePrompt = this.activePrompt;
     const retryable =
       category !== "cancelled" &&
@@ -1285,6 +1190,7 @@ export class AgyAgentClient extends EventEmitter {
     this.toolCallStates.clear();
     this.retryablePrompt = null;
     this.recentTurnStderr = "";
+    this.stopRequested = false;
     this.activePrompt = {
       message,
       options,
@@ -1482,6 +1388,7 @@ export class AgyAgentClient extends EventEmitter {
    */
   async abort(): Promise<RpcResponse> {
     const hadActiveTurn = this.isTurnStreaming;
+    if (hadActiveTurn) this.stopRequested = true;
     const partialText = this.lastAssistantText;
     const child = this.process;
     this.retryablePrompt = null;
@@ -1693,6 +1600,15 @@ export class AgyAgentClient extends EventEmitter {
     await this.usageLoadPromise;
     const includeHistory = options.includeHistory !== false;
     if (includeHistory) this.ensureHistoryLoaded();
+    const accountingTotal = this.usageKnown
+      ? getAgyAccountingTotal({
+        input: this.inputTokens,
+        output: this.outputTokens,
+        thinking: this.thinkingTokens,
+        cacheRead: this.cacheReadTokens,
+        total: this.totalTokens,
+      })
+      : 0;
     const cost = this.usageKnown
       ? calculateAgyCost(this.usageModelId || this.currentModelId, {
         input: this.inputTokens,
@@ -1709,7 +1625,7 @@ export class AgyAgentClient extends EventEmitter {
       data: {
         totalMessages: includeHistory ? this.historyMessages.length : undefined,
         tokens: {
-          total: this.totalTokens,
+          total: accountingTotal,
           input: this.inputTokens,
           output: this.outputTokens,
           thinking: this.thinkingTokens,
@@ -1719,7 +1635,7 @@ export class AgyAgentClient extends EventEmitter {
         costKnown: cost !== null,
         costEstimated: cost !== null,
         contextUsage: undefined,
-        totalTokens: this.totalTokens,
+        totalTokens: accountingTotal,
         inputTokens: this.inputTokens,
         outputTokens: this.outputTokens,
         thinkingTokens: this.thinkingTokens,

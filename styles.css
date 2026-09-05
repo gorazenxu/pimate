@@ -60,9 +60,9 @@
   padding: 12px 0;
   display: flex;
   flex-direction: column;
-  /* Tool-heavy AGY turns can contain many assistant wrappers. Keep the
-     separation visible without multiplying a large gap for every tool row. */
-  gap: 6px;
+  /* Tool-heavy AGY turns can contain many assistant wrappers. Keep a tiny
+     separation without multiplying a large gap for every tool row. */
+  gap: 2px;
 }
 
 .pi-agent-chat::-webkit-scrollbar { width: 6px; }
@@ -300,7 +300,7 @@
   background: transparent;
   border-left: 2px solid var(--background-modifier-border);
   border-radius: 0;
-  padding: 2px 0 2px 10px;
+  padding: 0 0 0 10px;
   text-align: start;
   color: var(--text-normal);
 }
@@ -318,7 +318,7 @@
 }
 
 .pi-agent-message-assistant.has-tool-content .pi-agent-message-content {
-  line-height: 1.35;
+  line-height: 1.2;
 }
 
 .pi-agent-message-content {
@@ -424,7 +424,7 @@ summary.pi-agent-skill-details-summary:hover {
 
 .pi-agent-text-block + .pi-agent-tool-block,
 .pi-agent-tool-block + .pi-agent-text-block {
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .pi-agent-streaming-block {
@@ -866,8 +866,8 @@ summary.pi-agent-skill-details-summary:hover {
 
 /* Thinking block - tree-branch style */
 .pi-agent-thinking-block {
-  margin: 1px 0;
-  padding: 1px 0 1px 14px;
+  margin: 0;
+  padding: 0 0 0 14px;
   margin-inline-start: 7px;
   border-inline-start: 2px solid var(--background-modifier-border);
 }
@@ -876,7 +876,8 @@ summary.pi-agent-skill-details-summary:hover {
   font-family: var(--font-monospace);
   font-size: 12px;
   color: var(--pi-brand);
-  margin-bottom: 1px;
+  margin-bottom: 0;
+  line-height: 1.2;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -943,6 +944,14 @@ summary.pi-agent-skill-details-summary:hover {
   overflow-wrap: anywhere;
 }
 
+.pi-agent-error-block.is-cancelled {
+  color: var(--text-muted);
+}
+
+.pi-agent-error-detail > summary {
+  cursor: pointer;
+}
+
 .pi-agent-error-retry {
   border: 1px solid color-mix(in srgb, var(--interactive-accent) 65%, transparent);
   background: transparent;
@@ -963,15 +972,16 @@ summary.pi-agent-skill-details-summary:hover {
 }
 
 /* Tool calls: copied proportions from Claudian tool rows */
-.pi-agent-tool-block { margin: 1px 0; }
+.pi-agent-tool-block { margin: 0; }
 .pi-agent-tool-block + .pi-agent-tool-block { margin-top: 0; }
 
 .pi-agent-tool-header {
   display: grid;
   grid-template-columns: 18px auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 2px 0;
+  gap: 6px;
+  padding: 0;
+  line-height: 1.2;
   cursor: pointer;
   overflow: hidden;
 }
@@ -1155,7 +1165,7 @@ summary.pi-agent-skill-details-summary:hover {
 
 .pi-agent-tool-output {
   display: none;
-  padding: 4px 0;
+  padding: 2px 0;
   padding-inline-start: 16px;
   margin-inline-start: 7px;
   border-inline-start: 2px solid var(--background-modifier-border);
