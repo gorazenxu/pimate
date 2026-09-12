@@ -251,6 +251,10 @@ export interface AssistantMessageEvent {
   retryable?: boolean;
   /** Short technical detail retained from the underlying process, when available. */
   diagnostic?: string;
+  /** The adapter received model-generated content before the turn failed. */
+  receivedModelOutput?: boolean;
+  /** At least one tool step was observed before the turn failed. */
+  hadToolActivity?: boolean;
 }
 
 export interface ToolCall {

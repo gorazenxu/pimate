@@ -50,7 +50,7 @@ test("stream interruption and remote cancellation never imply a local Stop", () 
   }
 });
 
-test("completed text followed by stream failure retains reason and disallows replay", () => {
+test("completed text followed by stream failure retains reason, reply, and disallows replay", async () => {
   const { client, events, writes } = session();
   client.handleAgyEvent({ event: "step_update", step_update: { step_type: "tool", step_index: 1, state: "DONE", tool_name: "write_to_file" } });
   client.handleAgyEvent({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "Files updated. Finished." } });
@@ -60,6 +60,8 @@ test("completed text followed by stream failure retains reason and disallows rep
   assert.equal(errors(events)[0].reason, reason);
   assert.equal(errors(events)[0].errorCategory, "network");
   assert.equal(errors(events)[0].retryable, false);
+  assert.equal(errors(events)[0].receivedModelOutput, true);
+  assert.equal(errors(events)[0].hadToolActivity, true);
   assert.equal(writes.length, 1);
   assert.equal(records[0].stopRequested, false);
   assert.equal(records[0].error, reason);
@@ -69,6 +71,60 @@ test("completed text followed by stream failure retains reason and disallows rep
   assert.ok(!JSON.stringify(records[0]).includes("Files updated"));
   assert.ok(!errors(events)[0].diagnostic?.includes("doRefreshQuota"));
   assert.equal(events.filter(e => e.type === "agent_settled").length, 1);
+  const history = (await client.getMessages()).data.messages;
+  const reply = history.find((message) => message.role === "assistant");
+  assert.equal(reply?.content.find((block) => block.type === "text")?.text, "Files updated. Finished.");
+});
+
+test("final-only failed response is rendered and retained in history", async () => {
+  const { client, events } = session();
+  terminal(client, "ERROR", "The stream was interrupted", "The answer was completed before close.");
+  const textDeltas = events
+    .filter((event) => event.assistantMessageEvent?.type === "text_delta")
+    .map((event) => event.assistantMessageEvent.delta);
+  assert.deepEqual(textDeltas, ["The answer was completed before close."]);
+  assert.equal(errors(events)[0].receivedModelOutput, true);
+  const history = (await client.getMessages()).data.messages;
+  assert.equal(
+    history.find((message) => message.role === "assistant")?.content[0]?.text,
+    "The answer was completed before close."
+  );
+});
+
+test("invalidating AGY history reloads the native transcript after a tab switch", async () => {
+  const client = new AgyAgentClient({
+    conversationId: "synthetic-conversation",
+    trackUsage: false,
+  });
+  client.process = { stdin: { write: () => {} } };
+  let loads = 0;
+  let persisted = [];
+  client.loadTranscriptHistory = () => {
+    loads++;
+    return persisted;
+  };
+
+  await client.getMessages({ limit: 100 });
+  assert.equal(loads, 1);
+  client.beginPrompt("A request with a late transcript flush");
+  client.handleAgyEvent({
+    event: "step_update",
+    step_update: { step_type: "agent_response", text_delta: "Reply survives switching." },
+  });
+  terminal(client, "ERROR", "The stream was interrupted");
+
+  persisted = [
+    { role: "user", content: [{ type: "text", text: "A request with a late transcript flush" }] },
+    { role: "assistant", content: [{ type: "text", text: "Reply survives switching." }] },
+  ];
+  client.invalidateHistoryCache();
+  const reloaded = (await client.getMessages({ limit: 100 })).data.messages;
+  assert.equal(loads, 2);
+  assert.equal(
+    reloaded.filter((message) => message.role === "assistant").length,
+    1
+  );
+  assert.equal(reloaded.at(-1).content[0].text, "Reply survives switching.");
 });
 
 test("actual abort is cancelled, suppresses diagnostics, and resets on the next prompt", async () => {

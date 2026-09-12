@@ -57,6 +57,10 @@ import {
   type AgyUsageSnapshot,
   type AgyUsageTotals,
 } from "./AgyUsageStore";
+import {
+  AgyRequestStore,
+  getAgyRequestStorePath,
+} from "./AgyRequestStore";
 
 export type AgentClient = PiAgentClient | AgyAgentClient;
 
@@ -1040,6 +1044,7 @@ export class PiAgentView extends ItemView {
   private async switchToTab(tabId: string): Promise<void> {
     const tab = this.tabs.find((item) => item.id === tabId);
     if (!tab) return;
+    const previousTab = this.activeTab;
     this.saveActiveComposerState();
     const switchSeq = ++this.tabSwitchSeq;
     this.activeTabId = tab.id;
@@ -1067,6 +1072,12 @@ export class PiAgentView extends ItemView {
 
     const client = tab.client;
     this.client = client;
+    if (tab.engine === "antigravity" && previousTab !== tab) {
+      // AGY clients stay alive with their tabs. Re-read the native transcript
+      // after a real tab change so a result flushed while another tab was
+      // active cannot remain hidden behind the old in-memory snapshot.
+      (client as AgyAgentClient).invalidateHistoryCache();
+    }
     this.renderActiveTabRuntimeStatus();
     this.renderActiveTabSpeed();
     // Parallelize non-blocking post-start calls so the UI feels snappy.
@@ -1928,11 +1939,13 @@ export class PiAgentView extends ItemView {
         const errorEl = message.contentEl.createDiv("pi-agent-error-block");
         const isAgyFailure = !!delta.errorCategory;
         const isCancelled = delta.errorCategory === "cancelled";
+        const receivedModelOutput = delta.receivedModelOutput === true;
         const isZh = this.plugin.settings.language !== "en";
         const summary = isAgyFailure
-          ? this.getAgyFailureSummary(delta.errorCategory || "unknown", isZh)
+          ? this.getAgyFailureSummary(delta.errorCategory || "unknown", isZh, receivedModelOutput)
           : `Error: ${delta.reason || "Unknown error"}`;
         errorEl.toggleClass("is-cancelled", isCancelled);
+        errorEl.toggleClass("has-response", receivedModelOutput && !isCancelled);
         errorEl.createSpan({ text: isCancelled ? summary : `⚠️ ${summary}` });
 
         if (!isCancelled && ((isAgyFailure && delta.reason) || delta.diagnostic)) {
@@ -1961,7 +1974,16 @@ export class PiAgentView extends ItemView {
     }
   }
 
-  private getAgyFailureSummary(category: string, isZh: boolean): string {
+  private getAgyFailureSummary(
+    category: string,
+    isZh: boolean,
+    receivedModelOutput = false
+  ): string {
+    if (receivedModelOutput && category !== "cancelled") {
+      return isZh
+        ? "AGY 已产生回复内容，但收尾异常，会话已保留。"
+        : "AGY produced reply content, but turn finalization failed; the session is preserved.";
+    }
     if (!isZh) {
       switch (category) {
         case "network": return "AGY connection was interrupted; the session is preserved.";
@@ -9389,7 +9411,8 @@ type UsageRangePreset =
 interface UsageModelRow {
   provider: string;
   model: string;
-  messageCount: number;
+  requestCount: number;
+  requestCountExact: boolean;
   input: number;
   output: number;
   thinking: number;
@@ -9416,7 +9439,8 @@ interface UsageTotals {
   costKnownMessages: number;
   estimatedCostMessages: number;
   unknownCostMessages: number;
-  messageCount: number;
+  requestCount: number;
+  requestCountExact: boolean;
 }
 
 interface UsageResult {
@@ -9428,7 +9452,7 @@ interface UsageResult {
 }
 
 type UsageSortKey =
-  | "messageCount"
+  | "requestCount"
   | "totalTokens"
   | "input"
   | "output"
@@ -9470,6 +9494,9 @@ function fmtCost(n: number): string {
   if (n < 1) return "$" + n.toFixed(3);
   return "$" + n.toFixed(2);
 }
+function fmtRequestCount(count: number): string {
+  return count.toLocaleString();
+}
 function fmtDateCompact(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -9489,6 +9516,39 @@ function hitRateColor(hr: number | null): string {
 function hitRateLabel(hr: number | null): string {
   if (hr === null) return "—";
   return (hr * 100).toFixed(1) + "%";
+}
+
+function getUsageModelRow(
+  byModel: Map<string, UsageModelRow>,
+  provider: string,
+  model: string
+): UsageModelRow {
+  const normalizedProvider = provider || "unknown";
+  const normalizedModel = model || "unknown";
+  const key = `${normalizedProvider}::${normalizedModel}`;
+  let row = byModel.get(key);
+  if (!row) {
+    row = {
+      provider: normalizedProvider,
+      model: normalizedModel,
+      requestCount: 0,
+      requestCountExact: true,
+      input: 0,
+      output: 0,
+      thinking: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cacheTotal: 0,
+      totalTokens: 0,
+      cost: 0,
+      costKnown: true,
+      hitRate: null,
+      firstUsed: null,
+      lastUsed: null,
+    };
+    byModel.set(key, row);
+  }
+  return row;
 }
 
 function buildRange(
@@ -9557,12 +9617,17 @@ function buildRange(
 // 一条精简的用量记录（按文件持久化，供增量缓存与范围过滤复用）：
 // [ts, provider, model, input, output, cacheRead, cacheWrite, total, cost]
 type UsageRecord = [number, string, string, number, number, number, number, number, number];
+// [ts, provider, model]
+type RequestRecord = [number, string, string];
 
 interface UsageCacheFile {
   size: number;
   mtimeMs: number;
   processedLines: number;
   records: UsageRecord[];
+  requestRecords: RequestRecord[];
+  currentProvider: string;
+  currentModel: string;
 }
 
 interface UsageCache {
@@ -9570,7 +9635,7 @@ interface UsageCache {
   perFile: Record<string, UsageCacheFile>;
 }
 
-const USAGE_CACHE_VERSION = 1;
+const USAGE_CACHE_VERSION = 2;
 
 function usageCachePath(): string {
   return join(homedir(), ".pi", "agent", "usage-cache.json");
@@ -9606,14 +9671,31 @@ function parseUsageFile(
   try {
     content = readFileSync(fullPath, "utf8");
   } catch {
-    return cached ?? { size: 0, mtimeMs: 0, processedLines: 0, records: [] };
+    return cached ?? {
+      size: 0,
+      mtimeMs: 0,
+      processedLines: 0,
+      records: [],
+      requestRecords: [],
+      currentProvider: "unknown",
+      currentModel: "unknown",
+    };
   }
   const lines = content.split(/\r?\n/);
-  // 末尾换行后的完整行数；未以 \n 结尾的尾行视为未完成，留待下次重读补全。
-  const completeLines = content.endsWith("\n") ? lines.length - 1 : lines.length;
-  const truncated = !!cached && st.size < cached.size;
+  // 末尾换行后的完整行数；未以换行结尾的尾行视为未完成，留待下次重读补全。
+  const completeLines = content.endsWith("\n")
+    ? lines.length - 1
+    : Math.max(0, lines.length - 1);
+  const truncated = !!cached && (
+    st.size < cached.size || completeLines < cached.processedLines
+  );
   const startLine = cached && !truncated ? cached.processedLines : 0;
   const records: UsageRecord[] = cached && !truncated ? cached.records.slice() : [];
+  const requestRecords: RequestRecord[] = cached && !truncated
+    ? (cached.requestRecords || []).slice()
+    : [];
+  let currentProvider = cached && !truncated ? cached.currentProvider || "unknown" : "unknown";
+  let currentModel = cached && !truncated ? cached.currentModel || "unknown" : "unknown";
   for (let i = startLine; i < completeLines; i++) {
     const line = lines[i];
     if (!line) continue;
@@ -9623,14 +9705,30 @@ function parseUsageFile(
     } catch {
       continue;
     }
+    if (evt?.type === "model_change") {
+      if (typeof evt.provider === "string" && evt.provider.trim()) {
+        currentProvider = evt.provider.trim();
+      }
+      if (typeof evt.modelId === "string" && evt.modelId.trim()) {
+        currentModel = evt.modelId.trim();
+      }
+      continue;
+    }
     if (evt?.type !== "message") continue;
     const msg = evt.message;
-    if (!msg || msg.role !== "assistant") continue;
+    const ts = typeof evt.timestamp === "string" ? Date.parse(evt.timestamp) : 0;
+    if (!msg) continue;
+    if (msg.role === "user") {
+      requestRecords.push([ts, currentProvider, currentModel]);
+      continue;
+    }
+    if (msg.role !== "assistant") continue;
+    const provider = (msg.provider as string) || (evt.provider as string) || currentProvider || "unknown";
+    const model = (msg.model as string) || (evt.model as string) || currentModel || "unknown";
+    currentProvider = provider;
+    currentModel = model;
     const usage = msg.usage;
     if (!usage) continue;
-    const ts = typeof evt.timestamp === "string" ? Date.parse(evt.timestamp) : 0;
-    const provider = (msg.provider as string) || (evt.provider as string) || "unknown";
-    const model = (msg.model as string) || (evt.model as string) || "unknown";
     const input = Number(usage.input) || 0;
     const output = Number(usage.output) || 0;
     const cacheRead = Number(usage.cacheRead) || 0;
@@ -9640,7 +9738,15 @@ function parseUsageFile(
     const cost = Number(usage.cost?.total) || 0;
     records.push([ts, provider, model, input, output, cacheRead, cacheWrite, total, cost]);
   }
-  return { size: st.size, mtimeMs: st.mtimeMs, processedLines: completeLines, records };
+  return {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    processedLines: completeLines,
+    records,
+    requestRecords,
+    currentProvider,
+    currentModel,
+  };
 }
 
 // 增量扫描：mtime+size 未变的文件直接复用缓存记录，只读变化的文件；
@@ -9707,11 +9813,13 @@ function aggregateUsage(
     costKnownMessages: 0,
     estimatedCostMessages: 0,
     unknownCostMessages: 0,
-    messageCount: 0,
+    requestCount: 0,
+    requestCountExact: true,
   };
   let sessionCount = 0;
   for (const key of Object.keys(perFile)) {
-    const fileRecords = perFile[key].records;
+    const cacheFile = perFile[key];
+    const fileRecords = cacheFile.records;
     let touched = false;
     for (const r of fileRecords) {
       const ts = r[0];
@@ -9720,35 +9828,13 @@ function aggregateUsage(
       }
       const provider = r[1];
       const model = r[2];
-      const mk = `${provider}::${model}`;
-      let row = byModel.get(mk);
-      if (!row) {
-        row = {
-          provider,
-          model,
-          messageCount: 0,
-          input: 0,
-          output: 0,
-          thinking: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cacheTotal: 0,
-          totalTokens: 0,
-          cost: 0,
-          costKnown: true,
-          hitRate: null,
-          firstUsed: null,
-          lastUsed: null,
-        };
-        byModel.set(mk, row);
-      }
+      const row = getUsageModelRow(byModel, provider, model);
       const input = r[3];
       const output = r[4];
       const cacheRead = r[5];
       const cacheWrite = r[6];
       const total = r[7];
       const cost = r[8];
-      row.messageCount += 1;
       row.input += input;
       row.output += output;
       row.cacheRead += cacheRead;
@@ -9767,7 +9853,26 @@ function aggregateUsage(
       totals.cacheWrite += cacheWrite;
       totals.totalTokens += total;
       totals.cost += cost;
-      totals.messageCount += 1;
+      touched = true;
+    }
+    for (const request of cacheFile.requestRecords || []) {
+      const ts = request[0];
+      if (ts && ((from != null && ts < from) || (to != null && ts > to))) {
+        continue;
+      }
+      const row = getUsageModelRow(byModel, request[1], request[2]);
+      row.requestCount += 1;
+      if (
+        row.input === 0 && row.output === 0 && row.thinking === 0 &&
+        row.cacheRead === 0 && row.cacheWrite === 0 && row.totalTokens === 0
+      ) {
+        row.costKnown = false;
+      }
+      if (ts) {
+        if (row.firstUsed == null || ts < row.firstUsed) row.firstUsed = ts;
+        if (row.lastUsed == null || ts > row.lastUsed) row.lastUsed = ts;
+      }
+      totals.requestCount += 1;
       touched = true;
     }
     if (touched) sessionCount += 1;
@@ -9872,7 +9977,10 @@ async function scanAgyUsageRange(
   from: number | null,
   to: number | null
 ): Promise<UsageResult> {
-  const snapshots = await AgyUsageStore.readAll();
+  const [snapshots, requestRecords] = await Promise.all([
+    AgyUsageStore.readAll(),
+    AgyRequestStore.readAll(),
+  ]);
   const boundedRange = from != null || to != null;
   const byModel = new Map<string, UsageModelRow>();
   const totals: UsageTotals = {
@@ -9887,9 +9995,17 @@ async function scanAgyUsageRange(
     costKnownMessages: 0,
     estimatedCostMessages: 0,
     unknownCostMessages: 0,
-    messageCount: 0,
+    requestCount: 0,
+    requestCountExact: true,
   };
   const sessions = new Set<string>();
+  // No historical AGY transcript backfill: snapshots observed before the
+  // first Pimate-owned request remain visible with an approximate count.
+  const trackingStartedAt = requestRecords.reduce<number | null>(
+    (earliest, record) =>
+      earliest == null ? record.observedAt : Math.min(earliest, record.observedAt),
+    null
+  );
 
   for (const { snapshot, delta, baseline } of deriveAgyUsageDeltas(snapshots)) {
     // A first observation of an existing conversation contains AGY's entire
@@ -9903,29 +10019,18 @@ async function scanAgyUsageRange(
     const provider = "Antigravity";
     const model = snapshot.model || "unknown";
     const cost = calculateAgyCost(model, delta, snapshot.observedAt);
-    const key = `${provider}::${model}`;
-    let row = byModel.get(key);
-    if (!row) {
-      row = {
-        provider,
-        model,
-        messageCount: 0,
-        input: 0,
-        output: 0,
-        thinking: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cacheTotal: 0,
-        totalTokens: 0,
-        cost: 0,
-        costKnown: cost !== null,
-        hitRate: null,
-        firstUsed: null,
-        lastUsed: null,
-      };
-      byModel.set(key, row);
+    const row = getUsageModelRow(byModel, provider, model);
+    row.costKnown = row.costKnown && cost !== null;
+    const isLegacySnapshot =
+      trackingStartedAt == null || snapshot.observedAt < trackingStartedAt;
+    if (isLegacySnapshot) {
+      // Preserve the old visible count without pretending it was recovered
+      // from AGY history. The UI marks this value as approximate.
+      row.requestCount += 1;
+      row.requestCountExact = false;
+      totals.requestCount += 1;
+      totals.requestCountExact = false;
     }
-    row.messageCount += 1;
     row.input += delta.input;
     row.output += delta.output;
     row.thinking += delta.thinking;
@@ -9936,7 +10041,6 @@ async function scanAgyUsageRange(
     const accountingTotal = getAgyAccountingTotal(delta);
     row.totalTokens += accountingTotal;
     row.cost += cost ?? 0;
-    row.costKnown = row.costKnown && cost !== null;
     if (row.firstUsed == null || snapshot.observedAt < row.firstUsed) row.firstUsed = snapshot.observedAt;
     if (row.lastUsed == null || snapshot.observedAt > row.lastUsed) row.lastUsed = snapshot.observedAt;
 
@@ -9953,8 +10057,35 @@ async function scanAgyUsageRange(
       totals.costKnownMessages += 1;
       totals.estimatedCostMessages += 1;
     }
-    totals.messageCount += 1;
     sessions.add(snapshot.conversationId);
+  }
+
+  // New AGY requests are counted from Pimate's own prompt ledger. This also
+  // includes requests that produced no usage snapshot (for example a failed
+  // or usage-less turn), without reading AGY's global transcript directory.
+  for (const request of requestRecords) {
+    if (
+      (from != null && request.observedAt < from) ||
+      (to != null && request.observedAt > to)
+    ) {
+      continue;
+    }
+    const row = getUsageModelRow(byModel, "Antigravity", request.model);
+    row.requestCount += 1;
+    if (
+      row.input === 0 && row.output === 0 && row.thinking === 0 &&
+      row.cacheRead === 0 && row.cacheWrite === 0 && row.totalTokens === 0
+    ) {
+      row.costKnown = false;
+    }
+    if (row.firstUsed == null || request.observedAt < row.firstUsed) {
+      row.firstUsed = request.observedAt;
+    }
+    if (row.lastUsed == null || request.observedAt > row.lastUsed) {
+      row.lastUsed = request.observedAt;
+    }
+    totals.requestCount += 1;
+    sessions.add(request.conversationId);
   }
 
   for (const row of byModel.values()) {
@@ -9984,7 +10115,8 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     costKnownMessages: 0,
     estimatedCostMessages: 0,
     unknownCostMessages: 0,
-    messageCount: 0,
+    requestCount: 0,
+    requestCountExact: true,
   };
   for (const result of results) {
     totals.input += result.totals.input;
@@ -9998,7 +10130,8 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     totals.costKnownMessages += result.totals.costKnownMessages;
     totals.estimatedCostMessages += result.totals.estimatedCostMessages;
     totals.unknownCostMessages += result.totals.unknownCostMessages;
-    totals.messageCount += result.totals.messageCount;
+    totals.requestCount += result.totals.requestCount;
+    totals.requestCountExact = totals.requestCountExact && result.totals.requestCountExact;
 
     for (const row of result.byModel) {
       const key = `${row.provider}::${row.model}`;
@@ -10007,7 +10140,8 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
         byModel.set(key, { ...row });
         continue;
       }
-      existing.messageCount += row.messageCount;
+      existing.requestCount += row.requestCount;
+      existing.requestCountExact = existing.requestCountExact && row.requestCountExact;
       existing.input += row.input;
       existing.output += row.output;
       existing.thinking += row.thinking;
@@ -10157,12 +10291,12 @@ class UsageStatsModal extends Modal {
     const footer = contentEl.createDiv("pi-agent-usage-footer");
     const source = footer.createSpan({
       text: isZh
-        ? "点击列标题排序 · 数据源：Pi 会话日志 + AGY 用量日志"
-        : "Click a column to sort · Data source: Pi session logs + AGY usage journal",
+        ? "点击列标题排序 · 请求数按用户提交统计；历史 AGY 未回填"
+        : "Click a column to sort · request count is based on submitted prompts; historical AGY is not backfilled",
     });
     source.setAttribute(
       "title",
-      `${usageCachePath()}\n${getAgyUsageStorePath()}\n${AGY_GEMINI_PRICING_SOURCE}`
+      `${usageCachePath()}\n${getAgyUsageStorePath()}\n${getAgyRequestStorePath()}\n${AGY_GEMINI_PRICING_SOURCE}`
     );
     footer.createSpan({ text: "Esc", cls: "pi-agent-usage-foot-hint" });
     this.scan();
@@ -10243,7 +10377,7 @@ class UsageStatsModal extends Modal {
         : (isZh ? "AGY 未提供费用" : "AGY does not provide cost"))
       : estimatedCost
         ? (isZh ? "按 Gemini API Standard 官方价计算" : "Calculated at Gemini API Standard list price")
-      : `${t.messageCount.toLocaleString()} ${isZh ? "条消息" : "msgs"}`;
+      : `${fmtRequestCount(t.requestCount)} ${isZh ? "个请求" : "requests"}`;
     const cards = [
       { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
       { label: isZh ? "输入" : "Input", value: fmtNum(t.input), sub: t.input.toLocaleString() },
@@ -10313,7 +10447,7 @@ class UsageStatsModal extends Modal {
     const cols: { key: UsageSortKey | "model" | "provider" | "share" | "firstLast"; label: string; align: "left" | "right" }[] = [
       { key: "model", label: isZh ? "模型" : "Model", align: "left" },
       { key: "provider", label: isZh ? "提供方" : "Provider", align: "left" },
-      { key: "messageCount", label: isZh ? "消息" : "Msgs", align: "right" },
+      { key: "requestCount", label: isZh ? "请求" : "Requests", align: "right" },
       { key: "input", label: isZh ? "输入" : "Input", align: "right" },
       { key: "output", label: isZh ? "输出" : "Output", align: "right" },
       { key: "thinking", label: isZh ? "思考" : "Thinking", align: "right" },
@@ -10357,8 +10491,17 @@ class UsageStatsModal extends Modal {
       tdProv.addClass("pi-agent-text-left");
       tdProv.addClass("pi-agent-text-muted");
       // Numeric cells
-      const cells: Array<[string, "right" | "left", string?]> = [
-        [m.messageCount.toLocaleString(), "right"],
+      const cells: Array<[string, "right" | "left", string?, string?]> = [
+        [
+          fmtRequestCount(m.requestCount),
+          "right",
+          undefined,
+          m.requestCountExact
+            ? undefined
+            : (isZh
+              ? "历史 AGY 未回填；该数字按旧用量快照近似显示"
+              : "Historical AGY was not backfilled; this value is approximate from legacy usage snapshots"),
+        ],
         [fmtNum(m.input), "right"],
         [fmtNum(m.output), "right"],
         [fmtNum(m.thinking), "right"],
@@ -10368,11 +10511,12 @@ class UsageStatsModal extends Modal {
         [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
         [m.costKnown ? fmtCost(m.cost) : "—", "right"],
       ];
-      for (const [val, align, color] of cells) {
+      for (const [val, align, color, title] of cells) {
         const td = tr.createEl("td", { text: val });
         td.setCssProps({ textAlign: align });
         td.addClass("pi-agent-tabular-nums");
         if (color) td.setCssProps({ color });
+        if (title) td.setAttribute("title", title);
       }
       // Share bar
       const tdShare = tr.createEl("td");

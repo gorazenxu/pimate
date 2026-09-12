@@ -948,6 +948,10 @@ summary.pi-agent-skill-details-summary:hover {
   color: var(--text-muted);
 }
 
+.pi-agent-error-block.has-response {
+  color: var(--text-warning, var(--text-muted));
+}
+
 .pi-agent-error-detail > summary {
   cursor: pointer;
 }

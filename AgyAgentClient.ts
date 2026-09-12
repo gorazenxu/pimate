@@ -16,6 +16,7 @@ import type {
 } from "./PiAgentClient";
 import { calculateAgyCost, getAgyAccountingTotal } from "./AgyPricing";
 import { AgyUsageStore } from "./AgyUsageStore";
+import { AgyRequestStore } from "./AgyRequestStore";
 import { AgyDiagnosticStore, classifyAgyFailure, sanitizeAgyDiagnostic, type AgyFailureCategory } from "./AgyDiagnostics";
 
 export interface AgyAgentClientOptions {
@@ -118,6 +119,8 @@ interface AgyFailureInfo {
   category: AgyFailureCategory;
   retryable: boolean;
   diagnostic?: string;
+  receivedModelOutput: boolean;
+  hadToolActivity: boolean;
 }
 
 // Transcript files can grow very large. Pimate only renders the recent
@@ -239,6 +242,11 @@ export class AgyAgentClient extends EventEmitter {
   private historyLoadedConversationId: string | null = null;
   private historyLoadedLimit: number | null = null;
   private historyIsPartial = false;
+  // A failed AGY turn can be written to the native transcript slightly after
+  // the stream reports its terminal error. Keep the locally observed reply as
+  // a small overlay until a later transcript read confirms it is persisted.
+  private historyOverlayMessages: AgyHistoryMessage[] = [];
+  private historyNeedsReload = false;
   private toolCallStates = new Map<string, "active" | "done">();
 
   private lastAssistantText = "";
@@ -425,14 +433,76 @@ export class AgyAgentClient extends EventEmitter {
     const alreadyLoaded =
       this.historyLoadedConversationId === this.conversationId &&
       this.historyLoadedLimit !== null &&
-      (this.historyLoadedLimit === 0 || this.historyLoadedLimit >= requestedLimit);
+      (this.historyLoadedLimit === 0 || this.historyLoadedLimit >= requestedLimit) &&
+      !this.historyNeedsReload;
     if (!this.conversationId || alreadyLoaded) {
       return;
     }
-    this.historyMessages = this.loadTranscriptHistory(requestedLimit);
+    const persistedMessages = this.loadTranscriptHistory(requestedLimit);
+    // If AGY has not flushed a just-finished turn yet, do not throw away the
+    // current in-memory history. Once the transcript contains messages, it is
+    // authoritative and the overlay below fills only the still-missing tail.
+    const sourceMessages = persistedMessages.length > 0 || this.historyMessages.length === 0
+      ? persistedMessages
+      : this.historyMessages;
+    const mergedMessages = [...sourceMessages];
+    const seen = new Set(mergedMessages.map((message) => this.historyMessageKey(message)));
+    const remainingOverlays: AgyHistoryMessage[] = [];
+    for (const overlay of this.historyOverlayMessages) {
+      const key = this.historyMessageKey(overlay);
+      if (!seen.has(key)) {
+        mergedMessages.push(overlay);
+        seen.add(key);
+        remainingOverlays.push(overlay);
+      }
+    }
+    this.historyOverlayMessages = remainingOverlays;
+    this.historyMessages = requestedLimit > 0
+      ? mergedMessages.slice(-requestedLimit)
+      : mergedMessages;
     this.historyLoadedConversationId = this.conversationId;
     this.historyLoadedLimit = requestedLimit;
     this.historyIsPartial = requestedLimit > 0;
+    this.historyNeedsReload = false;
+  }
+
+  private historyMessageKey(message: AgyHistoryMessage): string {
+    try {
+      return JSON.stringify(message);
+    } catch {
+      return `${message.role}:${String(message.content)}`;
+    }
+  }
+
+  private buildAssistantHistoryBlocks(
+    text: string,
+    thinking = this.lastAssistantThinking
+  ): AgyHistoryBlock[] {
+    const blocks: AgyHistoryBlock[] = [];
+    if (thinking) blocks.push({ type: "thinking", thinking });
+    if (text) blocks.push({ type: "text", text });
+    return blocks;
+  }
+
+  /**
+   * Keep model output visible across a terminal AGY error and a tab switch.
+   * This is deliberately a history overlay, not a success marker: the UI
+   * still receives the real error and retry safety remains unchanged.
+   */
+  private rememberAssistantHistory(text: string, thinking = this.lastAssistantThinking): void {
+    const blocks = this.buildAssistantHistoryBlocks(text, thinking);
+    if (blocks.length === 0) return;
+    const message: AgyHistoryMessage = { role: "assistant", content: blocks };
+    const key = this.historyMessageKey(message);
+    if (
+      this.historyMessages.some((existing) => this.historyMessageKey(existing) === key) ||
+      this.historyOverlayMessages.some((existing) => this.historyMessageKey(existing) === key)
+    ) {
+      return;
+    }
+    this.historyMessages.push(message);
+    this.historyOverlayMessages.push(message);
+    this.historyNeedsReload = true;
   }
 
   private emitQueueUpdate(): void {
@@ -538,9 +608,23 @@ export class AgyAgentClient extends EventEmitter {
 
   private resetHistoryCache(): void {
     this.historyMessages = [];
+    this.historyOverlayMessages = [];
     this.historyLoadedConversationId = null;
     this.historyLoadedLimit = null;
     this.historyIsPartial = false;
+    this.historyNeedsReload = false;
+  }
+
+  /**
+   * Force the next history read to consult AGY's native transcript again.
+   * Pimate keeps AGY clients alive per tab, so a plain tab switch otherwise
+   * reuses an in-memory snapshot that may predate the latest stream result.
+   */
+  public invalidateHistoryCache(): void {
+    this.historyLoadedConversationId = null;
+    this.historyLoadedLimit = null;
+    this.historyIsPartial = false;
+    this.historyNeedsReload = true;
   }
 
   private resetUsageState(): void {
@@ -600,6 +684,20 @@ export class AgyAgentClient extends EventEmitter {
         cacheRead: this.cacheReadTokens,
         total: this.totalTokens,
       },
+    });
+  }
+
+  /**
+   * Record one prompt accepted by Pimate. This deliberately does not depend
+   * on AGY returning usage data, so failed/usage-less turns still have an
+   * accurate request count from the point this ledger was introduced.
+   */
+  private persistRequestRecord(): void {
+    if (!this.trackUsage || !this.conversationId) return;
+    AgyRequestStore.record({
+      conversationId: this.conversationId,
+      model: this.currentModelId || "unknown",
+      observedAt: Date.now(),
     });
   }
 
@@ -1001,11 +1099,7 @@ export class AgyAgentClient extends EventEmitter {
         this.activePrompt = null;
         this.retryablePrompt = null;
         const responseText = result.response || this.lastAssistantText;
-        const blocks: AgyHistoryBlock[] = [];
-        if (this.lastAssistantThinking) {
-          blocks.push({ type: "thinking", thinking: this.lastAssistantThinking });
-        }
-        blocks.push({ type: "text", text: responseText });
+        const blocks = this.buildAssistantHistoryBlocks(responseText);
         this.historyMessages.push({
           role: "assistant",
           content: blocks,
@@ -1029,10 +1123,27 @@ export class AgyAgentClient extends EventEmitter {
           typeof result?.error === "string" ? result.error : "";
         const resultStatus = String(result?.status || "");
         const errorMsg = resultError || "Agent execution failed";
+        const resultResponse = typeof result?.response === "string" ? result.response : "";
+        const responseText = resultResponse || this.lastAssistantText;
         // Some AGY versions provide a final response only on the result
         // frame. Treat it as output too, so it can never qualify for replay.
-        if ((this.lastAssistantText || result?.response) && this.activePrompt) {
+        if (responseText && this.activePrompt) {
           this.activePrompt.receivedModelOutput = true;
+        }
+        this.rememberAssistantHistory(responseText);
+        // A final-only response has no preceding text_delta for the view to
+        // render. Emit it once before the error so the user sees the reply
+        // that AGY actually produced, while the terminal status stays an
+        // error and remains non-replayable.
+        if (resultResponse && !this.lastAssistantText) {
+          this.lastAssistantText = resultResponse;
+          this.emit("event", {
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              delta: resultResponse,
+            },
+          });
         }
         const failure = this.prepareFailure(
           errorMsg,
@@ -1048,13 +1159,15 @@ export class AgyAgentClient extends EventEmitter {
             errorCategory: failure.category,
             retryable: failure.retryable,
             diagnostic: failure.diagnostic,
+            receivedModelOutput: failure.receivedModelOutput,
+            hadToolActivity: failure.hadToolActivity,
           },
         });
         this.emit("event", {
           type: "message_end",
           message: {
             role: "assistant",
-            content: this.lastAssistantText,
+            content: responseText,
           },
         });
       }
@@ -1080,6 +1193,7 @@ export class AgyAgentClient extends EventEmitter {
 
   private finishActiveTurnWithError(reason: string): void {
     const partialText = this.lastAssistantText;
+    this.rememberAssistantHistory(partialText);
     const failure = this.prepareFailure(reason, this.pendingPrompts.length === 0);
     this.pendingPrompts = [];
     this.toolCallStates.clear();
@@ -1093,6 +1207,8 @@ export class AgyAgentClient extends EventEmitter {
         errorCategory: failure.category,
         retryable: failure.retryable,
         diagnostic: failure.diagnostic,
+        receivedModelOutput: failure.receivedModelOutput,
+        hadToolActivity: failure.hadToolActivity,
       },
     });
     this.emit("event", {
@@ -1145,10 +1261,13 @@ export class AgyAgentClient extends EventEmitter {
     reason: string, noQueuedPrompts: boolean, status = "",
     source: "result" | "transport" = "transport"
   ): AgyFailureInfo {
+    const activePrompt = this.activePrompt;
+    const receivedModelOutput =
+      !!activePrompt?.receivedModelOutput || !!this.lastAssistantText;
+    const hadToolActivity = !!activePrompt?.hadToolActivity;
     const category = classifyAgyFailure(reason, this.stopRequested, status);
     const diagnostic = this.stopRequested ? undefined : this.getTurnDiagnostic();
     this.recordTerminalDiagnostic(source, status, reason, category);
-    const activePrompt = this.activePrompt;
     const retryable =
       category !== "cancelled" &&
       category !== "authentication" &&
@@ -1175,6 +1294,8 @@ export class AgyAgentClient extends EventEmitter {
       category,
       retryable,
       diagnostic,
+      receivedModelOutput,
+      hadToolActivity,
     };
   }
 
@@ -1226,6 +1347,7 @@ export class AgyAgentClient extends EventEmitter {
       throw new Error("AGY input stream is not writable");
     }
     input.write(payload);
+    this.persistRequestRecord();
   }
 
   private updateUsage(usage: {
@@ -1955,6 +2077,7 @@ export class AgyAgentClient extends EventEmitter {
     const pendingStart = this.startPromise;
     if (pendingStart) await pendingStart.catch(() => undefined);
     await AgyUsageStore.flush();
+    await AgyRequestStore.flush();
   }
 
   // ─── Static Helpers ────────────────────────────────────────────────────────
