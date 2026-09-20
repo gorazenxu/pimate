@@ -14,54 +14,118 @@ import {
 // `shell: true` spawns cmd.exe which makes pi a grandchild that survives
 // Obsidian quit (orphan process problem).
 //
-// Solution: locate the actual `node` + `cli.js` pair and spawn node directly.
+// Solution: locate the actual `node` + Pi package entry pair and spawn node
+// directly.
 // This way `node.exe` (and pi inside it) is a direct child of Electron and
 // Windows cleans it up when Obsidian dies.
-function resolveWindowsSpawn(
-  userPiPath: string
-): { cmd: string; scriptArgs: string[] } | null {
-  if (process.platform !== "win32") return null;
+export interface WindowsPiSpawnResolverOptions {
+  /** Injectable only to exercise Windows layouts from cross-platform tests. */
+  platform?: string;
+  pathValue?: string;
+  exists?: (candidate: string) => boolean;
+  readText?: (candidate: string) => string;
+}
+
+type PiSpawnResolution = { cmd: string; scriptArgs: string[] };
+
+function packageBinEntrypoint(
+  packageDir: string,
+  exists: (candidate: string) => boolean,
+  readText: (candidate: string) => string
+): string | null {
+  const packageJson = path.win32.join(packageDir, "package.json");
+  if (!exists(packageJson)) return null;
+
+  try {
+    const manifest = JSON.parse(readText(packageJson)) as { bin?: unknown };
+    const bin = manifest.bin;
+    const entry = typeof bin === "string"
+      ? bin
+      : bin && typeof bin === "object" && !Array.isArray(bin)
+        ? (bin as Record<string, unknown>).pi
+        : undefined;
+    if (typeof entry !== "string" || !entry.trim()) return null;
+
+    // The package metadata is local, but it still must not redirect the
+    // plugin to execute a script outside this Pi package.
+    const trimmed = entry.trim();
+    if (path.win32.isAbsolute(trimmed) || /^[a-z]:/i.test(trimmed)) return null;
+    const resolved = path.win32.resolve(packageDir, trimmed);
+    const relative = path.win32.relative(packageDir, resolved);
+    if (
+      !relative ||
+      relative === "." ||
+      relative === ".." ||
+      relative.startsWith(`..${path.win32.sep}`) ||
+      path.win32.isAbsolute(relative)
+    ) return null;
+    return exists(resolved) ? resolved : null;
+  } catch {
+    // A malformed package manifest should not prevent the legacy fallbacks.
+    return null;
+  }
+}
+
+function packageCliEntrypoint(
+  packageDir: string,
+  exists: (candidate: string) => boolean,
+  readText: (candidate: string) => string
+): string | null {
+  // Pi's package metadata is the source of truth. Pi >= 0.85 publishes the
+  // command as dist/bundle/cli.js; calling dist/cli.js directly bypasses the
+  // bundle and can miss dependencies in the standalone Windows runtime.
+  const fromManifest = packageBinEntrypoint(packageDir, exists, readText);
+  if (fromManifest) return fromManifest;
+
+  // Preserve compatibility with older Pi package layouts and with damaged
+  // installs whose package.json cannot be read.
+  for (const relativePath of [
+    ["dist", "bundle", "cli.js"],
+    ["dist", "cli.js"],
+  ]) {
+    const candidate = path.win32.join(packageDir, ...relativePath);
+    if (exists(candidate)) return candidate;
+  }
+  return null;
+}
+
+export function resolveWindowsSpawn(
+  userPiPath: string,
+  options: WindowsPiSpawnResolverOptions = {}
+): PiSpawnResolution | null {
+  if ((options.platform ?? process.platform) !== "win32") return null;
   // If the user gave a full path or .exe, just use it as-is.
   if (/[\\/]/.test(userPiPath) || /\.exe$/i.test(userPiPath)) return null;
 
-  const pathDirs = (process.env.PATH || "").split(path.delimiter);
+  const exists = options.exists ?? ((candidate: string) => fs.existsSync(candidate));
+  const readText = options.readText ?? ((candidate: string) => fs.readFileSync(candidate, "utf8"));
+  const pathValue = options.pathValue ?? process.env.PATH ?? process.env.Path ?? "";
+  const pathDirs = pathValue.split(path.win32.delimiter);
   for (const dir of pathDirs) {
     if (!dir) continue;
-    const shim = path.join(dir, userPiPath + ".cmd");
-    if (!fs.existsSync(shim)) continue;
-    const shimDir = path.dirname(shim);
+    const shim = path.win32.join(dir, userPiPath + ".cmd");
+    if (!exists(shim)) continue;
+    const shimDir = path.win32.dirname(shim);
     // npm shim 位于 `<install>/node_modules/.bin/`，真实包在
     // `<install>/node_modules/@earendil-works/pi-coding-agent/`。
-    // 两种布局都试一下：
-    const installRoot = path.basename(shimDir).toLowerCase() === ".bin"
-      ? path.dirname(shimDir)
+    // 全局安装则通常位于 `<install>/node_modules/...`。两种布局都支持。
+    const installRoot = path.win32.basename(shimDir).toLowerCase() === ".bin"
+      ? path.win32.dirname(shimDir)
       : shimDir;
-    const candidates = [
-      path.join(
-        installRoot,
-        "node_modules",
-        "@earendil-works",
-        "pi-coding-agent",
-        "dist",
-        "cli.js"
-      ),
-      path.join(
-        shimDir,
-        "node_modules",
-        "@earendil-works",
-        "pi-coding-agent",
-        "dist",
-        "cli.js"
-      ),
-    ];
-    for (const cliJs of candidates) {
-      if (!fs.existsSync(cliJs)) continue;
+    const packageDirs = [...new Set([
+      path.win32.join(installRoot, "@earendil-works", "pi-coding-agent"),
+      path.win32.join(installRoot, "node_modules", "@earendil-works", "pi-coding-agent"),
+      path.win32.join(shimDir, "node_modules", "@earendil-works", "pi-coding-agent"),
+    ])];
+    for (const packageDir of packageDirs) {
+      const cliJs = packageCliEntrypoint(packageDir, exists, readText);
+      if (!cliJs) continue;
       // 优先用 shim 同目录的 node.exe（npm 会装一个），否则用 PATH 里的 node。
-      const localNode = path.join(shimDir, "node.exe");
-      const localNode2 = path.join(installRoot, "node.exe");
-      const nodeCmd = fs.existsSync(localNode)
+      const localNode = path.win32.join(shimDir, "node.exe");
+      const localNode2 = path.win32.join(installRoot, "node.exe");
+      const nodeCmd = exists(localNode)
         ? localNode
-        : fs.existsSync(localNode2)
+        : exists(localNode2)
           ? localNode2
           : "node";
       return { cmd: nodeCmd, scriptArgs: [cliJs] };

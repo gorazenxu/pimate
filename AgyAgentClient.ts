@@ -107,6 +107,8 @@ interface ActiveAgyPrompt {
   retryAttempt: number;
   receivedModelOutput: boolean;
   hadToolActivity: boolean;
+  /** At least one stream frame supplied usage for this specific turn. */
+  receivedUsage: boolean;
 }
 
 interface RetryableAgyPrompt {
@@ -1065,7 +1067,7 @@ export class AgyAgentClient extends EventEmitter {
         }
 
         if (step.usage) {
-          this.updateUsage(step.usage);
+          this.updateTurnUsage(step.usage);
         }
         return;
       }
@@ -1087,12 +1089,13 @@ export class AgyAgentClient extends EventEmitter {
         }
         return;
       }
-      if (result?.usage) {
-        this.updateUsage(result.usage);
-        if (result.status === "SUCCESS") {
-          this.persistUsageSnapshot(result.num_turns);
-        }
-      }
+      if (result?.usage) this.updateTurnUsage(result.usage);
+      // A rejected or interrupted terminal result can still follow valid
+      // stream usage frames. Keep that accounting: the request was made and
+      // tokens may have been consumed even though AGY did not mark the turn
+      // SUCCESS. This is deliberately limited to usage observed during this
+      // turn, so an older restored cumulative value is never re-recorded.
+      this.persistActiveTurnUsage(result?.num_turns);
 
       if (result?.status === "SUCCESS") {
         this.recordTerminalDiagnostic("result", "SUCCESS", typeof result.error === "string" ? result.error : "", undefined, result.response);
@@ -1194,6 +1197,10 @@ export class AgyAgentClient extends EventEmitter {
   private finishActiveTurnWithError(reason: string): void {
     const partialText = this.lastAssistantText;
     this.rememberAssistantHistory(partialText);
+    // A process/transport failure can arrive after AGY already emitted an
+    // incremental usage frame but before a terminal result. Preserve the
+    // observed accounting without inventing values for usage-less failures.
+    this.persistActiveTurnUsage(undefined);
     const failure = this.prepareFailure(reason, this.pendingPrompts.length === 0);
     this.pendingPrompts = [];
     this.toolCallStates.clear();
@@ -1273,6 +1280,7 @@ export class AgyAgentClient extends EventEmitter {
       category !== "authentication" &&
       category !== "quota" &&
       category !== "permission" &&
+      category !== "content_safety" &&
       noQueuedPrompts &&
       !!activePrompt &&
       activePrompt.retryAttempt === 0 &&
@@ -1318,6 +1326,7 @@ export class AgyAgentClient extends EventEmitter {
       retryAttempt,
       receivedModelOutput: false,
       hadToolActivity: false,
+      receivedUsage: false,
     };
 
     this.historyMessages.push({
@@ -1350,13 +1359,32 @@ export class AgyAgentClient extends EventEmitter {
     this.persistRequestRecord();
   }
 
-  private updateUsage(usage: {
+  private updateTurnUsage(usage: {
     input_tokens?: number;
     output_tokens?: number;
     thinking_tokens?: number;
     cache_read_tokens?: number;
     total_tokens?: number;
   }): void {
+    if (this.updateUsage(usage) && this.activePrompt) {
+      this.activePrompt.receivedUsage = true;
+    }
+  }
+
+  /** Persist only usage returned while the current prompt was active. */
+  private persistActiveTurnUsage(numTurns: unknown): void {
+    if (this.activePrompt?.receivedUsage) {
+      this.persistUsageSnapshot(numTurns);
+    }
+  }
+
+  private updateUsage(usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    thinking_tokens?: number;
+    cache_read_tokens?: number;
+    total_tokens?: number;
+  }): boolean {
     let updated = false;
     if (typeof usage.input_tokens === "number") {
       this.inputTokens = usage.input_tokens;
@@ -1384,6 +1412,7 @@ export class AgyAgentClient extends EventEmitter {
       this.usageObservedAt = Date.now();
       this.usageModelId = this.currentModelId;
     }
+    return updated;
   }
 
   /**

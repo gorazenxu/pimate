@@ -8,4 +8,5 @@ pnpm-workspace.yaml
 
 # Local working notes (not part of the plugin release)
 docs/thinking-issue-summary.md
+docs/参考Claudian的交互优化规划.md
 .gstack/

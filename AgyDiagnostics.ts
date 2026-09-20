@@ -5,12 +5,19 @@ import { createHash } from "crypto";
 
 export type AgyFailureCategory =
   | "cancelled" | "interrupted" | "network" | "timeout"
-  | "authentication" | "quota" | "permission" | "process" | "unknown";
+  | "authentication" | "quota" | "permission" | "content_safety"
+  | "process" | "unknown";
 
 /** A remote cancellation does not establish that the local user pressed Stop. */
 export function classifyAgyFailure(reason: string, stopRequested: boolean, status = ""): AgyFailureCategory {
   if (stopRequested) return "cancelled";
   const text = `${status}\n${reason}`;
+  // AGY can stream an otherwise readable partial response before its terminal
+  // result reports that Google's model safety layer blocked completion. This
+  // is neither a transport failure nor evidence that the user pressed Stop.
+  if (/(content safety|safety filters?|blocked by .*safety|prohibited use|sensitive words|model output could not be generated)/i.test(text)) {
+    return "content_safety";
+  }
   if (/(quota|rate limit|resource exhausted|too many requests|\b429\b)/i.test(text)) return "quota";
   if (/(unauthenticated|authentication|sign[ -]?in|not logged in|login|credential|\b401\b|\b403\b)/i.test(text)) return "authentication";
   if (/(permission|access denied|not allowed)/i.test(text)) return "permission";

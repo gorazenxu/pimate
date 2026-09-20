@@ -10,6 +10,16 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
+## 📦 v1.1.16
+
+- 修：Windows 上启动 Pi Coding Agent 时读取 Pi 包声明的 `bin.pi` 入口；兼容 Pi 0.85+ 的 bundled CLI，避免 `@earendil-works/pi-server` 模块缺失导致无法启动。
+- 修：兼容全局安装与本地 `node_modules/.bin` 安装的 Pi 路径布局，并保留旧版 Pi 入口回退。
+- 修：AGY 回复被内容安全策略拦截时，准确区分为内容安全终止，不再误报为用户停止或可自动重试的连接问题。
+- 修：AGY 在错误终态前已返回的 Token 用量会被保留；未返回用量的 AGY 请求显示为未知，而非错误地显示为 0。
+- 修：AGY 返回的 Vault 内 `file:///` 链接会转为可点击的 Obsidian 链接，并隐藏 Vault 外的本地绝对路径。
+
+---
+
 ## 📦 v1.1.4
 
 - 修：按 Obsidian Community 审核要求，移除源码中的直接 `.style.*` 赋值，统一使用 `setCssProps()`。

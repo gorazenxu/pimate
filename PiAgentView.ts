@@ -61,6 +61,7 @@ import {
   AgyRequestStore,
   getAgyRequestStorePath,
 } from "./AgyRequestStore";
+import { normalizeAgyFileLinks } from "./AgyFileLinkUtils";
 
 export type AgentClient = PiAgentClient | AgyAgentClient;
 
@@ -1979,6 +1980,15 @@ export class PiAgentView extends ItemView {
     isZh: boolean,
     receivedModelOutput = false
   ): string {
+    if (category === "content_safety") {
+      return isZh
+        ? (receivedModelOutput
+          ? "AGY 的本轮回复被内容安全策略拦截；已显示部分可能不完整，会话已保留。"
+          : "AGY 的本轮回复被内容安全策略拦截。请换一种合规表述后再试。")
+        : (receivedModelOutput
+          ? "AGY's reply was blocked by content safety filters; the visible portion may be incomplete and the session is preserved."
+          : "AGY blocked this reply through content safety filters. Try a compliant rewording.");
+    }
     if (receivedModelOutput && category !== "cancelled") {
       return isZh
         ? "AGY 已产生回复内容，但收尾异常，会话已保留。"
@@ -8168,7 +8178,13 @@ export class PiAgentView extends ItemView {
       return key;
     });
 
-    const normalized = protectedText
+    const vaultBasePath = (this.app.vault.adapter as any).getBasePath?.();
+    const normalizedFileLinks = normalizeAgyFileLinks(
+      protectedText,
+      typeof vaultBasePath === "string" ? vaultBasePath : ""
+    );
+
+    const normalized = normalizedFileLinks
       // Fix: "文字###标题" -> "文字\n\n### 标题".
       .replace(/([^\n])([ \t]*#{2,6})(?=[\p{L}\p{N}])/gu, (_m, before, hashes) => {
         return `${before}\n\n${hashes.trim()} `;
@@ -9441,6 +9457,8 @@ interface UsageTotals {
   unknownCostMessages: number;
   requestCount: number;
   requestCountExact: boolean;
+  /** AGY prompts in this range for which no token observation exists. */
+  unknownAgyUsageRequests: number;
 }
 
 interface UsageResult {
@@ -9516,6 +9534,13 @@ function hitRateColor(hr: number | null): string {
 function hitRateLabel(hr: number | null): string {
   if (hr === null) return "—";
   return (hr * 100).toFixed(1) + "%";
+}
+function rowHasMeasuredUsage(row: Pick<UsageModelRow, "input" | "output" | "thinking" | "cacheRead" | "cacheWrite" | "totalTokens">): boolean {
+  return row.input > 0 || row.output > 0 || row.thinking > 0 ||
+    row.cacheRead > 0 || row.cacheWrite > 0 || row.totalTokens > 0;
+}
+function isAgyUsageUnavailable(row: UsageModelRow): boolean {
+  return row.provider === "Antigravity" && row.requestCount > 0 && !rowHasMeasuredUsage(row);
 }
 
 function getUsageModelRow(
@@ -9815,6 +9840,7 @@ function aggregateUsage(
     unknownCostMessages: 0,
     requestCount: 0,
     requestCountExact: true,
+    unknownAgyUsageRequests: 0,
   };
   let sessionCount = 0;
   for (const key of Object.keys(perFile)) {
@@ -9941,12 +9967,14 @@ function deriveAgyUsageDeltas(
   const result: Array<{ snapshot: AgyUsageSnapshot; delta: AgyUsageTotals; baseline: boolean }> = [];
   for (const list of grouped.values()) {
     list.sort((a, b) => {
-      if (a.numTurns != null && b.numTurns != null && a.numTurns !== b.numTurns) {
-        return a.numTurns - b.numTurns;
-      }
-      if (a.numTurns != null && b.numTurns == null) return -1;
-      if (a.numTurns == null && b.numTurns != null) return 1;
-      return a.observedAt - b.observedAt;
+      // A failed terminal frame may not include num_turns even though AGY
+      // already emitted a valid usage frame. Keep journal chronology primary;
+      // otherwise that unnumbered snapshot would be sorted after every later
+      // numbered one and could be counted as a false reset.
+      if (a.observedAt !== b.observedAt) return a.observedAt - b.observedAt;
+      const aTurn = a.numTurns ?? Number.MAX_SAFE_INTEGER;
+      const bTurn = b.numTurns ?? Number.MAX_SAFE_INTEGER;
+      return aTurn - bTurn;
     });
 
     let previous: AgyUsageSnapshot | null = null;
@@ -9997,6 +10025,7 @@ async function scanAgyUsageRange(
     unknownCostMessages: 0,
     requestCount: 0,
     requestCountExact: true,
+    unknownAgyUsageRequests: 0,
   };
   const sessions = new Set<string>();
   // No historical AGY transcript backfill: snapshots observed before the
@@ -10090,6 +10119,9 @@ async function scanAgyUsageRange(
 
   for (const row of byModel.values()) {
     row.hitRate = computeHitRate(row.input, row.cacheRead, row.cacheWrite);
+    if (isAgyUsageUnavailable(row)) {
+      totals.unknownAgyUsageRequests += row.requestCount;
+    }
   }
 
   return {
@@ -10117,6 +10149,7 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     unknownCostMessages: 0,
     requestCount: 0,
     requestCountExact: true,
+    unknownAgyUsageRequests: 0,
   };
   for (const result of results) {
     totals.input += result.totals.input;
@@ -10132,6 +10165,7 @@ function mergeUsageResults(results: UsageResult[]): UsageResult {
     totals.unknownCostMessages += result.totals.unknownCostMessages;
     totals.requestCount += result.totals.requestCount;
     totals.requestCountExact = totals.requestCountExact && result.totals.requestCountExact;
+    totals.unknownAgyUsageRequests += result.totals.unknownAgyUsageRequests;
 
     for (const row of result.byModel) {
       const key = `${row.provider}::${row.model}`;
@@ -10369,6 +10403,10 @@ class UsageStatsModal extends Modal {
     const t = this.data.totals;
     const hr = computeHitRate(t.input, t.cacheRead, t.cacheWrite);
     const estimatedCost = t.estimatedCostMessages > 0;
+    const allUsageUnavailable = t.totalTokens === 0 && t.unknownAgyUsageRequests > 0;
+    const unavailableUsageText = isZh
+      ? `${fmtRequestCount(t.unknownAgyUsageRequests)} 个 AGY 请求未返回用量`
+      : `${fmtRequestCount(t.unknownAgyUsageRequests)} AGY request${t.unknownAgyUsageRequests === 1 ? "" : "s"} did not return usage`;
     const costSub = t.unknownCostMessages > 0
       ? (t.costKnownMessages > 0
         ? (estimatedCost
@@ -10379,14 +10417,18 @@ class UsageStatsModal extends Modal {
         ? (isZh ? "按 Gemini API Standard 官方价计算" : "Calculated at Gemini API Standard list price")
       : `${fmtRequestCount(t.requestCount)} ${isZh ? "个请求" : "requests"}`;
     const cards = [
-      { label: isZh ? "总 Token" : "Total tokens", value: fmtNum(t.totalTokens), sub: t.totalTokens.toLocaleString() },
-      { label: isZh ? "输入" : "Input", value: fmtNum(t.input), sub: t.input.toLocaleString() },
-      { label: isZh ? "输出" : "Output", value: fmtNum(t.output), sub: t.output.toLocaleString() },
-      { label: isZh ? "思考" : "Thinking", value: fmtNum(t.thinking), sub: t.thinking.toLocaleString() },
+      {
+        label: isZh ? "总 Token" : "Total tokens",
+        value: allUsageUnavailable ? "—" : fmtNum(t.totalTokens),
+        sub: allUsageUnavailable ? unavailableUsageText : (t.unknownAgyUsageRequests > 0 ? unavailableUsageText : t.totalTokens.toLocaleString()),
+      },
+      { label: isZh ? "输入" : "Input", value: allUsageUnavailable ? "—" : fmtNum(t.input), sub: allUsageUnavailable ? unavailableUsageText : t.input.toLocaleString() },
+      { label: isZh ? "输出" : "Output", value: allUsageUnavailable ? "—" : fmtNum(t.output), sub: allUsageUnavailable ? unavailableUsageText : t.output.toLocaleString() },
+      { label: isZh ? "思考" : "Thinking", value: allUsageUnavailable ? "—" : fmtNum(t.thinking), sub: allUsageUnavailable ? unavailableUsageText : t.thinking.toLocaleString() },
       {
         label: isZh ? "缓存读" : "Cache read",
-        value: fmtNum(t.cacheRead),
-        sub: hr === null ? "—" : `${isZh ? "占比" : "share"} ${(hr * 100).toFixed(1)}%`,
+        value: allUsageUnavailable ? "—" : fmtNum(t.cacheRead),
+        sub: allUsageUnavailable ? unavailableUsageText : (hr === null ? "—" : `${isZh ? "占比" : "share"} ${(hr * 100).toFixed(1)}%`),
         subColor: hitRateColor(hr),
       },
       {
@@ -10481,6 +10523,12 @@ class UsageStatsModal extends Modal {
     const tbody = table.createEl("tbody");
     for (const m of sorted) {
       const tr = tbody.createEl("tr");
+      const usageUnavailable = isAgyUsageUnavailable(m);
+      const usageUnavailableTitle = usageUnavailable
+        ? (isZh
+          ? "AGY 已接受请求，但未返回可记录的 Token 用量；这不是 0 Token。"
+          : "AGY accepted the request but did not return recordable token usage; this is not zero tokens.")
+        : undefined;
       // Model
       const tdModel = tr.createEl("td");
       tdModel.addClass("pi-agent-text-left");
@@ -10502,12 +10550,12 @@ class UsageStatsModal extends Modal {
               ? "历史 AGY 未回填；该数字按旧用量快照近似显示"
               : "Historical AGY was not backfilled; this value is approximate from legacy usage snapshots"),
         ],
-        [fmtNum(m.input), "right"],
-        [fmtNum(m.output), "right"],
-        [fmtNum(m.thinking), "right"],
-        [fmtNum(m.cacheRead), "right"],
-        [fmtNum(m.cacheWrite), "right"],
-        [fmtNum(m.totalTokens), "right"],
+        [usageUnavailable ? "—" : fmtNum(m.input), "right", undefined, usageUnavailableTitle],
+        [usageUnavailable ? "—" : fmtNum(m.output), "right", undefined, usageUnavailableTitle],
+        [usageUnavailable ? "—" : fmtNum(m.thinking), "right", undefined, usageUnavailableTitle],
+        [usageUnavailable ? "—" : fmtNum(m.cacheRead), "right", undefined, usageUnavailableTitle],
+        [usageUnavailable ? "—" : fmtNum(m.cacheWrite), "right", undefined, usageUnavailableTitle],
+        [usageUnavailable ? "—" : fmtNum(m.totalTokens), "right", undefined, usageUnavailableTitle],
         [hitRateLabel(m.hitRate), "right", hitRateColor(m.hitRate)],
         [m.costKnown ? fmtCost(m.cost) : "—", "right"],
       ];
@@ -10527,7 +10575,9 @@ class UsageStatsModal extends Modal {
       const barWrap = tdShare.createDiv({ cls: "pi-agent-usage-bar" });
       const bar = barWrap.createDiv({ cls: "pi-agent-usage-bar-fill" });
       bar.setCssProps({ width: `${barW}%` });
-      tdShare.createSpan({ text: `${pct.toFixed(1)}%`, cls: "pi-agent-usage-pct" });
+      const shareText = usageUnavailable ? "—" : `${pct.toFixed(1)}%`;
+      tdShare.createSpan({ text: shareText, cls: "pi-agent-usage-pct" });
+      if (usageUnavailableTitle) tdShare.setAttribute("title", usageUnavailableTitle);
     }
   }
 }

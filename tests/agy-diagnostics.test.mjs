@@ -10,19 +10,30 @@ import { build } from "esbuild";
 // spending tokens, writing vault files, or reading the user's conversations.
 const root = fileURLToPath(new URL("../", import.meta.url));
 const bundle = await build({
-  stdin: { contents: 'export * from "./AgyAgentClient"; export * from "./AgyDiagnostics";', resolveDir: root },
+  stdin: { contents: 'export * from "./AgyAgentClient"; export * from "./AgyDiagnostics"; export * from "./AgyUsageStore";', resolveDir: root },
   bundle: true, write: false, platform: "node", format: "cjs", logLevel: "silent",
 });
 const compiled = new Module(`${root}agy-test.cjs`);
 compiled.paths = Module._nodeModulePaths(root);
 compiled._compile(bundle.outputFiles[0].text, compiled.filename = `${root}agy-test.cjs`);
-const { AgyAgentClient, AgyDiagnosticStore, classifyAgyFailure, sanitizeAgyDiagnostic } = compiled.exports;
+const { AgyAgentClient, AgyDiagnosticStore, AgyUsageStore, classifyAgyFailure, sanitizeAgyDiagnostic } = compiled.exports;
 const records = [];
 const writeDiagnostic = AgyDiagnosticStore.record;
 AgyDiagnosticStore.record = (entry) => records.push(entry);
+const usageSnapshots = [];
+const writeUsage = AgyUsageStore.record;
+const readUsage = AgyUsageStore.getLatest;
+AgyUsageStore.record = (snapshot) => usageSnapshots.push(snapshot);
+AgyUsageStore.getLatest = async () => null;
+test.after(() => {
+  AgyDiagnosticStore.record = writeDiagnostic;
+  AgyUsageStore.record = writeUsage;
+  AgyUsageStore.getLatest = readUsage;
+});
 
 function session() {
   records.length = 0;
+  usageSnapshots.length = 0;
   const client = new AgyAgentClient({ trackUsage: false });
   const events = [], writes = [];
   client.process = { stdin: { write: (value) => writes.push(value) } };
@@ -44,10 +55,60 @@ test("stream interruption and remote cancellation never imply a local Stop", () 
     ["timeout waiting for response", "ERROR", "timeout"],
     ["Process exited with code 1", "ERROR", "process"],
     ["INVALID_ARGUMENT (400)", "ERROR", "unknown"],
+    ["Your previous response was blocked by content safety filters", "ERROR", "content_safety"],
   ]) {
     assert.equal(classifyAgyFailure(reason, false, status), expected);
     assert.equal(classifyAgyFailure(reason, true, status), "cancelled");
   }
+});
+
+test("safety-filtered terminal result keeps visible text, is not retryable, and persists observed usage", () => {
+  const client = new AgyAgentClient({
+    conversationId: "11111111-1111-4111-8111-111111111111",
+    modelId: "gemini-3.8-flash-high",
+  });
+  const events = [];
+  client.process = { stdin: { write: () => {} } };
+  // This test exercises the usage journal only; keep its synthetic prompt
+  // from touching the user's independent request ledger.
+  client.persistRequestRecord = () => {};
+  client.on("event", (event) => events.push(event));
+  client.beginPrompt("Synthetic request");
+  client.handleAgyEvent({
+    event: "step_update",
+    step_update: {
+      step_type: "agent_response",
+      text_delta: "A visible answer before the safety result.",
+      usage: {
+        input_tokens: 120,
+        output_tokens: 80,
+        thinking_tokens: 20,
+        cache_read_tokens: 900,
+        total_tokens: 200,
+      },
+    },
+  });
+  terminal(
+    client,
+    "ERROR",
+    "Your previous response was blocked by content safety filters: The model output could not be generated. Retries remaining: 3"
+  );
+  const error = errors(events)[0];
+  assert.equal(error.errorCategory, "content_safety");
+  assert.equal(error.receivedModelOutput, true);
+  assert.equal(error.retryable, false);
+  assert.equal(usageSnapshots.length, 1);
+  assert.deepEqual(usageSnapshots[0].cumulative, {
+    input: 120, output: 80, thinking: 20, cacheRead: 900, total: 200,
+  });
+  assert.equal(records[0].category, "content_safety");
+});
+
+test("content safety failures are never offered for replay even without streamed text", () => {
+  const { client, events } = session();
+  terminal(client, "ERROR", "Blocked by content safety filters");
+  assert.equal(errors(events)[0].errorCategory, "content_safety");
+  assert.equal(errors(events)[0].retryable, false);
 });
 
 test("completed text followed by stream failure retains reason, reply, and disallows replay", async () => {
