@@ -10,6 +10,15 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
+## 📦 v1.1.17
+
+- 修：OpenAI ChatGPT 订阅 Device Code 登录改为保存 Pi 兼容的 OAuth 凭证格式，补齐 `accountId`，修复 GPT 配置成功后无法使用的问题。
+- 修：自动迁移旧版本错误写入的 OAuth 凭证，避免用户重新登录。
+- 优：OpenAI ChatGPT 订阅设置项只显示 Device Code 登录入口，不再误显示 API Key 输入框。
+- 测：新增 OAuth 凭证解析、迁移和格式校验测试。
+
+---
+
 ## 📦 v1.1.16
 
 - 修：Windows 上启动 Pi Coding Agent 时读取 Pi 包声明的 `bin.pi` 入口；兼容 Pi 0.85+ 的 bundled CLI，避免 `@earendil-works/pi-server` 模块缺失导致无法启动。

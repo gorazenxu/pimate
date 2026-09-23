@@ -6,6 +6,12 @@ import * as path from "path";
 import * as os from "os";
 import { exec } from "child_process";
 import { AgyAgentClient, type AgyQuotaStatus } from "./AgyAgentClient";
+import {
+  createOpenAICodexOAuthCredentials,
+  migrateLegacyOpenAICodexCredential,
+  type OpenAICodexOAuthCredentials,
+  type OpenAICodexOAuthTokens,
+} from "./OpenAICodexAuth";
 
 // OpenAI Codex (ChatGPT) device-code flow constants, reverse-engineered from
 // @earendil-works/pi-ai/dist/utils/oauth/openai-codex.js
@@ -187,6 +193,35 @@ export class PiAgentSettingTab extends PluginSettingTab {
     return path.join(homeDir, ".pi", "agent", "auth.json");
   }
 
+  private readAuthData(filePath = this.getAuthJsonPath()): Record<string, any> {
+    if (!fs.existsSync(filePath)) return {};
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      const data = JSON.parse(content) as unknown;
+      return data && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, any>)
+        : {};
+    } catch (e) {
+      console.error("读取 auth.json 失败:", e);
+      return {};
+    }
+  }
+
+  private writeAuthData(
+    filePath: string,
+    data: Record<string, any>
+  ): void {
+    try {
+      const dirPath = path.dirname(filePath);
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+      }
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch (e) {
+      console.error("写入 auth.json 失败:", e);
+    }
+  }
+
   // 辅助方法：获取 models.json 的绝对路径（自定义 provider 定义）
   private getModelsJsonPath(): string {
     const homeDir = os.homedir();
@@ -244,22 +279,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
   // 辅助方法：以 UTF-8 编码读取对应厂商的 API Key
   private readApiKey(provider: string): string {
-    const filePath = this.getAuthJsonPath();
-    if (!fs.existsSync(filePath)) {
-      return "";
-    }
-    try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const data = JSON.parse(content);
-      if (data && data[provider]) {
-        const item = data[provider];
-        if (item.type === "oauth") {
-          return "[OAuth 已授权 / OAuth Authorized]";
-        }
-        return item.key || "";
+    const item = this.readAuthData()[provider];
+    if (item) {
+      if (item.type === "oauth") {
+        return "[OAuth 已授权 / OAuth Authorized]";
       }
-    } catch (e) {
-      console.error("读取 auth.json 失败:", e);
+      return item.key || "";
     }
     return "";
   }
@@ -272,16 +297,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     }
 
     const filePath = this.getAuthJsonPath();
-    let data: Record<string, any> = {};
-
-    if (fs.existsSync(filePath)) {
-      try {
-        const content = fs.readFileSync(filePath, "utf-8");
-        data = JSON.parse(content) || {};
-      } catch (e) {
-        console.error("解析已有 auth.json 失败，将重置配置:", e);
-      }
-    }
+    const data = this.readAuthData(filePath);
 
     const trimmedKey = apiKey.trim();
     if (!trimmedKey) {
@@ -293,15 +309,17 @@ export class PiAgentSettingTab extends PluginSettingTab {
       };
     }
 
-    try {
-      const dirPath = path.dirname(filePath);
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-      }
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("写入 auth.json 失败:", e);
-    }
+    this.writeAuthData(filePath, data);
+  }
+
+  private writeOAuthCredentials(
+    provider: string,
+    credentials: OpenAICodexOAuthCredentials
+  ): void {
+    const filePath = this.getAuthJsonPath();
+    const data = this.readAuthData(filePath);
+    data[provider] = credentials;
+    this.writeAuthData(filePath, data);
   }
 
   // 获取全局 skills 物理路径
@@ -1112,16 +1130,14 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setName(isZh ? "大模型凭证配置 (LLM Credentials)" : "LLM Credentials")
       .setHeading();
 
-    // 读取 auth.json 的当前内容
     const authPath = this.getAuthJsonPath();
-    let authData: Record<string, any> = {};
-    if (fs.existsSync(authPath)) {
-      try {
-        const content = fs.readFileSync(authPath, "utf-8");
-        authData = JSON.parse(content) || {};
-      } catch (e) {
-        console.error("读取 auth.json 失败:", e);
-      }
+    const authData = this.readAuthData(authPath);
+    const migratedOpenAICodex = migrateLegacyOpenAICodexCredential(
+      authData["openai-codex"]
+    );
+    if (migratedOpenAICodex) {
+      authData["openai-codex"] = migratedOpenAICodex;
+      this.writeAuthData(authPath, authData);
     }
 
     // 读取 models.json 的自定义 provider
@@ -1135,7 +1151,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     // ─── 栏 1：内置 Provider（配 key 即用）───────────────────────────────
     new Setting(containerEl)
-      .setName(isZh ? "内置 Provider（配 key 即用）" : "Built-in Providers (key only)")
+      .setName(isZh ? "内置 Provider（API Key / OAuth）" : "Built-in Providers (API Key / OAuth)")
       .setDesc(isZh
         ? "这些服务商 Pi 原生支持，填入 API Key 或完成 OAuth 即可使用。未列出的内置 provider 也可通过环境变量配置。"
         : "Pi natively supports these providers — just add an API Key or complete OAuth. Other built-in providers can also be used via environment variables.")
@@ -1620,6 +1636,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setName(p.name)
       .setDesc(isOauth
         ? (isZh ? "OAuth 已授权 / Connected" : "OAuth Authorized")
+        : p.oauth
+          ? (isZh ? "等待 Device Code 登录" : "Awaiting Device Code login")
         : (isConfigured
           ? (isZh ? `API 密钥已配置 / Connected${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `API Key configured${p.envVar ? "  ·  env " + p.envVar : ""}`)
           : (isZh ? `等待配置 API 密钥${p.envVar ? "  ·  环境变量 " + p.envVar : ""}` : `Awaiting API Key${p.envVar ? "  ·  env " + p.envVar : ""}`)));
@@ -1653,8 +1671,9 @@ export class PiAgentSettingTab extends PluginSettingTab {
       return;
     }
 
-    // OAuth 类型（openai-codex）提供 Device Code 登录按钮
-    if (p.oauth && id === "openai-codex") {
+    // OAuth 类型（openai-codex）只提供 Device Code 登录，不显示 API Key 输入框。
+    if (p.oauth) {
+      if (id !== "openai-codex") return;
       setting.addButton(btn => {
         btn.setButtonText(isZh ? "Device Code 登录" : "Device Code Login").setCta().onClick(() => {
           void this.startOpenAICodexDeviceCodeLogin().catch((err: unknown) => {
@@ -1663,6 +1682,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           });
         });
       });
+      return;
     }
 
     // 普通 API Key 输入框
@@ -1943,13 +1963,11 @@ export class PiAgentSettingTab extends PluginSettingTab {
         controller.signal
       );
 
-      // 4) Persist to ~/.pi/agent/auth.json
-      this.writeApiKey("openai-codex", JSON.stringify({
-        type: "oauth",
-        refresh: tokens.refresh,
-        access: tokens.access,
-        expires: tokens.expires,
-      }));
+      // 4) Persist the exact OAuth shape expected by Pi/AuthStorage.
+      this.writeOAuthCredentials(
+        "openai-codex",
+        createOpenAICodexOAuthCredentials(tokens)
+      );
 
       modal.closeWithSuccess();
       new Notice(
@@ -2156,7 +2174,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     authorizationCode: string,
     codeVerifier: string,
     signal: AbortSignal
-  ): Promise<{ access: string; refresh: string; expires: number }> {
+  ): Promise<OpenAICodexOAuthTokens> {
     if (signal.aborted) throw new Error("Login cancelled");
     const response = await requestUrl({
       url: OPENAI_CODEX_TOKEN_URL,
