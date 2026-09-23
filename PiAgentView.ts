@@ -62,6 +62,12 @@ import {
   getAgyRequestStorePath,
 } from "./AgyRequestStore";
 import { normalizeAgyFileLinks } from "./AgyFileLinkUtils";
+import {
+  getVaultFileExtension,
+  getVaultFileIcon,
+  getVaultFileTypeLabel,
+  isVaultContextFilePath,
+} from "./PimateContextUtils";
 
 export type AgentClient = PiAgentClient | AgyAgentClient;
 
@@ -146,6 +152,7 @@ interface ContextItem {
   label: string;
   value: string;
   mimeType?: string;
+  extension?: string;
 }
 
 interface ChatTab {
@@ -6818,26 +6825,14 @@ export class PiAgentView extends ItemView {
 
   /**
    * Files that Pimate considers attachable to chat context.
-   * Includes markdown (for reading), PDFs (for vision-capable models),
-   * and common image formats (for vision models).
+   * This includes common notes, text/code/data files, Office documents,
+   * PDFs, and images. Internal application folders are excluded by the
+   * shared path policy in PimateContextUtils.
    */
   private getAttachableFiles(): TFile[] {
-    const exts = new Set([
-      "md", "markdown",
-      "pdf",
-      "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif",
-    ]);
     return this.app.vault
       .getFiles()
-      .filter((f) => exts.has(f.extension.toLowerCase()));
-  }
-
-  /** Returns a small emoji-style tag for the file type (used in @ dropdown). */
-  private getFileTypeIcon(extension: string): string {
-    const e = extension.toLowerCase();
-    if (e === "pdf") return "📄";
-    if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"].includes(e)) return "🖼";
-    return "📝"; // markdown
+      .filter((file) => isVaultContextFilePath(file.path));
   }
 
   private async addFileContext(): Promise<void> {
@@ -6864,6 +6859,7 @@ export class PiAgentView extends ItemView {
       type: "file",
       label: file.basename,
       value: file.path,
+      extension: file.extension.toLowerCase(),
     });
   }
 
@@ -7094,11 +7090,23 @@ export class PiAgentView extends ItemView {
     this.contextRowEl.toggleClass("has-content", others.length > 0);
     for (const item of others) {
       const chip = this.contextRowEl.createSpan({ cls: "pi-agent-file-chip" });
+      const fileExtension = item.extension || getVaultFileExtension(item.value);
       chip.createSpan({
-        text: item.type === "selection" ? "▤" : item.type === "folder" ? "▦" : "▣",
+        text:
+          item.type === "selection"
+            ? "▤"
+            : item.type === "folder"
+              ? "▦"
+              : getVaultFileIcon(fileExtension),
         cls: "pi-agent-file-chip-icon",
       });
       chip.createSpan({ text: item.label, cls: "pi-agent-file-chip-name" });
+      chip.setAttribute(
+        "title",
+        item.type === "file"
+          ? `${item.value} · ${getVaultFileTypeLabel(fileExtension)}`
+          : item.value
+      );
       const remove = chip.createSpan({ text: "×", cls: "pi-agent-file-chip-remove" });
       remove.onclick = (event) => {
         event.stopPropagation();
@@ -8361,13 +8369,19 @@ export class PiAgentView extends ItemView {
       const icon =
         entry.kind === "folder"
           ? "📁"
-          : this.getFileTypeIcon(entry.file!.extension);
+          : getVaultFileIcon(entry.file!.extension);
       const label = entry.kind === "folder" ? entry.path : entry.name;
       const subLabel = entry.kind === "folder" ? "" : entry.path;
 
       itemEl.createSpan({ text: icon + " ", cls: "pi-agent-mention-item-icon" });
       const textEl = itemEl.createDiv({ cls: "pi-agent-mention-item-text" });
       textEl.createSpan({ text: label, cls: "pi-agent-mention-item-name" });
+      if (entry.kind === "file" && entry.file) {
+        textEl.createSpan({
+          text: getVaultFileTypeLabel(entry.file.extension),
+          cls: "pi-agent-mention-item-type",
+        });
+      }
       if (subLabel && subLabel !== label) {
         textEl.createSpan({ text: subLabel, cls: "pi-agent-mention-item-path" });
       }
@@ -8973,8 +8987,14 @@ class FileSuggestModal extends SuggestModal<TFile> {
 
   renderSuggestion(file: TFile, el: HTMLElement): void {
     el.addClass("pi-agent-suggestion");
-    el.createDiv({ text: file.basename, cls: "pi-agent-suggestion-title" });
-    el.createDiv({ text: file.path, cls: "pi-agent-suggestion-note" });
+    el.createDiv({
+      text: `${getVaultFileIcon(file.extension)} ${file.basename}`,
+      cls: "pi-agent-suggestion-title",
+    });
+    el.createDiv({
+      text: `${getVaultFileTypeLabel(file.extension)} · ${file.path}`,
+      cls: "pi-agent-suggestion-note",
+    });
   }
 
   onChooseSuggestion(file: TFile): void {

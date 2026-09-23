@@ -51,7 +51,7 @@ Pimate embeds local coding agents directly into your Obsidian workspace. Rather 
 - **Visualized Reasoning (Thinking Blocks)**: Streaming visibility into model reasoning chains, with configurable thinking effort levels (*Off / Low / Medium / High / Max*).
 - **Session Branching (`🌿 Fork`)**: Branch off from any previous user turn in your conversation history to explore alternative prompts without losing context.
 - **Smart Review Loop**: Automatically inspects assistant completions for unfinished markers and sends continuation prompts until multi-step tasks are truly finished.
-- **Context Management**: Use `@` to fuzzy-search and attach vault notes/folders, compact long conversations with `/compact`, or export sessions as Markdown notes with `/export`.
+- **Context Management**: Use `@` to fuzzy-search and attach vault notes, folders, common text/code/data files, Office documents, PDFs, and images; compact long conversations with `/compact`, or export sessions as Markdown notes with `/export`.
 
 ---
 

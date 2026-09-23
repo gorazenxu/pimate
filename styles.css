@@ -1843,6 +1843,13 @@ summary.pi-agent-skill-details-summary:hover {
   white-space: nowrap;
 }
 
+.pi-agent-mention-item-type {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .pi-agent-mention-item-text {
   display: flex;
   flex-direction: column;
