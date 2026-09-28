@@ -86,7 +86,9 @@ Pimate runs as an Obsidian desktop plugin and communicates with your local CLI a
 2. **Authorize Google Account**:
    Run `agy` once in your terminal and complete the browser OAuth sign-in.
 3. **Enable in Pimate**:
-   Open Obsidian → **Settings** → **Pimate** → **✦ Antigravity (OAuth)**. Verify status shows `🟢 Authenticated`.
+   Open Obsidian → **Settings** → **Pimate** → **✦ Antigravity (OAuth)**. Verify status shows `🟢 AGY Connected`.
+4. **Optional account display**:
+   Select **Enable account display** in the AGY status card, then open `agy` once in a terminal and refresh the card. Pimate reads only the email supplied to AGY's documented status-line command. This changes AGY's global status-line setting after you click the button; an existing custom status-line command is never replaced. On macOS/Linux, account display does not require Node in Obsidian's `PATH`; on Windows, Node.js must be available in `PATH`. The card shows when the account was last observed, since headless AGY queries do not report the current email.
 
 ---
 

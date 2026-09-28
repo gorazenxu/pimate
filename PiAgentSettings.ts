@@ -7,6 +7,11 @@ import * as os from "os";
 import { exec } from "child_process";
 import { AgyAgentClient, type AgyQuotaStatus } from "./AgyAgentClient";
 import {
+  installAgyAccountBridge,
+  readAgyAccountBridge,
+  removeAgyAccountBridge,
+} from "./AgyAccountBridge";
+import {
   createOpenAICodexOAuthCredentials,
   migrateLegacyOpenAICodexCredential,
   type OpenAICodexOAuthCredentials,
@@ -646,6 +651,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     // 异步探测
     AgyAgentClient.checkAuthStatus(this.plugin.settings.agyPath).then((status) => {
       statusActions.empty();
+      const account = readAgyAccountBridge();
       if (!status.installed) {
         agyStatusCard.className = "agy-status-card is-not-installed";
         statusTitle.setText(isZh ? "🔴 未检测到 agy 命令行工具" : "🔴 agy CLI Not Found");
@@ -656,16 +662,67 @@ export class PiAgentSettingTab extends PluginSettingTab {
         );
       } else if (status.authenticated) {
         agyStatusCard.className = "agy-status-card is-authenticated";
+        const accountSeenAt = account.capturedAt
+          ? new Date(account.capturedAt).toLocaleString(isZh ? "zh-CN" : "en-US")
+          : "";
         statusTitle.setText(
           isZh
-            ? `🟢 Google 账号已授权 (Authenticated) · agy v${status.version || "1.x"}`
-            : `🟢 Google Account Authenticated · agy v${status.version || "1.x"}`
+            ? `🟢 AGY 已连接 · agy v${status.version || "1.x"}`
+            : `🟢 AGY Connected · agy v${status.version || "1.x"}`
         );
         statusDesc.setText(
-          isZh
-            ? "已成功检测到系统的 Google OAuth 授权态。Pimate 将直接复用此凭据，无需填写任何 API Key 即可使用！"
-            : "Google OAuth credentials detected. Pimate will seamlessly reuse this authorization with zero API key configuration."
+          account.email
+            ? (isZh
+              ? `AGY 状态栏上次识别的登录账号：${account.email}（${accountSeenAt}）。如已切换账号，请在终端打开 agy 后刷新。`
+              : `Account last reported by AGY status line: ${account.email} (${accountSeenAt}). If you switched accounts, open agy in a terminal and refresh.`)
+            : account.enabled
+              ? (isZh
+                ? "账号显示已启用。请在终端打开 agy 一次，再点“刷新显示”；AGY 的无界面查询不会返回邮箱。"
+                : "Account display is enabled. Open agy once in a terminal, then refresh; headless AGY queries do not return an email.")
+              : account.customStatusLine
+                ? (isZh
+                  ? "AGY 可用，但已有自定义状态栏；Pimate 不会覆盖它，因此无法自动显示登录账号。"
+                  : "AGY is available, but an existing custom status line prevents automatic account display.")
+                : (isZh
+                  ? "AGY 模型列表可用。可启用账号显示，从 AGY 官方状态栏数据中读取登录邮箱。"
+                  : "AGY models are available. Enable account display to read the email from AGY's documented status-line data.")
         );
+        statusActions.setCssProps({ display: "flex" });
+        if (account.enabled) {
+          const refreshBtn = statusActions.createEl("button", {
+            text: isZh ? "刷新显示" : "Refresh",
+          });
+          refreshBtn.onclick = () => this.display();
+          const removeBtn = statusActions.createEl("button", {
+            text: isZh ? "关闭账号显示" : "Disable account display",
+          });
+          removeBtn.onclick = () => {
+            try {
+              removeAgyAccountBridge();
+              this.display();
+            } catch {
+              new Notice(isZh ? "关闭失败：请检查 AGY 设置文件的读写权限" : "Could not disable account display; check AGY settings permissions.");
+            }
+          };
+        } else if (!account.customStatusLine) {
+          const enableBtn = statusActions.createEl("button", {
+            text: isZh ? "启用账号显示" : "Enable account display",
+            cls: "mod-cta",
+          });
+          enableBtn.onclick = () => {
+            try {
+              installAgyAccountBridge();
+              new Notice(isZh
+                ? "已启用。请在终端打开 agy 一次，再回到这里刷新显示。"
+                : "Enabled. Open agy once in a terminal, then refresh here.");
+              this.display();
+            } catch (error) {
+              new Notice(isZh
+                ? `无法启用账号显示：${error instanceof Error ? error.message : "未知错误"}`
+                : `Could not enable account display: ${error instanceof Error ? error.message : "unknown error"}`);
+            }
+          };
+        }
       } else if (status.authenticated === false) {
         agyStatusCard.className = "agy-status-card is-unauthenticated";
         statusTitle.setText(
