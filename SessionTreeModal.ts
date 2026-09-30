@@ -1,18 +1,22 @@
 import { App, Modal, Notice, setIcon } from "obsidian";
 import type { ForkMessage } from "./PiAgentClient";
 import type { AgentClient } from "./PiAgentView";
+import { getPimateUiText, type PimateLanguage } from "./PimateUiText";
 
 export class SessionTreeModal extends Modal {
   private client: AgentClient;
+  private language: PimateLanguage;
   private onSelectForkNode: (node: ForkMessage) => Promise<boolean>;
 
   constructor(
     app: App,
     client: AgentClient,
+    language: PimateLanguage,
     onSelectForkNode: (node: ForkMessage) => Promise<boolean>
   ) {
     super(app);
     this.client = client;
+    this.language = language;
     this.onSelectForkNode = onSelectForkNode;
   }
 
@@ -22,22 +26,26 @@ export class SessionTreeModal extends Modal {
     contentEl.addClass("pimate-session-tree-modal");
 
     const header = contentEl.createEl("div", { cls: "pimate-modal-header" });
-    header.createEl("h3", { text: "🌿 可 Fork 的历史节点" });
+    header.createEl("h3", {
+      text: getPimateUiText(this.language, "sessionTreeTitle"),
+    });
 
     contentEl.createEl("p", {
       cls: "pimate-modal-desc",
-      text: "选择一个历史节点，即可从该节点创建新的对话分支。",
+      text: getPimateUiText(this.language, "sessionTreeDescription"),
     });
 
     const listContainer = contentEl.createEl("div", {
       cls: "pimate-tree-list-container",
     });
-    listContainer.setText("加载会话节点数据中...");
+    listContainer.setText(getPimateUiText(this.language, "sessionTreeLoading"));
 
     try {
       const result = await this.client.getForkMessages();
       if (!result.success || !result.data) {
-        listContainer.setText("未能获取可 Fork 的历史节点。");
+        listContainer.setText(
+          getPimateUiText(this.language, "sessionTreeLoadFailed")
+        );
         return;
       }
       const messages = result.data.messages.filter(
@@ -49,7 +57,7 @@ export class SessionTreeModal extends Modal {
       if (messages.length === 0) {
         listContainer.createEl("div", {
           cls: "pimate-empty-tree-state",
-          text: "当前会话没有可 Fork 的历史节点。",
+          text: getPimateUiText(this.language, "sessionTreeEmpty"),
         });
         return;
       }
@@ -71,26 +79,34 @@ export class SessionTreeModal extends Modal {
 
         const actionBtn = itemEl.createEl("button", {
           cls: "mod-cta pimate-tree-node-btn",
-          text: "Fork 从此分支",
+          text: getPimateUiText(this.language, "forkFromHere"),
         });
 
         actionBtn.addEventListener("click", async () => {
           actionBtn.disabled = true;
-          actionBtn.setText("Forking...");
+          actionBtn.setText(getPimateUiText(this.language, "forking"));
           try {
             if (await this.onSelectForkNode(node)) {
               this.close();
               return;
             }
           } catch (err) {
-            new Notice(`Fork 失败: ${(err as Error).message}`);
+            new Notice(
+              getPimateUiText(this.language, "forkFailed", {
+                error: (err as Error).message,
+              })
+            );
           }
           actionBtn.disabled = false;
-          actionBtn.setText("Fork 从此分支");
+          actionBtn.setText(getPimateUiText(this.language, "forkFromHere"));
         });
       });
     } catch (err) {
-      listContainer.setText(`获取节点失败: ${(err as Error).message}`);
+      listContainer.setText(
+        getPimateUiText(this.language, "forkNodesFailed", {
+          error: (err as Error).message,
+        })
+      );
     }
   }
 

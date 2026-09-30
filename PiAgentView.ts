@@ -76,6 +76,7 @@ import {
   type PiCommandInfo,
 } from "./PiCommandUtils";
 import { SessionTreeModal } from "./SessionTreeModal";
+import { getPimateUiText } from "./PimateUiText";
 
 export const PI_AGENT_VIEW_TYPE = "pimate-chat-view";
 
@@ -1718,7 +1719,14 @@ export class PiAgentView extends ItemView {
       case "extension_error":
         console.error("[pi-agent] Extension error", event);
         if (event.event !== "command") {
-          new Notice(`Pi 扩展错误: ${String(event.error || "未知错误")}`);
+          new Notice(
+            getPimateUiText(this.plugin.settings.language, "piExtensionError", {
+              error: String(
+                event.error ||
+                  getPimateUiText(this.plugin.settings.language, "unknownError")
+              ),
+            })
+          );
         }
         break;
 
@@ -2676,12 +2684,14 @@ export class PiAgentView extends ItemView {
         steerBtn = actionsEl.createEl("button", {
           cls: "pi-agent-action-btn pi-agent-message-steer-btn pi-agent-hidden",
           attr: {
-            title: "中断当前回复并按此消息调整",
-            "aria-label": "中断当前回复并按此消息调整",
+            title: getPimateUiText(this.plugin.settings.language, "steerTooltip"),
+            "aria-label": getPimateUiText(this.plugin.settings.language, "steerTooltip"),
           },
         });
         setIcon(steerBtn, "corner-up-right");
-        steerBtn.createSpan({ text: "调整方向" });
+        steerBtn.createSpan({
+          text: getPimateUiText(this.plugin.settings.language, "steerButton"),
+        });
         steerBtn.onclick = (e) => {
           e.stopPropagation();
           this.runAsync(() => this.steerExistingMessage(msgEl, steerBtn));
@@ -2690,13 +2700,24 @@ export class PiAgentView extends ItemView {
         // Fork button
         forkBtn = actionsEl.createEl("button", {
           cls: "pi-agent-action-btn",
-          attr: { title: "Fork 从此提问分支 (Fork from this prompt)" },
+          attr: {
+            title: getPimateUiText(
+              this.plugin.settings.language,
+              "forkPromptTooltip"
+            ),
+          },
         });
         forkBtn.setText("🌿");
         if (!options.entryId) {
           forkBtn.disabled = true;
-          forkBtn.setAttribute("aria-label", "该提问暂不能 Fork");
-          forkBtn.setAttribute("title", "该提问尚未写入会话，暂不能 Fork");
+          forkBtn.setAttribute(
+            "aria-label",
+            getPimateUiText(this.plugin.settings.language, "forkPromptUnavailable")
+          );
+          forkBtn.setAttribute(
+            "title",
+            getPimateUiText(this.plugin.settings.language, "forkPromptNotSaved")
+          );
         }
 
         // Reuse button
@@ -2852,7 +2873,9 @@ export class PiAgentView extends ItemView {
       ""
     ).trim();
     if (!userInput) {
-      new Notice("这条消息没有可调整的文字");
+      new Notice(
+        getPimateUiText(this.plugin.settings.language, "steerNoText")
+      );
       return;
     }
 
@@ -3675,7 +3698,11 @@ export class PiAgentView extends ItemView {
     const tab = this.activeTab;
     const client = tab?.client;
     if (!tab || !client || !this.inputEl) {
-      if (tab) new Notice("当前对话正在切换或尚未就绪，请稍后再发送");
+      if (tab) {
+        new Notice(
+          getPimateUiText(this.plugin.settings.language, "conversationNotReady")
+        );
+      }
       return;
     }
     // AGY print-mode processes may exit after an interrupted turn. Do not
@@ -3684,7 +3711,9 @@ export class PiAgentView extends ItemView {
     // work after an error.
     if (!client.isRunning()) {
       if (client.engine !== "antigravity" || tab.isStreaming) {
-        new Notice("当前对话正在切换或尚未就绪，请稍后再发送");
+        new Notice(
+          getPimateUiText(this.plugin.settings.language, "conversationNotReady")
+        );
         return;
       }
       const isZh = this.plugin.settings.language !== "en";
@@ -3728,7 +3757,9 @@ export class PiAgentView extends ItemView {
       this.clearContextItems();
       tab.pendingUserImages = [];
       if (images.length > 0) {
-        new Notice("Pimate 内建命令不会使用附加图片");
+        new Notice(
+          getPimateUiText(this.plugin.settings.language, "bashImagesIgnored")
+        );
       }
       await this.executePimateBuiltinCommand(builtinCommand.name, builtinCommand.args);
       return;
@@ -4829,16 +4860,25 @@ export class PiAgentView extends ItemView {
     const client = this.client;
     const scopeVersion = this.forkScopeVersion;
     if (!client) {
-      new Notice("Pi Agent 客户端尚未就绪");
+      new Notice(
+        getPimateUiText(this.plugin.settings.language, "piClientNotReady")
+      );
       return;
     }
-    new SessionTreeModal(this.app, client, async (node) => {
-      if (this.client !== client || this.forkScopeVersion !== scopeVersion) {
-        new Notice("当前会话已切换，请重新选择历史节点");
-        return false;
+    new SessionTreeModal(
+      this.app,
+      client,
+      this.plugin.settings.language,
+      async (node) => {
+        if (this.client !== client || this.forkScopeVersion !== scopeVersion) {
+          new Notice(
+            getPimateUiText(this.plugin.settings.language, "sessionSwitched")
+          );
+          return false;
+        }
+        return this.forkFromEntry(node.entryId, node.text);
       }
-      return this.forkFromEntry(node.entryId, node.text);
-    }).open();
+    ).open();
   }
 
   private async reloadExtensions(): Promise<void> {
@@ -4956,15 +4996,16 @@ export class PiAgentView extends ItemView {
 
   private async exportSessionToVaultNote(): Promise<void> {
     if (!this.client) return;
+    const language = this.plugin.settings.language;
     try {
       const res = await this.client.getMessages();
       if (!res.success || !res.data) {
-        new Notice("无法获取当前会话消息记录");
+        new Notice(getPimateUiText(language, "exportMessagesFailed"));
         return;
       }
       const rawMessages = ((res.data as any).messages || []) as any[];
       if (rawMessages.length === 0) {
-        new Notice("当前会话暂无可导出的消息");
+        new Notice(getPimateUiText(language, "exportNoMessages"));
         return;
       }
 
@@ -4973,11 +5014,17 @@ export class PiAgentView extends ItemView {
       const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "-");
       const fileName = `Pimate Export ${dateStr} ${timeStr}.md`;
 
-      let mdContent = `# Pimate 对话记录 — ${dateStr}\n\n`;
-      mdContent += `> 导出时间: ${now.toLocaleString()}\n\n---\n\n`;
+      let mdContent = `# ${getPimateUiText(language, "exportTitle", { date: dateStr })}\n\n`;
+      mdContent += `> ${getPimateUiText(language, "exportedAt", {
+        time: now.toLocaleString(language === "zh" ? "zh-CN" : "en-US"),
+      })}\n\n---\n\n`;
 
       for (const msg of rawMessages) {
-        const roleStr = msg.role === "user" ? "👤 User" : msg.role === "assistant" ? "🤖 Pi Agent" : msg.role;
+        const roleStr = msg.role === "user"
+          ? getPimateUiText(language, "exportUserRole")
+          : msg.role === "assistant"
+            ? getPimateUiText(language, "exportAssistantRole")
+            : msg.role;
         mdContent += `### ${roleStr}\n\n`;
         if (typeof msg.content === "string") {
           mdContent += `${msg.content}\n\n`;
@@ -4986,9 +5033,9 @@ export class PiAgentView extends ItemView {
             if (item.type === "text" && item.text) {
               mdContent += `${item.text}\n\n`;
             } else if (item.type === "thinking" && item.thinking) {
-              mdContent += `> [!note] 思考过程\n> ${item.thinking.replace(/\n/g, "\n> ")}\n\n`;
+              mdContent += `> [!note] ${getPimateUiText(language, "exportThinking")}\n> ${item.thinking.replace(/\n/g, "\n> ")}\n\n`;
             } else if (item.type === "tool_call") {
-              mdContent += `> [!info] 工具调用: \`${item.name}\`\n\n`;
+              mdContent += `> [!info] ${getPimateUiText(language, "exportToolCall")} \`${item.name}\`\n\n`;
             }
           }
         }
@@ -4998,9 +5045,15 @@ export class PiAgentView extends ItemView {
       const createdFile = await this.app.vault.create(fileName, mdContent);
       const leaf = this.app.workspace.getLeaf(true);
       await leaf.openFile(createdFile);
-      new Notice(`已导出笔记: ${fileName}`);
+      new Notice(
+        getPimateUiText(language, "exportNoteSuccess", { fileName })
+      );
     } catch (err) {
-      new Notice(`导出笔记失败: ${(err as Error).message}`);
+      new Notice(
+        getPimateUiText(language, "exportNoteFailure", {
+          error: (err as Error).message,
+        })
+      );
     }
   }
 
