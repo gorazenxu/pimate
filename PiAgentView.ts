@@ -238,6 +238,10 @@ export class PiAgentView extends ItemView {
   private inputEl: HTMLTextAreaElement | null = null;
   private streamingTextEl: HTMLElement | null = null;
   private streamingCursorEl: HTMLElement | null = null;
+  private streamRenderVersions = new WeakMap<HTMLElement, number>();
+  private tabStarts = new Map<ChatTab, Promise<void>>();
+  private viewClosed = false;
+  private historyLoadSeq = 0;
   private sessionTabsEl: HTMLElement | null = null;
   private contextRowEl: HTMLElement | null = null;
   private imagePreviewEl: HTMLElement | null = null;
@@ -293,6 +297,9 @@ export class PiAgentView extends ItemView {
   private historyPanelEl: HTMLElement | null = null;
   private modelPopupEl: HTMLElement | null = null;
   private effortPopupEl: HTMLElement | null = null;
+  private modelPopupSeq = 0;
+  private effortPopupSeq = 0;
+  private effortPopupPending = false;
   private isHistoryOpen = false;
   // AGY's own cache is global. Keep a short-lived view cache after Pimate has
   // classified records by this vault, so reopening the history panel does not
@@ -492,6 +499,7 @@ export class PiAgentView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.viewClosed = false;
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("pi-agent-container");
@@ -1053,6 +1061,8 @@ export class PiAgentView extends ItemView {
   private async switchToTab(tabId: string): Promise<void> {
     const tab = this.tabs.find((item) => item.id === tabId);
     if (!tab) return;
+    this.closeModelPopup();
+    this.closeEffortPopup();
     const previousTab = this.activeTab;
     this.saveActiveComposerState();
     const switchSeq = ++this.tabSwitchSeq;
@@ -1081,6 +1091,10 @@ export class PiAgentView extends ItemView {
 
     const client = tab.client;
     this.client = client;
+    if (!client) {
+      this.updateButtons();
+      return;
+    }
     if (tab.engine === "antigravity" && previousTab !== tab) {
       // AGY clients stay alive with their tabs. Re-read the native transcript
       // after a real tab change so a result flushed while another tab was
@@ -1148,6 +1162,24 @@ export class PiAgentView extends ItemView {
     tab: ChatTab,
     options: { requireSessionRestore?: boolean } = {}
   ): Promise<void> {
+    if (this.viewClosed || !this.tabs.includes(tab)) return;
+    let starting = this.tabStarts.get(tab);
+    if (!starting) {
+      // Defer until the lock is registered, including synchronous start failures.
+      starting = Promise.resolve().then(() => this.startTabClient(tab));
+      this.tabStarts.set(tab, starting);
+    }
+    try {
+      await starting;
+    } catch (err) {
+      if (options.requireSessionRestore) throw err;
+    } finally {
+      if (this.tabStarts.get(tab) === starting) this.tabStarts.delete(tab);
+    }
+  }
+
+  private async startTabClient(tab: ChatTab): Promise<void> {
+    if (this.viewClosed || !this.tabs.includes(tab)) return;
     if (tab.engine === "antigravity" && tab.sessionId) {
       const conversationId = tab.sessionId.trim();
       const workspaceStatus = this.getAgyConversationWorkspaceStatus(conversationId);
@@ -1185,20 +1217,25 @@ export class PiAgentView extends ItemView {
       return;
     }
 
+    if (this.viewClosed || !this.tabs.includes(tab)) return;
     const client = this.createClient(tab);
     tab.client = client;
+    const ownsClient = () => !this.viewClosed && this.tabs.includes(tab) && tab.client === client;
 
     client.on("event", (event: RpcEvent) => {
+      if (!ownsClient()) return;
       this.recordTabRuntimeState(tab, event);
       if (this.activeTabId !== tab.id) return;
       this.handleEvent(event, tab);
     });
 
     client.on("error", (err: Error) => {
+      if (!ownsClient()) return;
       if (this.activeTabId === tab.id) this.setStatus(`❌ Error: ${err.message}`, "error");
     });
 
     client.on("close", () => {
+      if (!ownsClient()) return;
       tab.isStreaming = false;
       if (this.activeTabId === tab.id) {
         const engineLabel = client.engine === "antigravity" ? "Antigravity CLI" : "Pi process";
@@ -1210,34 +1247,40 @@ export class PiAgentView extends ItemView {
 
     try {
       await client.start();
+      if (!ownsClient()) {
+        await client.destroy();
+        return;
+      }
       if (client.engine === "antigravity") {
         tab.sessionId = (client as AgyAgentClient).getConversationId() || tab.sessionId;
       } else if (tab.sessionFile) {
         const result = await client.switchSession(tab.sessionFile);
         if (!result.success || (result.data as any)?.cancelled) {
           const restoreError = result.error || `Failed to restore session: ${tab.label}`;
-          if (options.requireSessionRestore) throw new Error(restoreError);
-          new Notice(restoreError);
+          throw new Error(restoreError);
         }
       }
       await this.applyTabRuntimePreferences(tab);
-      if (this.activeTabId === tab.id) {
+      if (!ownsClient()) {
+        await client.destroy();
+        return;
+      }
+      if (ownsClient() && this.activeTabId === tab.id) {
         this.setStatus("Ready", "ok");
         void this.loadAvailableCommands();
       }
     } catch (err) {
-      if (this.activeTabId === tab.id) {
+      if (ownsClient() && this.activeTabId === tab.id) {
         const engineLabel = client.engine === "antigravity" ? "Antigravity CLI" : "pi";
         this.setStatus(
           `❌ Failed to start ${engineLabel}: ${(err as Error).message}`,
           "error"
         );
       }
-      if (options.requireSessionRestore) {
-        await client.destroy().catch(() => undefined);
-        if (tab.client === client) tab.client = null;
-        throw err;
-      }
+      await client.destroy().catch(() => undefined);
+      if (tab.client === client) tab.client = null;
+      if (this.client === client) this.client = null;
+      throw err;
     }
   }
 
@@ -1543,6 +1586,11 @@ export class PiAgentView extends ItemView {
   }
 
   private resetActiveRenderState(): void {
+    if (this.renderTimeout) window.clearTimeout(this.renderTimeout);
+    this.renderTimeout = null;
+    this.streamingTextEl = null;
+    this.streamingCursorEl = null;
+    this.streamRenderVersions = new WeakMap();
     this.currentAssistantMsg = null;
     this.currentTextBlock = null;
     this.currentThinkingBlock = null;
@@ -2082,6 +2130,7 @@ export class PiAgentView extends ItemView {
           ".pi-agent-text-block"
         );
       streamingBlocks.forEach((textBlock: any) => {
+        this.invalidateStreamRender(textBlock);
         const pre = textBlock.querySelector(
           ".pi-agent-streaming-text"
         ) as HTMLElement | null;
@@ -5464,6 +5513,11 @@ export class PiAgentView extends ItemView {
     this.closeEffortPopup();
 
     if (!this.client) return;
+    const client = this.client;
+    const tab = this.activeTab;
+    const request = ++this.modelPopupSeq;
+    const isCurrent = () => !this.viewClosed && request === this.modelPopupSeq
+      && this.activeTab === tab && this.client === client && anchorEl.isConnected;
     const isZh = this.plugin.settings.language === "zh";
 
     const currentEngine = this.activeTab?.engine || this.plugin.settings.defaultEngine || "pi";
@@ -5473,7 +5527,8 @@ export class PiAgentView extends ItemView {
     if (cache && cache.length > 0) {
       this.renderModelPopup(anchorEl, cache);
       // 同时在后台静默抓取最新模型列表并更新缓存
-      this.client.getAvailableModels().then(result => {
+      client.getAvailableModels().then(result => {
+        if (!isCurrent()) return;
         if (result.success && result.data) {
           const models = ((result.data as any).models || []) as PiModel[];
           if (models.length > 0) {
@@ -5499,13 +5554,17 @@ export class PiAgentView extends ItemView {
           this.closeModelPopup();
         }
       };
+      const handler = this.modelOutsideClickHandler;
       window.setTimeout(() => {
-        activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
+        if (isCurrent() && this.modelOutsideClickHandler === handler) {
+          activeDocument.addEventListener("pointerdown", handler);
+        }
       }, 0);
     }
 
     try {
-      const result = await this.client.getAvailableModels();
+      const result = await client.getAvailableModels();
+      if (!isCurrent()) return;
       if (!result.success || !result.data) {
         if (!cache) this.closeModelPopup();
         return;
@@ -5523,12 +5582,14 @@ export class PiAgentView extends ItemView {
       this.closeModelPopup();
       this.renderModelPopup(anchorEl, models);
     } catch (err) {
+      if (!isCurrent()) return;
       this.closeModelPopup();
       new Notice(isZh ? `获取模型失败: ${(err as Error).message}` : `Failed to load models: ${(err as Error).message}`);
     }
   }
 
   private closeModelPopup(): void {
+    ++this.modelPopupSeq;
     if (this.modelPopupEl) {
       this.modelPopupEl.remove();
       this.modelPopupEl = null;
@@ -5595,13 +5656,16 @@ export class PiAgentView extends ItemView {
         this.closeModelPopup();
       }
     };
+    const handler = this.modelOutsideClickHandler;
     window.setTimeout(() => {
-      activeDocument.addEventListener("pointerdown", this.modelOutsideClickHandler!);
+      if (!this.viewClosed && this.modelPopupEl && this.modelOutsideClickHandler === handler) {
+        activeDocument.addEventListener("pointerdown", handler);
+      }
     }, 0);
   }
 
   private async toggleEffortPopup(anchorEl: HTMLElement): Promise<void> {
-    if (this.effortPopupEl) {
+    if (this.effortPopupEl || this.effortPopupPending) {
       this.closeEffortPopup();
       return;
     }
@@ -5610,14 +5674,22 @@ export class PiAgentView extends ItemView {
     // Pull latest Pi state so the popup renders against current model
     // metadata (reasoning / thinkingLevelMap) instead of stale local data.
     const tab = this.activeTab;
-    if (tab?.client) {
-      await this.syncTabStateFromPi(tab);
+    const client = tab?.client;
+    const request = ++this.effortPopupSeq;
+    this.effortPopupPending = true;
+    try {
+      if (client) await this.syncTabStateFromPi(tab!);
+      if (this.viewClosed || request !== this.effortPopupSeq || this.activeTab !== tab
+        || tab?.client !== client || !anchorEl.isConnected) return;
+      this.renderEffortPopup(anchorEl);
+    } finally {
+      if (request === this.effortPopupSeq) this.effortPopupPending = false;
     }
-
-    this.renderEffortPopup(anchorEl);
   }
 
   private closeEffortPopup(): void {
+    ++this.effortPopupSeq;
+    this.effortPopupPending = false;
     if (this.effortPopupEl) {
       this.effortPopupEl.remove();
       this.effortPopupEl = null;
@@ -5777,8 +5849,11 @@ export class PiAgentView extends ItemView {
         this.closeEffortPopup();
       }
     };
+    const handler = this.effortOutsideClickHandler;
     window.setTimeout(() => {
-      activeDocument.addEventListener("pointerdown", this.effortOutsideClickHandler!);
+      if (!this.viewClosed && this.effortPopupEl && this.effortOutsideClickHandler === handler) {
+        activeDocument.addEventListener("pointerdown", handler);
+      }
     }, 0);
   }
 
@@ -6509,13 +6584,13 @@ export class PiAgentView extends ItemView {
 
     try {
       const result = await client.getMessages();
-      if (!result.success) return [];
-      const messages = Array.isArray((result.data as any)?.messages)
-        ? (result.data as any).messages
-        : [];
+      if (!result.success || !Array.isArray((result.data as any)?.messages)) {
+        throw new Error("Could not load session history");
+      }
+      const messages = (result.data as any).messages;
       return messages;
     } catch {
-      return [];
+      throw new Error("Could not load session history");
     }
   }
 
@@ -7601,16 +7676,7 @@ export class PiAgentView extends ItemView {
   private async reloadMessagesFromClient(
     options: { forceRpc?: boolean } = {}
   ): Promise<void> {
-    if (this.chatContainer) {
-      this.chatContainer.empty();
-    }
-    this.renderedMessages = [];
-    this.activeBranchHistory = null;
-    this.historyShownCount = 0;
-    this.historyTotalCount = 0;
-    this.historyBannerEl = null;
-    this.renderEmptyState();
-    await this.loadMessages(options);
+    await this.loadMessages({ ...options, replace: true });
   }
 
   private async loadMessages(
@@ -7619,11 +7685,14 @@ export class PiAgentView extends ItemView {
       expectedTab?: ChatTab | null;
       expectedClient?: AgentClient | null;
       expectedSwitchSeq?: number;
+      replace?: boolean;
     } = {}
   ): Promise<void> {
     const tab = options.expectedTab ?? this.activeTab;
     const client = options.expectedClient ?? tab?.client ?? this.client;
+    const request = ++this.historyLoadSeq;
     const isCurrentRequest = (): boolean =>
+      !this.viewClosed && request === this.historyLoadSeq &&
       !!tab &&
       !!client &&
       this.isCurrentTabClient(tab, client) &&
@@ -7639,15 +7708,20 @@ export class PiAgentView extends ItemView {
     let messages: any[] = [];
     let total = 0;
     let usedFile = false;
+    let branchHistory: any[] | null = null;
 
     // A normal session load is allowed to use the fast JSONL path; do not let
     // a branch cache from the previously active tab leak into its pager.
-    if (!options.forceRpc) this.activeBranchHistory = null;
-
     if (options.forceRpc) {
-      const branchMessages = await this.readActiveBranchFromPi(tab, client);
+      let branchMessages: any[];
+      try {
+        branchMessages = await this.readActiveBranchFromPi(tab, client);
+      } catch {
+        if (isCurrentRequest()) this.reportHistoryLoadFailure();
+        return;
+      }
       if (!isCurrentRequest()) return;
-      this.activeBranchHistory = branchMessages;
+      branchHistory = branchMessages;
       total = branchMessages.length;
       messages = limit > 0 ? branchMessages.slice(-limit) : branchMessages;
     }
@@ -7671,21 +7745,35 @@ export class PiAgentView extends ItemView {
           : await client.getMessages();
         if (!isCurrentRequest()) return;
         if (result.success && result.data) {
-          const rpcMessages = (result.data as any).messages || [];
+          const rpcMessages = (result.data as any).messages;
+          if (!Array.isArray(rpcMessages)) throw new Error("Invalid history response");
           const reportedTotal = Number((result.data as any).totalMessages);
           total = Number.isFinite(reportedTotal) && reportedTotal >= rpcMessages.length
             ? reportedTotal
             : rpcMessages.length;
           messages = limit > 0 ? rpcMessages.slice(-limit) : rpcMessages;
+        } else {
+          throw new Error("Could not load session history");
         }
       } catch {
-        console.log("[pi-agent] No existing messages to load");
+        if (isCurrentRequest()) this.reportHistoryLoadFailure();
         return;
       }
     }
 
     if (!isCurrentRequest()) return;
+    // A new turn may have started while history was in flight. Never erase
+    // visible live deltas with an earlier snapshot; settled will reconcile it.
+    if (options.replace && tab.isStreaming) return;
 
+    if (options.replace) {
+      this.resetActiveRenderState();
+      this.chatContainer?.empty();
+      this.renderedMessages = [];
+      this.historyBannerEl = null;
+      this.renderEmptyState();
+    }
+    this.activeBranchHistory = branchHistory;
     this.historyShownCount = messages.length;
     this.historyTotalCount = total;
     for (const msg of messages) {
@@ -7693,6 +7781,12 @@ export class PiAgentView extends ItemView {
     }
     this.renderHistoryBanner();
     this.scrollToBottom(true, true);
+  }
+
+  private reportHistoryLoadFailure(): void {
+    new Notice(this.plugin.settings.language === "zh"
+      ? "历史加载失败，当前已显示内容已保留。请稍后重试。"
+      : "History could not be loaded. Existing content was kept; please retry later.");
   }
 
   /** Append more history (e.g. when user clicks "Load earlier"). */
@@ -8068,6 +8162,10 @@ export class PiAgentView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.viewClosed = true;
+    this.closeModelPopup();
+    this.closeEffortPopup();
+    this.resetActiveRenderState();
     this.scrollFollower?.dispose();
     this.scrollFollower = null;
     if (this.thinkingTimer) {
@@ -8087,12 +8185,19 @@ export class PiAgentView extends ItemView {
       this.speedHideTimer = null;
     }
 
-    await this.persistSessionTabs();
-    for (const tab of this.tabs) {
-      await tab.client?.destroy();
-      tab.client = null;
+    try {
+      await this.persistSessionTabs();
+    } catch {
+      console.warn("[pimate] Session tabs could not be saved during close");
+    } finally {
+      const clients = new Set(this.tabs.map(tab => tab.client).filter((client): client is AgentClient => !!client));
+      for (const tab of this.tabs) tab.client = null;
+      this.client = null;
+      const results = await Promise.allSettled([...clients].map(client => client.destroy()));
+      if (results.some(result => result.status === "rejected")) {
+        console.warn("[pimate] Some clients could not finish cleanup during close");
+      }
     }
-    this.client = null;
   }
 
   // ─── Stream Render Methods ──────────────────────────────────────────
@@ -8115,6 +8220,7 @@ export class PiAgentView extends ItemView {
 
   private convertCurrentTextBlockToFastStreaming(): void {
     if (!this.currentTextBlock) return;
+    this.invalidateStreamRender(this.currentTextBlock);
     this.currentTextBlock.classList.remove("markdown-preview-view", "markdown-rendered");
     this.currentTextBlock.classList.add("pi-agent-streaming-block");
     this.currentTextBlock.empty();
@@ -8152,10 +8258,8 @@ export class PiAgentView extends ItemView {
   // markdown re-parse. The final MarkdownRenderer.render() happens once at
   // message_end in handleMessageEnd().
   //
-  // In auto mode we additionally promote the in-flight fast text to pretty
-  // Markdown as soon as the model emits a newline, so each completed
-  // paragraph / list item / table row is rendered with full formatting
-  // exactly once, without forcing a 140ms idle wait.
+  // Auto mode promotes the accumulated block on newlines. A later delta
+  // restores the fast nodes; unfinished Markdown is never frozen by line.
   private appendStreamingDelta(rawText: string, deltaText: string): void {
     if (this.renderTimeout) {
       window.clearTimeout(this.renderTimeout);
@@ -8163,11 +8267,15 @@ export class PiAgentView extends ItemView {
     }
     const now = Date.now();
     const delay = 50;
+    const target = this.currentTextBlock;
+    const textEl = this.streamingTextEl;
+    const version = target ? this.streamRenderVersions.get(target) : undefined;
     const apply = () => {
+      if (this.viewClosed || !target || target !== this.currentTextBlock
+        || this.streamRenderVersions.get(target) !== version
+        || !textEl || !target.contains(textEl)) return;
       const followBottom = this.captureBottomFollow();
-      if (this.streamingTextEl) {
-        this.streamingTextEl.textContent = rawText;
-      }
+      textEl.textContent = rawText;
       followBottom();
       this.lastRenderTime = Date.now();
     };
@@ -8265,7 +8373,12 @@ export class PiAgentView extends ItemView {
 
   private renderMarkdownWithCursor(rawText: string, targetEl: HTMLElement): void {
     const followBottom = this.captureBottomFollow();
-    targetEl.empty();
+    const version = this.invalidateStreamRender(targetEl);
+    const versions = this.streamRenderVersions;
+    // Mark the promotion immediately so the next delta recreates fast nodes.
+    targetEl.classList.remove("pi-agent-streaming-block");
+    targetEl.classList.add("markdown-preview-view", "markdown-rendered");
+    const staging = targetEl.ownerDocument.createElement("div");
 
     const normalizedText = this.normalizeAssistantMarkdown(rawText);
     const inCodeblock = this.isInsideUnclosedFence(normalizedText);
@@ -8277,12 +8390,29 @@ export class PiAgentView extends ItemView {
     void MarkdownRenderer.render(
       this.app,
       finalRenderText,
-      targetEl,
+      staging,
       "",
       this
     ).then(() => {
+      if (this.viewClosed || this.streamRenderVersions !== versions
+        || versions.get(targetEl) !== version || !targetEl.isConnected) return;
+      targetEl.replaceChildren(...Array.from(staging.childNodes));
       followBottom();
+    }).catch(() => {
+      // Keep the visible fast text if a streaming preview fails. The final
+      // message renderer still gets the complete raw block.
+      if (!this.viewClosed && this.streamRenderVersions === versions
+        && versions.get(targetEl) === version && this.currentTextBlock === targetEl) {
+        this.convertCurrentTextBlockToFastStreaming();
+        if (this.streamingTextEl) this.streamingTextEl.textContent = rawText;
+      }
     });
+  }
+
+  private invalidateStreamRender(target: HTMLElement): number {
+    const version = (this.streamRenderVersions.get(target) || 0) + 1;
+    this.streamRenderVersions.set(target, version);
+    return version;
   }
 
   // ─── Autocomplete Mention Methods ───────────────────────────────────

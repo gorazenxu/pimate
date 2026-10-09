@@ -26,7 +26,7 @@ export interface WindowsPiSpawnResolverOptions {
   readText?: (candidate: string) => string;
 }
 
-type PiSpawnResolution = { cmd: string; scriptArgs: string[] };
+type PiSpawnResolution = { cmd: string; scriptArgs: string[]; nodePath?: string };
 
 function packageBinEntrypoint(
   packageDir: string,
@@ -134,66 +134,92 @@ export function resolveWindowsSpawn(
   return null;
 }
 
-function resolvePosixNode(): string | null {
-  if (process.platform === "win32") return null;
+export interface PosixPiSpawnResolverOptions {
+  platform?: string;
+  pathValue?: string;
+  homeDir?: string;
+  isExecutable?: (candidate: string) => boolean;
+  realPath?: (candidate: string) => string;
+}
+
+function isExecutableFile(candidate: string): boolean {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return fs.statSync(candidate).isFile();
+  } catch { return false; }
+}
+
+function resolvePosixNode(options: PosixPiSpawnResolverOptions): string | null {
 
   const searchDirs = [
-    ...(process.env.PATH || "").split(path.delimiter),
+    ...(options.pathValue ?? process.env.PATH ?? "").split(":"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
   ];
 
   const seen = new Set<string>();
   for (const dir of searchDirs) {
-    if (!dir || seen.has(dir)) continue;
+    if (!path.posix.isAbsolute(dir) || seen.has(dir)) continue;
     seen.add(dir);
     const candidate = path.join(dir, "node");
-    if (fs.existsSync(candidate)) return candidate;
+    if ((options.isExecutable ?? isExecutableFile)(candidate)) return candidate;
   }
 
   return null;
 }
 
-function resolvePosixScript(candidate: string, nodePath: string | null): { cmd: string; scriptArgs: string[] } | null {
-  const realPath = fs.realpathSync(candidate);
+function resolvePosixScript(candidate: string, nodePath: string | null, options: PosixPiSpawnResolverOptions): PiSpawnResolution | null {
+  let realPath: string;
+  try { realPath = (options.realPath ?? fs.realpathSync)(candidate); }
+  catch { return null; }
   if (/\.js$/i.test(realPath) && nodePath) {
-    return { cmd: nodePath, scriptArgs: [realPath] };
+    return { cmd: nodePath, scriptArgs: [realPath], nodePath };
   }
 
   return null;
 }
 
-function resolvePosixSpawn(
-  userPiPath: string
-): { cmd: string; scriptArgs: string[] } | null {
-  if (process.platform === "win32") return null;
+export function resolvePosixSpawn(
+  userPiPath: string,
+  options: PosixPiSpawnResolverOptions = {}
+): PiSpawnResolution | null {
+  if ((options.platform ?? process.platform) === "win32") return null;
 
-  const nodePath = resolvePosixNode();
+  const nodePath = resolvePosixNode(options);
+  const executable = options.isExecutable ?? isExecutableFile;
+  const launcher = (candidate: string): PiSpawnResolution =>
+    resolvePosixScript(candidate, nodePath, options) || {
+      cmd: candidate, scriptArgs: [], ...(nodePath ? { nodePath } : {}),
+    };
 
   if (/\.js$/i.test(userPiPath)) {
-    return nodePath ? { cmd: nodePath, scriptArgs: [userPiPath] } : null;
+    return nodePath ? { cmd: nodePath, scriptArgs: [userPiPath], nodePath } : null;
   }
 
   if (/[\\/]/.test(userPiPath)) {
-    if (!fs.existsSync(userPiPath)) return null;
-    return resolvePosixScript(userPiPath, nodePath);
+    if (!executable(userPiPath)) return null;
+    return launcher(userPiPath);
   }
 
+  // Reuse the existing HOME lookup only for Pi's known install locations.
+  // Never pin a managed release: its launcher must follow `pi update`.
+  const homeDir = options.homeDir ?? process.env.HOME;
   const searchDirs = [
-    ...(process.env.PATH || "").split(path.delimiter),
-    process.env.HOME ? path.join(process.env.HOME, ".local", "bin") : "",
+    ...(options.pathValue ?? process.env.PATH ?? "").split(":"),
+    userPiPath === "pi" && homeDir ? path.join(homeDir, ".pi", "agent", "bin") : "",
+    homeDir ? path.join(homeDir, ".local", "bin") : "",
     "/opt/homebrew/bin",
     "/usr/local/bin",
   ];
 
   const seen = new Set<string>();
   for (const dir of searchDirs) {
-    if (!dir || seen.has(dir)) continue;
+    if (!path.posix.isAbsolute(dir) || seen.has(dir)) continue;
     seen.add(dir);
     const candidate = path.join(dir, userPiPath);
-    if (!fs.existsSync(candidate)) continue;
+    if (!executable(candidate)) continue;
 
-    return resolvePosixScript(candidate, nodePath) || { cmd: candidate, scriptArgs: [] };
+    return launcher(candidate);
   }
 
   return null;
@@ -201,8 +227,13 @@ function resolvePosixSpawn(
 
 function resolvePiSpawn(
   userPiPath: string
-): { cmd: string; scriptArgs: string[] } | null {
+): PiSpawnResolution | null {
   return resolveWindowsSpawn(userPiPath) || resolvePosixSpawn(userPiPath);
+}
+
+export function piChildPath(inheritedPath: string, nodePath: string): string {
+  const nodeDir = path.posix.dirname(nodePath);
+  return [nodeDir, ...inheritedPath.split(":").filter(dir => dir !== nodeDir)].join(":");
 }
 
 // ─── RPC Types ─────────────────────────────────────────────────────────────
@@ -388,6 +419,12 @@ export class PiAgentClient extends EventEmitter {
   >();
   private options: PiAgentClientOptions;
   private destroyed = false;
+  private processGeneration = 0;
+  private startPromise: Promise<void> | null = null;
+  private destroyPromise: Promise<void> | null = null;
+  private cancelStartup: (() => void) | null = null;
+  private restartTail: Promise<void> = Promise.resolve();
+  private restartEpoch = 0;
 
   constructor(options: PiAgentClientOptions) {
     super();
@@ -399,6 +436,20 @@ export class PiAgentClient extends EventEmitter {
    */
   async start(): Promise<void> {
     if (this.destroyed) throw new Error("Client destroyed");
+    if (this.startPromise) return this.startPromise;
+    if (this.isRunning()) return;
+    const pending = Promise.resolve().then(() => this.startInternal());
+    this.startPromise = pending;
+    try { await pending; } finally {
+      if (this.startPromise === pending) this.startPromise = null;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
+    if (this.destroyed) throw new Error("Client destroyed");
+    const generation = ++this.processGeneration;
+    this.buffer = "";
+    this.decoder = new StringDecoder("utf8");
 
     const args = ["--mode", "rpc"];
 
@@ -475,48 +526,69 @@ export class PiAgentClient extends EventEmitter {
         if (resolved) {
           executable = resolved.cmd;
           execArgs = [...resolved.scriptArgs, ...args];
+          if (resolved.nodePath && process.platform !== "win32") {
+            // A shell launcher may invoke /usr/bin/env node. Resolving Node
+            // alone is insufficient unless its directory reaches the child.
+            env.PATH = piChildPath(env.PATH || "", resolved.nodePath);
+          }
         }
         const child = spawn(executable, execArgs, spawnOptions);
 
         this.process = child;
+        const isCurrent = () => this.process === child && this.processGeneration === generation && !this.destroyed;
 
         let settled = false;
+        let readyTimer: number | undefined;
 
         const settle = (err?: Error) => {
           if (settled) return;
           settled = true;
+          if (readyTimer !== undefined) window.clearTimeout(readyTimer);
+          if (this.cancelStartup === cancel) this.cancelStartup = null;
           if (err) reject(err instanceof Error ? err : new Error(String(err)));
           else resolve();
         };
+        const cancel = () => settle(new Error("Client destroyed during startup"));
+        this.cancelStartup = cancel;
 
         // Handle stdout (events and responses)
         child.stdout!.on("data", (chunk: Buffer) => {
-          this.handleData(chunk);
+          if (isCurrent()) this.handleData(chunk, generation);
         });
 
         // Handle stderr
         child.stderr!.on("data", (chunk: Buffer) => {
-          console.error("[pi-agent stderr]", chunk.toString());
+          if (isCurrent()) console.warn(`[pi-agent] stderr received (${chunk.length} bytes; content omitted)`);
         });
 
         // Handle process exit
         child.on("error", (err) => {
-          console.error("[pi-agent] Process error:", err);
+          if (!isCurrent()) return;
+          this.rejectPending(new Error("Pi process failed"));
           if (!settled) settle(err);
           else this.emit("error", err);
         });
 
+        child.stdin?.on("error", () => {
+          if (isCurrent()) this.rejectPending(new Error("Pi input pipe failed"));
+        });
+
         child.on("close", (code) => {
-          console.log(`[pi-agent] Process closed with code ${code}`);
+          if (!isCurrent()) return;
+          this.process = null;
+          this.buffer = "";
+          this.decoder = new StringDecoder("utf8");
+          this.rejectPending(new Error(`Pi process exited (${code ?? "signal"})`));
           if (!settled) settle(new Error(`pi exited with code ${code}`));
           else this.emit("close");
-          this.process = null;
         });
 
         // Consider ready after a short delay (pi initializes)
         // 150ms 给 pi 足够时间完成工具加载和模型绑定，避免下一个 RPC
         // 命令与初始化指令重载。Node 管道 buffer 会保留前面写入的指令。
-        window.setTimeout(() => settle(), 150);
+        readyTimer = window.setTimeout(() => {
+          if (isCurrent()) settle(); else cancel();
+        }, 150);
       } catch (err) {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -526,11 +598,12 @@ export class PiAgentClient extends EventEmitter {
   /**
    * Handle incoming data from pi stdout
    */
-  private handleData(chunk: Buffer): void {
+  private handleData(chunk: Buffer, generation = this.processGeneration): void {
     this.buffer +=
       typeof chunk === "string" ? chunk : this.decoder.write(chunk);
 
     while (true) {
+      if (generation !== this.processGeneration) return;
       const newlineIndex = this.buffer.indexOf("\n");
       if (newlineIndex === -1) break;
 
@@ -561,7 +634,7 @@ export class PiAgentClient extends EventEmitter {
           this.emit("event", parsed as RpcEvent);
         }
       } catch (err) {
-        console.error("[pi-agent] Failed to parse JSON line:", line, err);
+        console.warn(`[pi-agent] Invalid JSON frame (${line.length} characters; content omitted)`);
       }
     }
   }
@@ -595,7 +668,13 @@ export class PiAgentClient extends EventEmitter {
 
       const payload = JSON.stringify(command) + "\n";
       try {
-        this.process!.stdin!.write(payload);
+        this.process!.stdin!.write(payload, (error?: Error | null) => {
+          const pending = this.pendingRequests.get(id);
+          if (!error || !pending) return;
+          this.pendingRequests.delete(id);
+          window.clearTimeout(pending.timeout);
+          pending.reject(new Error("Pi command could not be written"));
+        });
       } catch (err) {
         this.pendingRequests.delete(id);
         window.clearTimeout(timeout);
@@ -907,44 +986,96 @@ export class PiAgentClient extends EventEmitter {
    * Check if the process is running
    */
   isRunning(): boolean {
-    return this.process !== null && !this.process.killed;
+    return this.process !== null && !this.process.killed
+      && this.process.exitCode === null && this.process.signalCode === null;
   }
 
   /**
    * Restart the pi process (e.g., after settings change)
    */
   async restart(): Promise<void> {
-    await this.destroy();
-    this.destroyed = false;
-    await this.start();
+    const epoch = this.restartEpoch;
+    const operation = this.restartTail.then(async () => {
+      if (epoch !== this.restartEpoch) throw new Error("Restart cancelled by client shutdown");
+      await this.disposeProcess();
+      if (epoch !== this.restartEpoch) throw new Error("Restart cancelled by client shutdown");
+      this.destroyed = false;
+      await this.start();
+    });
+    this.restartTail = operation.catch(() => undefined);
+    return operation;
   }
 
   /**
    * Destroy the client and kill the process
    */
   async destroy(): Promise<void> {
-    if (this.destroyed) return;
-    this.destroyed = true;
+    ++this.restartEpoch;
+    return this.disposeProcess();
+  }
 
-    // Reject all pending requests
+  private async disposeProcess(): Promise<void> {
+    if (this.destroyPromise) return this.destroyPromise;
+    const pending = this.destroyInternal();
+    this.destroyPromise = pending;
+    try { await pending; } finally {
+      if (this.destroyPromise === pending) this.destroyPromise = null;
+    }
+  }
+
+  private async destroyInternal(): Promise<void> {
+    if (this.destroyed && !this.process) return;
+    this.destroyed = true;
+    ++this.processGeneration;
+    this.cancelStartup?.();
+    this.buffer = "";
+    this.decoder = new StringDecoder("utf8");
+    this.rejectPending(new Error("Client destroyed"));
+    const child = this.process;
+    this.process = null;
+    if (child) {
+      try { await this.terminateChild(child); } catch (error) {
+        // Keep a failed termination available for an explicit later cleanup.
+        if (!this.process) this.process = child;
+        throw error;
+      }
+    }
+    if (this.startPromise) await this.startPromise.catch(() => undefined);
+  }
+
+  private rejectPending(error: Error): void {
     for (const [, pending] of this.pendingRequests) {
       window.clearTimeout(pending.timeout);
-      pending.reject(new Error("Client destroyed"));
+      pending.reject(error);
     }
     this.pendingRequests.clear();
 
-    if (this.process) {
-      const p = this.process;
-      this.process = null;
+  }
 
-      if (!p.killed) {
-        p.kill("SIGTERM");
-        // Give it a moment to exit gracefully
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        if (!p.killed) {
-          p.kill("SIGKILL");
-        }
-      }
-    }
+  private terminateChild(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let timer: number;
+      let finished = false;
+      const finish = (error?: Error) => {
+        if (finished) return;
+        finished = true;
+        window.clearTimeout(timer);
+        child.removeListener("close", onClose);
+        if (error) reject(error); else resolve();
+      };
+      const onClose = () => finish();
+      child.once("close", onClose);
+      timer = window.setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return finish();
+        try { child.kill("SIGKILL"); } catch { return finish(new Error("Could not terminate Pi process")); }
+        if (finished) return;
+        timer = window.setTimeout(() => {
+          if (child.exitCode !== null || child.signalCode !== null) finish();
+          else finish(new Error("Pi process did not exit after SIGKILL"));
+        }, 500);
+      }, 500);
+      try { child.kill("SIGTERM"); } catch { finish(new Error("Could not terminate Pi process")); }
+    });
   }
 }

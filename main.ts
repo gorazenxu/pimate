@@ -493,6 +493,7 @@ export default class PiAgentPlugin extends Plugin {
 
     // Reveal the leaf
     if (leaf) {
+      await workspace.revealLeaf(leaf);
       workspace.setActiveLeaf(leaf);
     }
 

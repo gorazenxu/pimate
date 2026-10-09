@@ -4,7 +4,8 @@ import { PI_AGENT_VIEW_TYPE } from "./PiAgentView";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { exec } from "child_process";
+import { runSkillsCommand } from "./SkillsCommand";
+import { updatePiAuthFile } from "./PiAuthFile";
 import { AgyAgentClient, type AgyQuotaStatus } from "./AgyAgentClient";
 import {
   installAgyAccountBridge,
@@ -207,24 +208,13 @@ export class PiAgentSettingTab extends PluginSettingTab {
         ? (data as Record<string, any>)
         : {};
     } catch (e) {
-      console.error("读取 auth.json 失败:", e);
+      console.warn("[pimate] Could not read auth configuration; contents omitted");
       return {};
     }
   }
 
-  private writeAuthData(
-    filePath: string,
-    data: Record<string, any>
-  ): void {
-    try {
-      const dirPath = path.dirname(filePath);
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-      }
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("写入 auth.json 失败:", e);
-    }
+  private removeAuthProvider(provider: string): void {
+    updatePiAuthFile(this.getAuthJsonPath(), data => { delete data[provider]; });
   }
 
   // 辅助方法：获取 models.json 的绝对路径（自定义 provider 定义）
@@ -302,19 +292,11 @@ export class PiAgentSettingTab extends PluginSettingTab {
     }
 
     const filePath = this.getAuthJsonPath();
-    const data = this.readAuthData(filePath);
-
     const trimmedKey = apiKey.trim();
-    if (!trimmedKey) {
-      delete data[provider];
-    } else {
-      data[provider] = {
-        type: "api_key",
-        key: trimmedKey
-      };
-    }
-
-    this.writeAuthData(filePath, data);
+    updatePiAuthFile(filePath, data => {
+      if (!trimmedKey) delete data[provider];
+      else data[provider] = { type: "api_key", key: trimmedKey };
+    });
   }
 
   private writeOAuthCredentials(
@@ -322,9 +304,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     credentials: OpenAICodexOAuthCredentials
   ): void {
     const filePath = this.getAuthJsonPath();
-    const data = this.readAuthData(filePath);
-    data[provider] = credentials;
-    this.writeAuthData(filePath, data);
+    updatePiAuthFile(filePath, data => { data[provider] = credentials; });
   }
 
   // 获取全局 skills 物理路径
@@ -467,10 +447,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     const adapter = this.app.vault.adapter as any;
     const basePath = adapter.basePath || "";
     const isGlobal = scope === "global";
-    const cmd = `npx skills add ${pkgName.trim()} -y --agent pi${isGlobal ? " -g" : ""}`;
-    const fullCmd = os.platform() === "win32" ? `chcp 65001 >nul && ${cmd}` : cmd;
-
-    exec(fullCmd, { cwd: basePath || undefined }, (error, stdout, stderr) => {
+    runSkillsCommand("add", pkgName, { cwd: basePath || undefined, global: isGlobal }, (error, stdout, stderr) => {
       if (error) {
         callback(stderr.trim() || error.message || "安装失败", stdout + stderr);
       } else {
@@ -501,10 +478,14 @@ export class PiAgentSettingTab extends PluginSettingTab {
     } catch (e) {
       console.warn("skills.sh search failed, falling back to local search:", e);
       return new Promise((resolve) => {
-        const isWin = process.platform === "win32";
-        const baseCmd = `npx skills find ${query.trim()}`;
-        const cmd = isWin ? `chcp 65001 >nul && ${baseCmd}` : baseCmd;
-        exec(cmd, { timeout: 15000 }, (err: any, stdout: string, stderr: string) => {
+        runSkillsCommand("find", query, {}, (err, stdout, stderr) => {
+          if (err) {
+            new Notice(this.plugin.settings.language === "zh"
+              ? "技能搜索失败或超时，请稍后重试。"
+              : "Skill search failed or timed out; please retry later.");
+            resolve([]);
+            return;
+          }
           const raw = stdout + stderr;
           const ansiEscape = String.fromCharCode(27);
           const clean = raw.replace(new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g"), "");
@@ -1194,7 +1175,14 @@ export class PiAgentSettingTab extends PluginSettingTab {
     );
     if (migratedOpenAICodex) {
       authData["openai-codex"] = migratedOpenAICodex;
-      this.writeAuthData(authPath, authData);
+      try {
+        updatePiAuthFile(authPath, current => {
+          const migrated = migrateLegacyOpenAICodexCredential(current["openai-codex"]);
+          if (migrated) current["openai-codex"] = migrated;
+        });
+      } catch {
+        new Notice(isZh ? "凭证迁移保存失败，原文件已保留。" : "Credential migration could not be saved; the original file was kept.");
+      }
     }
 
     // 读取 models.json 的自定义 provider
@@ -1710,8 +1698,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         btn.buttonEl.addClass("mod-warning");
         btn.onClick(() => {
           void (async () => {
-            delete authData[id];
-            fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+            this.removeAuthProvider(id);
             this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
             this.display();
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
@@ -1762,9 +1749,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
           }
         }
       };
-      text.inputEl.addEventListener("blur", () => void saveValue());
+      const save = () => void saveValue().catch(() => new Notice(isZh
+        ? "凭证保存或客户端更新失败，请检查配置后重试。"
+        : "Credential save or client update failed; check configuration and retry."));
+      text.inputEl.addEventListener("blur", save);
       text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.key === "Enter") { e.preventDefault(); void saveValue(); }
+        if (e.key === "Enter") { e.preventDefault(); save(); }
       });
     });
 
@@ -1773,8 +1763,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
       btn.buttonEl.addClass("mod-warning");
       btn.onClick(() => {
         void (async () => {
-          delete authData[id];
-          fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+          this.removeAuthProvider(id);
           this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
           this.display();
           const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
@@ -1850,9 +1839,12 @@ export class PiAgentSettingTab extends PluginSettingTab {
           }
         }
       };
-      text.inputEl.addEventListener("blur", () => void saveValue());
+      const save = () => void saveValue().catch(() => new Notice(isZh
+        ? "凭证保存或客户端更新失败，请检查配置后重试。"
+        : "Credential save or client update failed; check configuration and retry."));
+      text.inputEl.addEventListener("blur", save);
       text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.key === "Enter") { e.preventDefault(); void saveValue(); }
+        if (e.key === "Enter") { e.preventDefault(); save(); }
       });
     });
 
@@ -1871,13 +1863,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           this.writeModelsJson(providers);
           // 同步删 auth.json
           const aPath = this.getAuthJsonPath();
-          if (fs.existsSync(aPath)) {
-            try {
-              const a = JSON.parse(fs.readFileSync(aPath, "utf-8")) || {};
-              delete a[id];
-              fs.writeFileSync(aPath, JSON.stringify(a, null, 2), "utf-8");
-            } catch (e) { console.error("清理 auth.json 失败:", e); }
-          }
+          if (fs.existsSync(aPath)) this.removeAuthProvider(id);
           this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
           this.display();
           const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
