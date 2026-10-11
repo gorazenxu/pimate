@@ -38,6 +38,7 @@ git diff --check
 另外确认：
 
 - `manifest.json`、`versions.json`、`package.json` 的版本号一致。
+- 新增或修改 Obsidian API 调用时，核对官方类型定义中的 `@since` 与 `manifest.json` 的 `minAppVersion`；新版本的 `versions.json` 映射和 README 最低版本说明必须同步，保留已发布版本的历史映射。构建通过不代表最低版本兼容检查通过。
 - 发布包中的 `main.js`、`styles.css` 与当前源码构建结果一致。
 - 不把真实 Vault 内容、个人信息或本地绝对路径放入 README、SVG、截图和示例数据。
 - 若 Obsidian Community 审核页面出现 Error，先修复 Error，再处理 Warning/Recommendation；发布新版本，不覆盖已发布版本。

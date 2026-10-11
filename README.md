@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/gorazenxu/pimate/releases"><img src="https://img.shields.io/github/v/release/gorazenxu/pimate?color=7057ff&label=Release" alt="Release"></a>
-  <img src="https://img.shields.io/badge/Obsidian-Desktop%20%E2%89%A51.5.0-purple?logo=obsidian" alt="Obsidian Version">
+  <img src="https://img.shields.io/badge/Obsidian-Desktop%20%E2%89%A51.7.2-purple?logo=obsidian" alt="Obsidian Version">
   <img src="https://img.shields.io/badge/Engine-Pi%20%7C%20Antigravity-orange" alt="Engines">
   <img src="https://img.shields.io/badge/License-GPL%20v3.0-blue" alt="License">
 </p>

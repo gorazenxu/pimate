@@ -10,6 +10,14 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
+## 📦 v1.1.23
+
+- 兼容：最低 Obsidian 版本由 1.5.0 提升至 1.7.2，与侧栏展开使用的 `workspace.revealLeaf()` 当前 API 定义一致，修正 Community 审核的 `obsidianmd/no-unsupported-api` 阻断项。
+- 文档：同步版本映射、开发依赖声明和 README；不改动运行逻辑或已发布版本的记录。
+- 检查：发布规则新增 Obsidian API `@since` 与最低版本声明的核对项。
+
+---
+
 ## 📦 v1.1.19
 
 - 新：AGY 设置页可选显示 Google 登录邮箱，通过 AGY 官方状态栏数据获取，不读取 OAuth Token。
