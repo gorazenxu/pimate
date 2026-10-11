@@ -326,3 +326,32 @@ test("view close cleans every client even if session saving and one destroy fail
   assert.equal(v.client, null); assert.ok(v.tabs.every(t => t.client === null));
   assert.equal(v.viewClosed, true);
 });
+
+test("AGY history keeps full total and can page to the very first message", async () => {
+  const messages = Array.from({ length: 245 }, (_, i) => ({ role: "user", content: `history ${i}` }));
+  const limits = [];
+  const c = { engine: "antigravity", getMessages: async ({ limit }) => {
+    limits.push(limit);
+    const selected = limit > 0 ? messages.slice(-limit) : messages;
+    return { success: true, data: { messages: selected, totalMessages: selected.length } };
+  } };
+  const { v, tab } = view(c);
+  v.plugin.settings.maxHistoryDisplay = 100;
+  tab.sessionFile = "/synthetic/agy/transcript.jsonl";
+  v.readLastMessagesFromFile = () => { throw new Error("Must not use Pi parser for AGY"); };
+  v.renderMessageFromHistory = (msg, options = {}) => {
+    if (options.prependHistory) v.renderedMessages.splice(v.historyPrependInsertIndex++, 0, msg);
+    else v.renderedMessages.push(msg);
+  };
+  await v.loadMessages();
+  assert.deepEqual(limits, [0]);
+  assert.equal(v.historyTotalCount, 245);
+  assert.equal(v.historyShownCount, 100);
+  assert.deepEqual(v.renderedMessages, messages.slice(-100));
+  await v.loadMoreHistory(50);
+  assert.deepEqual(v.renderedMessages, messages.slice(-150));
+  await v.loadMoreHistory(v.historyTotalCount);
+  assert.deepEqual(v.renderedMessages, messages);
+  assert.equal(v.historyShownCount, 245);
+  assert.deepEqual(limits, [0], "paging uses the same snapshot, no duplicate transcript reads");
+});

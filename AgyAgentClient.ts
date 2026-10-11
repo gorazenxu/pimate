@@ -435,7 +435,7 @@ export class AgyAgentClient extends EventEmitter {
     const alreadyLoaded =
       this.historyLoadedConversationId === this.conversationId &&
       this.historyLoadedLimit !== null &&
-      (this.historyLoadedLimit === 0 || this.historyLoadedLimit >= requestedLimit) &&
+      (this.historyLoadedLimit === 0 || (requestedLimit > 0 && this.historyLoadedLimit >= requestedLimit)) &&
       !this.historyNeedsReload;
     if (!this.conversationId || alreadyLoaded) {
       return;

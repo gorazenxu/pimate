@@ -280,8 +280,8 @@ export class PiAgentView extends ItemView {
   private historyBannerEl: HTMLElement | null = null;
   private historyPrependAnchorEl: HTMLElement | null = null;
   private historyPrependInsertIndex = 0;
-  // When history comes from Pi's session tree, retain the complete active
-  // branch so paging never falls back to a flattened JSONL file.
+  // Retain the complete Pi active branch or AGY transcript snapshot so
+  // paging never falls back to Pi's flattened JSONL parser.
   private activeBranchHistory: any[] | null = null;
   // Session previews only need the beginning of each JSONL file. Cache them
   // until the file changes so opening/closing the history panel is cheap.
@@ -7730,7 +7730,7 @@ export class PiAgentView extends ItemView {
     // can contend with live generation on the same subprocess and make large
     // model replies feel slower; missed live deltas are recovered by
     // ensureAssistantStreamMessage().
-    if (!options.forceRpc && filePath) {
+    if (!options.forceRpc && filePath && client.engine !== "antigravity") {
       const fileResult = this.readLastMessagesFromFile(filePath, limit);
       if (fileResult.total > 0) {
         messages = fileResult.messages;
@@ -7741,12 +7741,17 @@ export class PiAgentView extends ItemView {
     if (!options.forceRpc && !usedFile) {
       try {
         const result = client.engine === "antigravity"
-          ? await (client as AgyAgentClient).getMessages({ limit })
+          ? await (client as AgyAgentClient).getMessages({ limit: 0 })
           : await client.getMessages();
         if (!isCurrentRequest()) return;
         if (result.success && result.data) {
           const rpcMessages = (result.data as any).messages;
           if (!Array.isArray(rpcMessages)) throw new Error("Invalid history response");
+          // AGY's limited tail cannot report a reliable total. Retain the
+          // complete transcript snapshot for paging, but render only the last
+          // N records initially. Do not feed AGY transcript paths to Pi's
+          // JSONL parser when loading earlier records.
+          if (client.engine === "antigravity") branchHistory = rpcMessages;
           const reportedTotal = Number((result.data as any).totalMessages);
           total = Number.isFinite(reportedTotal) && reportedTotal >= rpcMessages.length
             ? reportedTotal

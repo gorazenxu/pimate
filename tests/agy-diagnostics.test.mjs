@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { Module } from "node:module";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
@@ -45,6 +47,44 @@ function terminal(client, status, error = "", response) {
   client.handleAgyEvent({ event: "result", result: { status, error, response } });
 }
 const errors = (events) => events.filter(e => e.assistantMessageEvent?.type === "error").map(e => e.assistantMessageEvent);
+
+test("requesting full AGY history upgrades a previously limited cache", async () => {
+  const client = new AgyAgentClient({ trackUsage: false });
+  client.conversationId = "synthetic-history";
+  const messages = Array.from({ length: 230 }, (_, i) => ({ role: "user", content: `history ${i}` }));
+  const reads = [];
+  client.loadTranscriptHistory = limit => {
+    reads.push(limit);
+    return limit > 0 ? messages.slice(-limit) : messages;
+  };
+  assert.equal((await client.getMessages({ limit: 100 })).data.messages.length, 100);
+  const full = await client.getMessages({ limit: 0 });
+  assert.equal(full.data.messages.length, 230);
+  assert.equal(full.data.partialHistory, false);
+  assert.deepEqual(full.data.messages, messages);
+  await client.getMessages({ limit: 0 });
+  assert.deepEqual(reads, [100, 0]);
+});
+
+test("full history restores records beyond the 2MB AGY transcript tail", async t => {
+  const dir = await fs.mkdtemp(join(tmpdir(), "pimate-history-test-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const client = new AgyAgentClient({ trackUsage: false });
+  client.conversationId = "synthetic-session";
+  client.getAgyDataDir = () => dir;
+  const logDir = join(dir, "brain", "synthetic-session", ".system_generated", "logs");
+  await fs.mkdir(logDir, { recursive: true });
+  const entries = Array.from({ length: 240 }, (_, i) => ({
+    type: "USER_INPUT", content: `record-${i}:` + "x".repeat(12000),
+  }));
+  await fs.writeFile(join(logDir, "transcript.jsonl"), entries.map(e => JSON.stringify(e)).join("\n") + "\n");
+  const limited = await client.getMessages({ limit: 100 });
+  assert.equal(limited.data.messages.length, 100);
+  const full = await client.getMessages({ limit: 0 });
+  assert.equal(full.data.messages.length, 240);
+  assert.equal(full.data.messages[0].content[0].text, entries[0].content);
+  assert.equal(full.data.messages.at(-1).content[0].text, entries.at(-1).content);
+});
 
 test("stream interruption and remote cancellation never imply a local Stop", () => {
   for (const [reason, status, expected] of [
