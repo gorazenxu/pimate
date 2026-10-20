@@ -62,6 +62,7 @@ import {
   getAgyRequestStorePath,
 } from "./AgyRequestStore";
 import { normalizeAgyFileLinks } from "./AgyFileLinkUtils";
+import { getMessageImages, stripPiImageDimensionNotes } from "./PimateMessageImages";
 import {
   getVaultFileExtension,
   getVaultFileIcon,
@@ -1812,27 +1813,30 @@ export class PiAgentView extends ItemView {
         typeof message.content === "string"
           ? message.content
           : message.content
-              ?.map((c) => c.text || c.thinking || "")
+              ?.map((c) => c?.text || c?.thinking || "")
               .join("") || "";
-      const pendingIndex = this.findPendingQueuedMessage(content);
+      const nativeImages = getMessageImages(message.content);
+      const visibleContent = stripPiImageDimensionNotes(content, nativeImages.length);
+      const pendingIndex = this.findPendingQueuedMessage(visibleContent);
       if (pendingIndex !== -1) {
         const [pending] = this.pendingQueuedMessages.splice(pendingIndex, 1);
         pending.rendered.el.removeClass("is-queued");
         if (this.parseExpandedSkillMessage(content)) {
-          this.renderUserMessageContent(pending.rendered.el, pending.rendered.contentEl, content);
+          this.renderUserMessageContent(pending.rendered.el, pending.rendered.contentEl, visibleContent);
         }
+        if (nativeImages.length > 0) this.renderUserMessageImages(pending.rendered, nativeImages);
         pending.rendered.el.setAttribute("data-rpc-message", content);
         if (tab) tab.pendingUserImages = [];
         this.updateButtons();
         return;
       }
 
-      const rendered = this.addMessage("user", this.stripRecentContextGuard(content));
-      // Attach any images that were sent with this message to the bubble.
-      if (tab?.pendingUserImages?.length) {
-        this.renderUserMessageImages(rendered, tab.pendingUserImages);
-        tab.pendingUserImages = [];
-      }
+      const rendered = this.addMessage("user", this.stripRecentContextGuard(visibleContent));
+      // Prefer Pi's authoritative normalized image blocks. Pending originals
+      // remain a fallback for older Pi echoes and AGY's text-only adapter.
+      const images = nativeImages.length > 0 ? nativeImages : tab?.pendingUserImages || [];
+      if (images.length > 0) this.renderUserMessageImages(rendered, images);
+      if (tab) tab.pendingUserImages = [];
     } else if (message.role === "assistant") {
       this.currentAssistantMsg = this.addMessage("assistant", "");
       this.currentTextBlock = null;
@@ -7281,13 +7285,24 @@ export class PiAgentView extends ItemView {
     msg: RenderedMessage,
     images: Array<{ data: string; mimeType: string }>
   ): void {
-    const attachments = msg.el.createDiv("pi-agent-message-attachments");
+    // An optimistic queued bubble may already have previews when Pi echoes
+    // its normalized images. Reuse its attachment row instead of duplicating it.
+    const existing = Array.from(msg.el.children).find((child) =>
+      child.classList.contains("pi-agent-message-attachments")
+    ) as HTMLElement | undefined;
+    const attachments = existing ?? msg.el.createDiv("pi-agent-message-attachments");
+    attachments.empty();
     // Move the attachments block above the text content.
     msg.el.insertBefore(attachments, msg.contentEl);
     for (const img of images) {
       const card = attachments.createDiv("pi-agent-message-image");
       const el = card.createEl("img", {
-        attr: { src: `data:${img.mimeType || "image/png"};base64,${img.data}` },
+        attr: {
+          src: `data:${img.mimeType || "image/png"};base64,${img.data}`,
+          alt: "Attached image",
+          loading: "lazy",
+          decoding: "async",
+        },
       });
       el.onclick = (e) => {
         e.stopPropagation();
@@ -7920,9 +7935,12 @@ export class PiAgentView extends ItemView {
         typeof msg.content === "string"
           ? msg.content
           : Array.isArray(msg.content)
-            ? msg.content.map((c: any) => c.text || "").join("")
+            ? msg.content.map((c: any) => c?.text || "").join("")
             : "";
-      this.addMessage("user", this.stripRecentContextGuard(content), messageOptions);
+      const images = getMessageImages(msg.content);
+      const visibleContent = stripPiImageDimensionNotes(content, images.length);
+      const rendered = this.addMessage("user", this.stripRecentContextGuard(visibleContent), messageOptions);
+      if (images.length > 0) this.renderUserMessageImages(rendered, images);
     } else if (msg.role === "compactionSummary") {
       this.addCompactionSummaryMessage(msg.summary || "", msg.tokensBefore, "Context compacted", options);
     } else if (msg.role === "branchSummary") {
