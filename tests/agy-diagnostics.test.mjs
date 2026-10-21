@@ -220,7 +220,9 @@ test("invalidating AGY history reloads the native transcript after a tab switch"
   ];
   client.invalidateHistoryCache();
   const reloaded = (await client.getMessages({ limit: 100 })).data.messages;
-  assert.equal(loads, 2);
+  // Before sending, upgrade the initial limited read to a complete baseline
+  // so identical user prompts can be matched to their actual native turn.
+  assert.equal(loads, 3);
   assert.equal(
     reloaded.filter((message) => message.role === "assistant").length,
     1

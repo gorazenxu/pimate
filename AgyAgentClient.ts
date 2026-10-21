@@ -18,6 +18,13 @@ import { calculateAgyCost, getAgyAccountingTotal } from "./AgyPricing";
 import { AgyUsageStore } from "./AgyUsageStore";
 import { AgyRequestStore } from "./AgyRequestStore";
 import { AgyDiagnosticStore, classifyAgyFailure, sanitizeAgyDiagnostic, type AgyFailureCategory } from "./AgyDiagnostics";
+import {
+  mergeAgyHistory,
+  normalizeAgyUserText,
+  type AgyHistoryBlock,
+  type AgyHistoryMessage,
+  type AgyHistoryOverlayTurn,
+} from "./AgyHistoryMerge";
 
 export interface AgyAgentClientOptions {
   agyPath?: string;
@@ -65,30 +72,6 @@ export interface AgyQuotaStatus {
   groups: AgyQuotaGroup[];
   fetchedAt: number;
 }
-
-type AgyHistoryBlock =
-  | { type: "text"; text: string }
-  | { type: "thinking"; thinking: string }
-  | {
-      type: "toolCall";
-      id: string;
-      name: string;
-      arguments: Record<string, unknown>;
-    };
-
-type AgyHistoryMessage =
-  | {
-      role: "user" | "assistant";
-      content: AgyHistoryBlock[];
-    }
-  | {
-      role: "toolResult";
-      toolName: string;
-      toolCallId: string;
-      content: string;
-      isError?: boolean;
-      details?: Record<string, unknown>;
-    };
 
 type AgyPromptOptions = {
   streamingBehavior?: "steer" | "followUp";
@@ -244,10 +227,12 @@ export class AgyAgentClient extends EventEmitter {
   private historyLoadedConversationId: string | null = null;
   private historyLoadedLimit: number | null = null;
   private historyIsPartial = false;
-  // A failed AGY turn can be written to the native transcript slightly after
-  // the stream reports its terminal error. Keep the locally observed reply as
-  // a small overlay until a later transcript read confirms it is persisted.
-  private historyOverlayMessages: AgyHistoryMessage[] = [];
+  // Keep native snapshots separate from unconfirmed local turns: rereading a
+  // stale or temporarily unavailable transcript must never confirm our own
+  // in-memory overlay as if it had already persisted.
+  private historyNativeMessages: AgyHistoryMessage[] = [];
+  private historyOverlayTurns: AgyHistoryOverlayTurn[] = [];
+  private activeHistoryTurn: AgyHistoryOverlayTurn | null = null;
   private historyNeedsReload = false;
   private toolCallStates = new Map<string, "active" | "done">();
 
@@ -370,9 +355,7 @@ export class AgyAgentClient extends EventEmitter {
           const entry = JSON.parse(line);
           if (entry.type === "USER_INPUT" && entry.content) {
             pendingToolCalls.length = 0;
-            let text = String(entry.content);
-            const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
-            if (reqMatch) text = reqMatch[1].trim();
+            const text = normalizeAgyUserText(String(entry.content));
             messages.push({
               role: "user",
               content: [{ type: "text", text }],
@@ -440,25 +423,13 @@ export class AgyAgentClient extends EventEmitter {
     if (!this.conversationId || alreadyLoaded) {
       return;
     }
-    const persistedMessages = this.loadTranscriptHistory(requestedLimit);
-    // If AGY has not flushed a just-finished turn yet, do not throw away the
-    // current in-memory history. Once the transcript contains messages, it is
-    // authoritative and the overlay below fills only the still-missing tail.
-    const sourceMessages = persistedMessages.length > 0 || this.historyMessages.length === 0
-      ? persistedMessages
-      : this.historyMessages;
-    const mergedMessages = [...sourceMessages];
-    const seen = new Set(mergedMessages.map((message) => this.historyMessageKey(message)));
-    const remainingOverlays: AgyHistoryMessage[] = [];
-    for (const overlay of this.historyOverlayMessages) {
-      const key = this.historyMessageKey(overlay);
-      if (!seen.has(key)) {
-        mergedMessages.push(overlay);
-        seen.add(key);
-        remainingOverlays.push(overlay);
-      }
-    }
-    this.historyOverlayMessages = remainingOverlays;
+    // Turn ordinals require a complete native baseline. Limited UI callers
+    // still receive a tail below, but cannot match a new "OK" to an old one.
+    const persistedMessages = this.loadTranscriptHistory(this.historyOverlayTurns.length ? 0 : requestedLimit);
+    if (persistedMessages.length > 0) this.historyNativeMessages = persistedMessages;
+    const merged = mergeAgyHistory(this.historyNativeMessages, this.historyOverlayTurns);
+    const mergedMessages = merged.messages;
+    this.historyOverlayTurns = merged.pendingTurns;
     this.historyMessages = requestedLimit > 0
       ? mergedMessages.slice(-requestedLimit)
       : mergedMessages;
@@ -466,14 +437,6 @@ export class AgyAgentClient extends EventEmitter {
     this.historyLoadedLimit = requestedLimit;
     this.historyIsPartial = requestedLimit > 0;
     this.historyNeedsReload = false;
-  }
-
-  private historyMessageKey(message: AgyHistoryMessage): string {
-    try {
-      return JSON.stringify(message);
-    } catch {
-      return `${message.role}:${String(message.content)}`;
-    }
   }
 
   private buildAssistantHistoryBlocks(
@@ -487,24 +450,30 @@ export class AgyAgentClient extends EventEmitter {
   }
 
   /**
-   * Keep model output visible across a terminal AGY error and a tab switch.
-   * This is deliberately a history overlay, not a success marker: the UI
-   * still receives the real error and retry safety remains unchanged.
+   * Keep both successful and failed replies beside their originating input
+   * until AGY has flushed that turn. This never marks a failed turn successful.
    */
   private rememberAssistantHistory(text: string, thinking = this.lastAssistantThinking): void {
     const blocks = this.buildAssistantHistoryBlocks(text, thinking);
+    const turn = this.activeHistoryTurn;
+    if (!turn) return;
+    turn.completed = true;
     if (blocks.length === 0) return;
     const message: AgyHistoryMessage = { role: "assistant", content: blocks };
-    const key = this.historyMessageKey(message);
-    if (
-      this.historyMessages.some((existing) => this.historyMessageKey(existing) === key) ||
-      this.historyOverlayMessages.some((existing) => this.historyMessageKey(existing) === key)
-    ) {
-      return;
-    }
-    this.historyMessages.push(message);
-    this.historyOverlayMessages.push(message);
+    if (turn.assistant) {
+      const index = this.historyMessages.indexOf(turn.assistant);
+      if (index >= 0) this.historyMessages[index] = message;
+    } else this.historyMessages.push(message);
+    turn.assistant = message;
     this.historyNeedsReload = true;
+  }
+
+  private discardUnsentHistoryTurn(): void {
+    const turn = this.activeHistoryTurn;
+    if (!turn) return;
+    this.historyMessages = this.historyMessages.filter(message => message !== turn.user);
+    this.historyOverlayTurns = this.historyOverlayTurns.filter(overlay => overlay !== turn);
+    this.activeHistoryTurn = null;
   }
 
   private emitQueueUpdate(): void {
@@ -610,7 +579,9 @@ export class AgyAgentClient extends EventEmitter {
 
   private resetHistoryCache(): void {
     this.historyMessages = [];
-    this.historyOverlayMessages = [];
+    this.historyNativeMessages = [];
+    this.historyOverlayTurns = [];
+    this.activeHistoryTurn = null;
     this.historyLoadedConversationId = null;
     this.historyLoadedLimit = null;
     this.historyIsPartial = false;
@@ -1103,10 +1074,7 @@ export class AgyAgentClient extends EventEmitter {
         this.retryablePrompt = null;
         const responseText = result.response || this.lastAssistantText;
         const blocks = this.buildAssistantHistoryBlocks(responseText);
-        this.historyMessages.push({
-          role: "assistant",
-          content: blocks,
-        });
+        this.rememberAssistantHistory(responseText);
 
         this.emit("event", {
           type: "message_update",
@@ -1184,6 +1152,7 @@ export class AgyAgentClient extends EventEmitter {
         try {
           this.beginPrompt(nextPrompt.message, nextPrompt.options);
         } catch (err) {
+          this.discardUnsentHistoryTurn();
           this.finishActiveTurnWithError(`Failed to send queued prompt: ${(err as Error).message}`);
         }
       } else {
@@ -1312,7 +1281,7 @@ export class AgyAgentClient extends EventEmitter {
     options?: AgyPromptOptions,
     retryAttempt = 0
   ): void {
-    this.ensureHistoryLoaded();
+    this.ensureHistoryLoaded(0);
     this.lastAssistantText = "";
     this.lastAssistantThinking = "";
     this.isTurnStreaming = true;
@@ -1329,10 +1298,18 @@ export class AgyAgentClient extends EventEmitter {
       receivedUsage: false,
     };
 
-    this.historyMessages.push({
+    const user: AgyHistoryMessage = {
       role: "user",
       content: [{ type: "text", text: message }],
-    });
+    };
+    const turn: AgyHistoryOverlayTurn = {
+      ordinal: this.historyMessages.filter(entry => entry.role === "user").length + 1,
+      user,
+      completed: false,
+    };
+    this.historyMessages.push(user);
+    this.historyOverlayTurns.push(turn);
+    this.activeHistoryTurn = turn;
 
     // Emit initial stream lifecycle events for UI
     this.emit("event", { type: "turn_start" });
@@ -1447,7 +1424,7 @@ export class AgyAgentClient extends EventEmitter {
         try {
           this.beginPrompt(message, options);
         } catch (err) {
-          this.historyMessages.pop();
+          this.discardUnsentHistoryTurn();
           this.finishActiveTurnWithError(`Failed to send prompt: ${(err as Error).message}`);
           throw err;
         }
@@ -1508,7 +1485,7 @@ export class AgyAgentClient extends EventEmitter {
         success: true,
       };
     } catch (err) {
-      this.historyMessages.pop();
+      this.discardUnsentHistoryTurn();
       this.finishActiveTurnWithError(`Failed to retry prompt: ${(err as Error).message}`);
       throw err;
     }
