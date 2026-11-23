@@ -115,6 +115,34 @@ test("failed startup is cleaned up and can be retried", async () => {
   assert.equal(tab.client, replacement); assert.equal(created, 2);
 });
 
+test("selecting a replacement model for a dead Pi client preserves the session", async () => {
+  const client = fakeClient(); let destroys = 0;
+  client.destroy = async () => { destroys++; };
+  const { v, tab } = view(client);
+  tab.sessionFile = "session.jsonl"; tab.modelProvider = "removed"; tab.modelId = "old";
+  v.plugin.saveSettings = async () => {};
+  v.persistSessionTabs = async () => {};
+  v.renderActiveTabModelAndEffort = () => {};
+  await v.updateActiveTabModel("new-provider", "new-model");
+  assert.equal(destroys, 1); assert.equal(tab.client, null);
+  assert.equal(tab.sessionFile, "session.jsonl");
+  assert.equal(tab.modelProvider, "new-provider"); assert.equal(tab.modelId, "new-model");
+});
+
+test("AGY model recovery propagates startup failure rather than reporting success", async () => {
+  const { v, tab } = view();
+  tab.engine = "antigravity"; tab.sessionId = "synthetic-session";
+  tab.thinkingLevel = "high";
+  v.plugin.saveSettings = async () => {}; v.persistSessionTabs = async () => {};
+  v.renderActiveTabModelAndEffort = () => {};
+  v.ensureTabClient = async (_tab, options) => {
+    assert.equal(options.requireSessionRestore, true);
+    throw new Error("synthetic startup failure");
+  };
+  await assert.rejects(v.updateActiveTabModel("antigravity", "claude-sonnet-4-6"), /synthetic startup failure/);
+  assert.equal(tab.sessionId, "synthetic-session");
+});
+
 test("failed history preserves visible replies; successful empty history replaces them", async () => {
   for (const engine of ["pi", "antigravity"]) {
     const client = { engine, getMessages: async () => ({ success: false }) };
@@ -154,6 +182,31 @@ test("valid branch history retains authoritative empty-branch semantics", async 
   v.renderedMessages = ["old branch"];
   await v.reloadMessagesFromClient({ forceRpc: true });
   assert.deepEqual(v.renderedMessages, []);
+});
+
+test("switching back to Pi shows its cached branch before the RPC finishes", async () => {
+  const gate = deferred(), startGate = deferred();
+  const client = { engine: "pi", isRunning: () => true, getEntries: () => gate.promise };
+  const { v, tab } = view(client);
+  const other = { id: "other", engine: "antigravity", client: {}, isStreaming: false };
+  tab.sessionFile = "session.jsonl";
+  tab.historySnapshot = { client, sessionFile: tab.sessionFile, messages: ["cached"], total: 1, complete: true };
+  v.tabs.push(other); v.activeTabId = other.id; v.client = other.client;
+  Object.assign(v, { forkMessagesByEntryId: new Map(), forkScopeVersion: 0 });
+  for (const name of ["closeModelPopup", "closeEffortPopup", "saveActiveComposerState",
+    "updateEngineDisplay", "restoreComposerState", "renderTabs", "resetActiveRenderState",
+    "updateWidget", "renderActiveTabRuntimeStatus", "renderActiveTabSpeed", "updateButtons",
+    "renderActiveTabModelAndEffort"]) v[name] = () => {};
+  v.isSessionFileInCurrentWorkspace = () => true;
+  v.ensureTabClient = () => startGate.promise; v.refreshStateDisplay = async () => {};
+  v.refreshForkMessages = async () => {}; v.persistSessionTabs = async () => {};
+  v.buildActiveBranchHistory = () => ({ messages: ["fresh"], activeEntryCount: 1 });
+  const switching = v.switchToTab(tab.id);
+  assert.deepEqual(v.renderedMessages, ["cached"]);
+  startGate.resolve(); await tick();
+  gate.resolve({ success: true, data: { entries: [{}] } }); await switching;
+  assert.deepEqual(v.renderedMessages, ["fresh"]);
+  assert.deepEqual(tab.historySnapshot.messages, ["fresh"]);
 });
 
 test("current Markdown preview commits normally before fast streaming resumes", async () => {
@@ -354,4 +407,41 @@ test("AGY history keeps full total and can page to the very first message", asyn
   assert.deepEqual(v.renderedMessages, messages);
   assert.equal(v.historyShownCount, 245);
   assert.deepEqual(limits, [0], "paging uses the same snapshot, no duplicate transcript reads");
+});
+
+test("model popup still opens when an AGY tab has no running client (e.g. failed startup)", async () => {
+  const { v, tab } = view(null);
+  tab.engine = "antigravity";
+  v.setModelsCacheForEngine("antigravity", [
+    { id: "gemini-4-neon-xhigh", provider: "antigravity", name: "Gemini 4 Neon (XHigh)" },
+  ]);
+  let renderedModels = null;
+  v.renderModelPopup = (_anchor, models) => { renderedModels = models; };
+  const anchor = v.chatContainer.createDiv();
+  await v.toggleModelPopup(anchor);
+  assert.equal(renderedModels?.length, 1);
+  assert.equal(renderedModels[0].id, "gemini-4-neon-xhigh");
+});
+
+test("AGY effort options exclude off/minimal and reflect per-model xhigh/fixed budgets", () => {
+  const { v, tab } = view(null);
+  tab.engine = "antigravity";
+  tab.piModelMeta = {
+    id: "gemini-4-neon-xhigh",
+    provider: "antigravity",
+    reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh" },
+  };
+  assert.deepEqual(
+    v.buildThinkingLevelOptions(tab).options.map((o) => o.id),
+    ["low", "medium", "high", "xhigh"]
+  );
+
+  tab.piModelMeta = {
+    id: "gemini-pro-orchestrator-neon",
+    provider: "antigravity",
+    reasoning: false,
+    thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null },
+  };
+  assert.deepEqual(v.buildThinkingLevelOptions(tab).options, []);
 });

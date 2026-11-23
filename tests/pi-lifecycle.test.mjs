@@ -10,11 +10,16 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const bundle = await build({ entryPoints: [`${root}PiAgentClient.ts`], bundle: true,
   write: false, platform: "node", format: "cjs", external: ["child_process"] });
 const children = [];
+let replyToStartup = true;
 class Child extends EventEmitter {
   stdout = new EventEmitter(); stderr = new EventEmitter(); stdin = new EventEmitter();
   killed = false; exitCode = null; signalCode = null; signals = []; writes = [];
   ignoreTerm = false; ignoreKill = false;
-  constructor() { super(); this.stdin.write = (text, callback) => { this.writes.push(text); callback?.(null); }; }
+  constructor() { super(); this.stdin.write = (text, callback) => {
+    this.writes.push(text); callback?.(null);
+    const req = JSON.parse(text);
+    if (req.type === "get_state" && replyToStartup) queueMicrotask(() => this.stdout.emit("data", Buffer.from(JSON.stringify({ type: "response", id: req.id, command: req.type, success: true, data: {} }) + "\n")));
+  }; }
   close(code = 0, signal = null) { this.exitCode = code; this.signalCode = signal; this.emit("close", code); }
   kill(signal) { this.killed = true; this.signals.push(signal);
     if (!(signal === "SIGTERM" ? this.ignoreTerm : this.ignoreKill)) this.close(null, signal);
@@ -70,10 +75,14 @@ test("restart ignores old close/data/error and resets partial UTF-8 and JSON", a
 });
 
 test("destroy during startup cancels readiness and leaves no process", async () => {
-  const c = makeClient(); const started = c.start();
-  const rejected = assert.rejects(started, /destroyed/i); await tick();
-  const p = children.at(-1); await c.destroy(); await rejected;
-  assert.equal(c.process, null); assert.deepEqual(p.signals, ["SIGTERM"]);
+  replyToStartup = false;
+  const c = makeClient();
+  try {
+    const started = c.start();
+    const rejected = assert.rejects(started, /destroyed/i); await tick();
+    const p = children.at(-1); await c.destroy(); await rejected;
+    assert.equal(c.process, null); assert.deepEqual(p.signals, ["SIGTERM"]);
+  } finally { replyToStartup = true; }
 });
 
 test("invalid stdout and stderr never print response or credential contents", async () => {
@@ -84,6 +93,32 @@ test("invalid stdout and stderr never print response or credential contents", as
     p.stderr.emit("data", Buffer.from('private-prompt sk-secret'));
   } finally { console.warn = warn; await c.destroy(); }
   assert.equal(logs.length, 2); assert.doesNotMatch(logs.join(" "), /private-prompt|sk-secret/);
+});
+
+test("startup waits for a successful state response", async () => {
+  replyToStartup = false;
+  const c = makeClient(); let ready = false;
+  try {
+    const starting = c.start().then(() => { ready = true; }); await tick();
+    const p = children.at(-1), req = JSON.parse(p.writes[0]);
+    assert.equal(req.type, "get_state"); assert.equal(ready, false);
+    p.stdout.emit("data", Buffer.from(JSON.stringify({ type: "response", id: req.id, success: true, data: {} }) + "\n"));
+    await starting; assert.equal(ready, true);
+  } finally { replyToStartup = true; await c.destroy(); }
+});
+
+test("early Pi startup failure reports a safe model diagnosis without stderr secrets", async () => {
+  replyToStartup = false;
+  const c = makeClient();
+  try {
+    const started = c.start(); const rejected = assert.rejects(started, error => {
+      assert.match(error.message, /provider or model/);
+      assert.doesNotMatch(error.message, /secret-token/); return true;
+    });
+    await tick(); const p = children.at(-1);
+    p.stderr.emit("data", Buffer.from("Unknown provider secret-token"));
+    p.close(1); await rejected;
+  } finally { replyToStartup = true; await c.destroy(); }
 });
 
 test("asynchronous pipe write failures reject pending RPC", async () => {

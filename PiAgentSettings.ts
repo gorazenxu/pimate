@@ -6,7 +6,20 @@ import * as path from "path";
 import * as os from "os";
 import { runSkillsCommand } from "./SkillsCommand";
 import { updatePiAuthFile } from "./PiAuthFile";
-import { AgyAgentClient, type AgyQuotaStatus } from "./AgyAgentClient";
+import { updatePiModelsFile } from "./PiModelsFile";
+import {
+  AgyAgentClient,
+  clampAgyEffortForModel,
+  formatAgyModelDisplayName,
+  getAgyModelEffortLevels,
+  groupAgyModelsByFamily,
+  parseAgyModelEffortSuffix,
+  resolveAgyFamilyVariant,
+  type AgyEffortLevel,
+  type AgyModelFamily,
+  type AgyQuotaStatus,
+} from "./AgyAgentClient";
+import type { PiModel } from "./PiAgentClient";
 import {
   installAgyAccountBridge,
   readAgyAccountBridge,
@@ -108,7 +121,7 @@ export interface PiAgentSettings {
   activeTabIndex: number;
   agyPath: string;
   agyModel: string;
-  agyEffort: "low" | "medium" | "high";
+  agyEffort: "low" | "medium" | "high" | "xhigh" | "max";
   agyAutoApproveTools: boolean;
   piPath: string;
   provider: string;
@@ -235,30 +248,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
     } catch (e) {
       console.error("读取 models.json 失败:", e);
       return {};
-    }
-  }
-
-  // 辅助方法：安全写入 models.json（保留原有顶层字段，只替换 providers）
-  private writeModelsJson(providers: Record<string, any>): void {
-    const filePath = this.getModelsJsonPath();
-    let data: Record<string, any> = {};
-    if (fs.existsSync(filePath)) {
-      try {
-        const content = fs.readFileSync(filePath, "utf-8");
-        data = JSON.parse(content) || {};
-      } catch (e) {
-        console.error("解析已有 models.json 失败，将重置配置:", e);
-      }
-    }
-    data.providers = providers;
-    try {
-      const dirPath = path.dirname(filePath);
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-      }
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("写入 models.json 失败:", e);
     }
   }
 
@@ -766,52 +755,107 @@ export class PiAgentSettingTab extends PluginSettingTab {
       );
 
     // agy default model setting
+    let loadedAgyModels: PiModel[] = [];
+    let loadedAgyFamilies: AgyModelFamily[] = [];
+    let effortDropdownRef: import("obsidian").DropdownComponent | null = null;
+
+    const effortLabelMap: Record<AgyEffortLevel, string> = {
+      max: isZh ? "Max (极限思考)" : "Max (Maximum)",
+      xhigh: isZh ? "XHigh (极高思考)" : "XHigh (Extra High)",
+      high: isZh ? "High (深度思考 - 推荐)" : "High (Deep Thinking - Recommended)",
+      medium: isZh ? "Medium (均衡)" : "Medium (Balanced)",
+      low: isZh ? "Low (快速)" : "Low (Fast)",
+    };
+    const displayOrder: AgyEffortLevel[] = ["max", "xhigh", "high", "medium", "low"];
+
+    const syncEffortDropdownForModel = (
+      selectedBaseId: string
+    ): { modelId: string; effort: AgyEffortLevel | "" } => {
+      const preferredEffort = this.plugin.settings.agyEffort || "high";
+      const levels = getAgyModelEffortLevels(selectedBaseId, loadedAgyModels);
+      const clamped = clampAgyEffortForModel(
+        selectedBaseId,
+        preferredEffort,
+        loadedAgyModels
+      );
+
+      if (effortDropdownRef) {
+        effortDropdownRef.selectEl.empty();
+        if (levels.length === 0) {
+          effortDropdownRef.addOption(
+            "",
+            isZh ? "固定推理预算（当前模型不可调节）" : "Fixed reasoning budget (not adjustable)"
+          );
+          effortDropdownRef.setValue("");
+          effortDropdownRef.setDisabled(true);
+        } else {
+          for (const level of displayOrder) {
+            if (levels.includes(level)) {
+              effortDropdownRef.addOption(level, effortLabelMap[level]);
+            }
+          }
+          const activeEffort = (clamped.effort || levels[0]) as AgyEffortLevel;
+          effortDropdownRef.setValue(activeEffort);
+          effortDropdownRef.setDisabled(levels.length <= 1);
+        }
+      }
+
+      return clamped;
+    };
+
     new Setting(containerEl)
       .setName(isZh ? "默认 Antigravity 模型" : "Default Antigravity Model")
       .setDesc(
         isZh
-          ? "Antigravity 引擎的默认模型。推荐使用 Gemini 3.8 Flash (High) 或 Gemini 3.1 Pro (High)。"
-          : "Default model for Antigravity engine. Recommended: Gemini 3.8 Flash (High) or Gemini 3.1 Pro (High)."
+          ? "Antigravity 引擎的默认模型。切换模型后会自动刷新下方可选的思考强度档位。"
+          : "Default model for Antigravity engine. Selecting a model automatically updates the available reasoning effort tiers below."
       )
       .addDropdown((dropdown) => {
         const currentVal = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
-        dropdown
-          .addOption("gemini-3.8-flash-high", "Gemini 3.8 Flash (High) (推荐)")
-          .addOption("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)")
-          .addOption("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)")
-          .addOption("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)")
-          .addOption("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)")
-          .addOption("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)")
-          .addOption("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)")
-          .addOption("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)");
+        const currentBaseId = parseAgyModelEffortSuffix(currentVal)?.baseId || currentVal;
+        // Until the CLI confirms its catalog, keep the current value but do
+        // not offer guesses that might not exist for this installation.
+        dropdown.addOption(currentBaseId, formatAgyModelDisplayName(currentVal));
+        dropdown.setDisabled(true);
 
-        const standardModels = [
-          "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-          "gemini-3.7-flash-high", "gemini-3.1-pro-high", "claude-sonnet-4-6",
-          "claude-opus-4-6-thinking", "gpt-oss-120b-medium"
-        ];
-        if (!standardModels.includes(currentVal) && currentVal) {
-          dropdown.addOption(currentVal, currentVal);
-        }
-
-        dropdown.setValue(currentVal).onChange(async (val) => {
-          this.plugin.settings.agyModel = val;
+        dropdown.setValue(currentBaseId).onChange(async (selectedBaseId) => {
+          const selected = syncEffortDropdownForModel(selectedBaseId);
+          this.plugin.settings.agyModel = selected.modelId;
+          if (selected.effort) this.plugin.settings.agyEffort = selected.effort;
           await this.plugin.saveSettings();
         });
 
+        const showModelsUnavailable = () => {
+          const current = this.plugin.settings.agyModel || currentVal;
+          const base = parseAgyModelEffortSuffix(current)?.baseId || current;
+          dropdown.selectEl.empty();
+          dropdown.addOption(base, `${formatAgyModelDisplayName(current)} (${isZh ? "模型列表不可用" : "model list unavailable"})`);
+          dropdown.setValue(base);
+          dropdown.setDisabled(true);
+        };
         AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath).then((models) => {
           if (models.length > 0) {
-            const selected = dropdown.getValue();
+            loadedAgyModels = models;
+            loadedAgyFamilies = groupAgyModelsByFamily(models);
+            const selectedBase =
+              parseAgyModelEffortSuffix(this.plugin.settings.agyModel || "")?.baseId ||
+              this.plugin.settings.agyModel ||
+              dropdown.getValue();
             dropdown.selectEl.empty();
-            for (const m of models) {
-              dropdown.addOption(m.id, m.name ? `${m.name}` : m.id);
+            for (const family of loadedAgyFamilies) {
+              dropdown.addOption(family.baseId, family.name);
             }
-            if (selected && !models.some((model) => model.id === selected)) {
-              dropdown.addOption(selected, `${selected} (当前值 / current)`);
+            if (selectedBase && !loadedAgyFamilies.some((f) => f.baseId === selectedBase)) {
+              dropdown.addOption(
+                selectedBase,
+                `${formatAgyModelDisplayName(selectedBase, models)} (当前值 / current)`
+              );
             }
-            dropdown.setValue(selected);
-          }
-        }).catch(() => undefined);
+            dropdown.setValue(selectedBase);
+            dropdown.setDisabled(false);
+            syncEffortDropdownForModel(this.plugin.settings.agyModel || selectedBase);
+          } else showModelsUnavailable();
+        }).catch(showModelsUnavailable);
       });
 
     // agy reasoning effort
@@ -819,20 +863,28 @@ export class PiAgentSettingTab extends PluginSettingTab {
       .setName(isZh ? "默认思考强度档位 (Reasoning Effort)" : "Default Reasoning Effort")
       .setDesc(
         isZh
-          ? "模型深度思考强度等级。对话底部栏亦可针对当前会话即时调整。"
-          : "Reasoning effort level for supporting models. Can also be adjusted in the chat footer."
+          ? "当前所选模型支持的思考强度等级。对话底部栏亦可针对当前会话即时调整。"
+          : "Reasoning effort tiers supported by the selected model. Can also be adjusted in the chat footer."
       )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("high", isZh ? "High (深度思考 - 推荐)" : "High (Deep Thinking - Recommended)")
-          .addOption("medium", isZh ? "Medium (均衡)" : "Medium (Balanced)")
-          .addOption("low", isZh ? "Low (快速)" : "Low (Fast)")
-          .setValue(this.plugin.settings.agyEffort || "high")
-          .onChange(async (val) => {
-            this.plugin.settings.agyEffort = val as "low" | "medium" | "high";
-            await this.plugin.saveSettings();
-          })
-      );
+      .addDropdown((dropdown) => {
+        effortDropdownRef = dropdown;
+        const currentVal = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
+        syncEffortDropdownForModel(currentVal);
+        dropdown.onChange(async (val) => {
+          if (!val) return;
+          const nextEffort = val as AgyEffortLevel;
+          this.plugin.settings.agyEffort = nextEffort;
+          const activeBase =
+            parseAgyModelEffortSuffix(this.plugin.settings.agyModel || "")?.baseId ||
+            this.plugin.settings.agyModel ||
+            "gemini-3.8-flash";
+          const family = loadedAgyFamilies.find((f) => f.baseId === activeBase);
+          this.plugin.settings.agyModel = family
+            ? resolveAgyFamilyVariant(family, nextEffort)
+            : clampAgyEffortForModel(this.plugin.settings.agyModel || activeBase, nextEffort, loadedAgyModels).modelId;
+          await this.plugin.saveSettings();
+        });
+      });
   }
 
   private renderAgyQuotaCard(containerEl: HTMLElement, isZh: boolean): void {
@@ -1298,7 +1350,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         : "Open a wizard to generate models.json config for SiliconFlow/Volcengine/OpenAI-compatible endpoints.")
       .addButton(btn => {
         btn.setButtonText(isZh ? "打开向导" : "Open Wizard").setCta().onClick(() => {
-          new CustomProviderWizardModal(this.app, isZh, async (config) => {
+          new CustomProviderWizardModal(this.app, isZh, (config) => {
             this.applyCustomProviderConfig(config, isZh);
           }).open();
         });
@@ -1858,9 +1910,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           : `Delete custom provider "${id}"?\nIt will be removed from both models.json and auth.json.`);
         if (!confirmed) return;
         void (async () => {
-          const providers = this.readModelsJson();
-          delete providers[id];
-          this.writeModelsJson(providers);
+          updatePiModelsFile(this.getModelsJsonPath(), id, null);
           // 同步删 auth.json
           const aPath = this.getAuthJsonPath();
           if (fs.existsSync(aPath)) this.removeAuthProvider(id);
@@ -1881,8 +1931,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
   // 应用向导生成的自定义 provider 配置（写入 models.json + auth.json）
   private applyCustomProviderConfig(config: CustomProviderConfig, isZh: boolean): void {
-    const providers = this.readModelsJson();
-
     // 构造 provider 对象
     const prov: Record<string, any> = {
       baseUrl: config.baseUrl.trim(),
@@ -1893,8 +1941,6 @@ export class PiAgentSettingTab extends PluginSettingTab {
     if (apiKey) {
       // 直接把 key 写进 models.json（最简单可靠，跟 siliconflow 现状一致）
       prov.apiKey = apiKey;
-      // 同时写 auth.json 以便 UI 显示已配置
-      this.writeApiKey(config.providerId, apiKey);
     }
     // compat 选项
     if (config.supportsDeveloperRole === false) {
@@ -1903,8 +1949,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
     // 模型列表
     prov.models = config.models.filter(m => m.id.trim());
 
-    providers[config.providerId] = prov;
-    this.writeModelsJson(providers);
+    updatePiModelsFile(this.getModelsJsonPath(), config.providerId, prov);
+    if (apiKey) this.writeApiKey(config.providerId, apiKey);
 
     new Notice(isZh
       ? `已添加自定义 provider “${config.providerId}”到 models.json。重启 Pimate 生效。`
@@ -2449,6 +2495,7 @@ class CustomProviderWizardModal extends Modal {
       return;
     }
 
+    try {
     this.onSubmit({
       providerId: id,
       displayName: displayName || undefined,
@@ -2459,6 +2506,10 @@ class CustomProviderWizardModal extends Modal {
       models
     });
     this.close();
+    } catch (error) {
+      new Notice(this.isZh ? "保存失败，请检查 models.json 后重试。" : "Save failed; check models.json and retry.");
+      console.error("[pimate] custom provider save failed", error);
+    }
   }
 
   onClose(): void {

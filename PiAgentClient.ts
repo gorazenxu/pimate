@@ -539,10 +539,19 @@ export class PiAgentClient extends EventEmitter {
 
         let settled = false;
         let readyTimer: number | undefined;
+        let stderrTail = "";
+        const startupFailure = (code: number | null): Error => {
+          // Never copy stderr into UI: extensions and providers may print secrets.
+          const modelFailure = /unknown\s+(?:provider|model)|(?:provider|model)[^\n]{0,100}(?:not found|not available)/i.test(stderrTail);
+          return new Error(modelFailure
+            ? "Pi could not find the configured provider or model. Check Pimate model settings."
+            : `Pi exited during startup (code ${code ?? "signal"}). Check Pi installation and configuration.`);
+        };
 
         const settle = (err?: Error) => {
           if (settled) return;
           settled = true;
+          stderrTail = "";
           if (readyTimer !== undefined) window.clearTimeout(readyTimer);
           if (this.cancelStartup === cancel) this.cancelStartup = null;
           if (err) reject(err instanceof Error ? err : new Error(String(err)));
@@ -558,7 +567,10 @@ export class PiAgentClient extends EventEmitter {
 
         // Handle stderr
         child.stderr!.on("data", (chunk: Buffer) => {
-          if (isCurrent()) console.warn(`[pi-agent] stderr received (${chunk.length} bytes; content omitted)`);
+          if (isCurrent()) {
+            if (!settled) stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4096);
+            console.warn(`[pi-agent] stderr received (${chunk.length} bytes; content omitted)`);
+          }
         });
 
         // Handle process exit
@@ -579,16 +591,22 @@ export class PiAgentClient extends EventEmitter {
           this.buffer = "";
           this.decoder = new StringDecoder("utf8");
           this.rejectPending(new Error(`Pi process exited (${code ?? "signal"})`));
-          if (!settled) settle(new Error(`pi exited with code ${code}`));
+          if (!settled) settle(startupFailure(code));
           else this.emit("close");
         });
 
-        // Consider ready after a short delay (pi initializes)
-        // 150ms 给 pi 足够时间完成工具加载和模型绑定，避免下一个 RPC
-        // 命令与初始化指令重载。Node 管道 buffer 会保留前面写入的指令。
+        // A live process is not necessarily ready: require an RPC round trip.
         readyTimer = window.setTimeout(() => {
-          if (isCurrent()) settle(); else cancel();
-        }, 150);
+          if (isCurrent()) {
+            this.rejectPending(new Error("Pi startup timed out"));
+            settle(new Error("Pi startup timed out waiting for an RPC response"));
+          } else cancel();
+        }, 15_000);
+        void this.getState().then((response) => {
+          if (!isCurrent()) return cancel();
+          if (!response.success) return settle(new Error("Pi startup state request failed"));
+          settle();
+        }).catch((error: Error) => settle(error));
       } catch (err) {
         reject(err instanceof Error ? err : new Error(String(err)));
       }

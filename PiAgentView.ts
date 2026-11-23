@@ -43,6 +43,13 @@ import {
 } from "./PiAgentClient";
 import {
   AgyAgentClient,
+  buildAgyModelMeta,
+  clampAgyEffortForModel,
+  formatAgyModelDisplayName,
+  groupAgyModelsByFamily,
+  isAgyFixedEffortModel,
+  parseAgyModelEffortSuffix,
+  resolveAgyFamilyVariant,
   type AgyConversationSummary,
   type AgyConversationWorkspaceStatus,
 } from "./AgyAgentClient";
@@ -184,6 +191,8 @@ interface ChatTab {
   // True only when get_entries found entries outside the active leaf path.
   // Such sessions must keep using branch-aware RPC reloads after each turn.
   requiresBranchHistoryRpc?: boolean;
+  // Last authoritative Pi branch, kept only while its client/session is alive.
+  historySnapshot?: { client: AgentClient; sessionFile?: string; sessionId?: string; messages: any[]; total: number; complete: boolean };
   isCompacting?: boolean;
   reloadInFlight?: boolean;
   // Composer state belongs to the tab even though the view reuses one visible
@@ -1087,11 +1096,39 @@ export class PiAgentView extends ItemView {
     this.historyBannerEl = null;
     this.renderEmptyState();
     this.updateWidget("tasks", undefined);
+    // Show an already-running Pi tab before waiting for preference/state RPCs.
+    const cachedClient = tab.client;
+    const snapshot = tab.historySnapshot;
+    const canShowSnapshot = tab.engine !== "antigravity" && !tab.isStreaming &&
+      !!cachedClient?.isRunning() && snapshot?.client === cachedClient &&
+      snapshot.sessionFile === tab.sessionFile && snapshot.sessionId === tab.sessionId &&
+      (!tab.sessionFile || this.isSessionFileInCurrentWorkspace(tab.sessionFile));
+    if (canShowSnapshot && snapshot) {
+      const limit = this.plugin.settings.maxHistoryDisplay;
+      const messages = limit > 0 ? snapshot.messages.slice(-limit) : snapshot.messages;
+      this.activeBranchHistory = snapshot.complete ? snapshot.messages : null;
+      this.historyShownCount = messages.length;
+      this.historyTotalCount = snapshot.total;
+      for (const message of messages) this.renderMessageFromHistory(message);
+      this.renderHistoryBanner();
+      this.scrollToBottom(true, true);
+      this.updateButtons();
+    }
     await this.ensureTabClient(tab);
     if (this.tabSwitchSeq !== switchSeq || this.activeTab !== tab) return;
 
     const client = tab.client;
     this.client = client;
+    if (canShowSnapshot && client !== cachedClient) {
+      this.resetActiveRenderState();
+      this.chatContainer?.empty();
+      this.renderedMessages = [];
+      this.activeBranchHistory = null;
+      this.historyShownCount = 0;
+      this.historyTotalCount = 0;
+      this.historyBannerEl = null;
+      this.renderEmptyState();
+    }
     if (!client) {
       this.updateButtons();
       return;
@@ -1117,6 +1154,7 @@ export class PiAgentView extends ItemView {
       expectedTab: tab,
       expectedClient: client,
       expectedSwitchSeq: switchSeq,
+      replace: canShowSnapshot,
     });
     if (this.tabSwitchSeq !== switchSeq || this.activeTab !== tab || this.client !== client) return;
     void this.refreshForkMessages();
@@ -1225,6 +1263,9 @@ export class PiAgentView extends ItemView {
 
     client.on("event", (event: RpcEvent) => {
       if (!ownsClient()) return;
+      if (event.type === "agent_start" || event.type === "message_start" || event.type === "compaction_start") {
+        tab.historySnapshot = undefined;
+      }
       this.recordTabRuntimeState(tab, event);
       if (this.activeTabId !== tab.id) return;
       this.handleEvent(event, tab);
@@ -1357,7 +1398,11 @@ export class PiAgentView extends ItemView {
       if (tab.modelProvider && tab.modelId) {
         await tab.client.setModel(tab.modelProvider, tab.modelId);
       }
-      if (typeof tab.thinkingLevel === "string") {
+      const skipAgyEffortOverride =
+        tab.client.engine === "antigravity" &&
+        !!tab.modelId &&
+        (isAgyFixedEffortModel(tab.modelId) || !!parseAgyModelEffortSuffix(tab.modelId));
+      if (!skipAgyEffortOverride && typeof tab.thinkingLevel === "string" && tab.thinkingLevel) {
         await tab.client.setThinkingLevel(tab.thinkingLevel);
       }
     } catch (err) {
@@ -1372,13 +1417,33 @@ export class PiAgentView extends ItemView {
 
   private async updateActiveTabModel(provider: string, modelId: string): Promise<void> {
     const tab = this.activeTab;
-    if (!tab?.client) {
+    if (!tab?.client || !tab.client.isRunning()) {
+      // A failed Pi process cannot accept set_model. Save the user's explicit
+      // selection for this tab so a subsequent tab switch can restart it,
+      // without discarding its session or silently choosing another model.
+      if (tab?.client) {
+        const deadClient = tab.client;
+        tab.client = null;
+        if (this.client === deadClient) this.client = null;
+        await deadClient.destroy().catch(() => undefined);
+      }
       if (tab) {
         tab.modelProvider = provider;
         tab.modelId = modelId;
       }
       if (tab?.engine === "antigravity") {
-        this.plugin.settings.agyModel = modelId;
+        const clamped = clampAgyEffortForModel(
+          modelId,
+          tab.thinkingLevel || this.plugin.settings.agyEffort,
+          this.agyModelsCache
+        );
+        tab.modelId = clamped.modelId;
+        tab.thinkingLevel = clamped.effort;
+        tab.piModelMeta = buildAgyModelMeta(clamped.modelId, this.agyModelsCache);
+        this.plugin.settings.agyModel = clamped.modelId;
+        if (clamped.effort) {
+          this.plugin.settings.agyEffort = clamped.effort;
+        }
       } else {
         this.plugin.settings.provider = provider;
         this.plugin.settings.modelId = modelId;
@@ -1386,6 +1451,22 @@ export class PiAgentView extends ItemView {
       await this.plugin.saveSettings();
       await this.persistSessionTabs();
       this.renderActiveTabModelAndEffort();
+      if (tab && !tab.client) {
+        if (tab.engine === "antigravity") {
+          await this.ensureTabClient(tab, { requireSessionRestore: true });
+          const recoveredClient = (tab as ChatTab).client;
+          if (this.activeTab !== tab || !recoveredClient?.isRunning()) {
+            throw new Error("Antigravity session did not start; model selection was saved for retry");
+          }
+          this.client = recoveredClient;
+          this.renderActiveTabModelAndEffort();
+        } else {
+          this.setStatus(
+            this.plugin.settings.language === "zh"
+              ? "模型设置已保存，切换到其他会话再切回以重试。"
+              : "Model saved. Switch away and back to retry this session.", "warning");
+        }
+      }
       return;
     }
 
@@ -5516,34 +5597,52 @@ export class PiAgentView extends ItemView {
     }
     this.closeEffortPopup();
 
-    if (!this.client) return;
     const client = this.client;
     const tab = this.activeTab;
+    const currentEngine = tab?.engine || this.plugin.settings.defaultEngine || "pi";
+    const cache = this.getModelsCacheForEngine(currentEngine);
+    // Allow opening the model selector even when the tab client failed to
+    // start (for example after an account/model mismatch): AGY can query
+    // `agy models` directly without a running session, and Pi can still fall
+    // back to its cached model list.
+    const fetchModels = client
+      ? () => client.getAvailableModels()
+      : currentEngine === "antigravity"
+        ? async () => {
+            const models = await AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath);
+            return models.length > 0
+              ? { success: true, data: { models } }
+              : { success: false, error: "Unable to query available Antigravity models" };
+          }
+        : null;
+    if (!fetchModels && (!cache || cache.length === 0)) return;
+
     const request = ++this.modelPopupSeq;
     const isCurrent = () => !this.viewClosed && request === this.modelPopupSeq
       && this.activeTab === tab && this.client === client && anchorEl.isConnected;
     const isZh = this.plugin.settings.language === "zh";
 
-    const currentEngine = this.activeTab?.engine || this.plugin.settings.defaultEngine || "pi";
-    const cache = this.getModelsCacheForEngine(currentEngine);
-
     // 1. 如果有缓存，立即瞬间弹出渲染，实现“零延迟秒开”！
     if (cache && cache.length > 0) {
       this.renderModelPopup(anchorEl, cache);
       // 同时在后台静默抓取最新模型列表并更新缓存
-      client.getAvailableModels().then(result => {
-        if (!isCurrent()) return;
-        if (result.success && result.data) {
-          const models = ((result.data as any).models || []) as PiModel[];
-          if (models.length > 0) {
-            this.setModelsCacheForEngine(currentEngine, models);
+      if (fetchModels) {
+        fetchModels().then(result => {
+          if (!isCurrent()) return;
+          if (result.success && result.data) {
+            const models = ((result.data as any).models || []) as PiModel[];
+            if (models.length > 0) {
+              this.setModelsCacheForEngine(currentEngine, models);
+            }
           }
-        }
-      }).catch(err => {
-        console.warn("[pi-agent] Background model update failed:", err);
-      });
+        }).catch(err => {
+          console.warn("[pi-agent] Background model update failed:", err);
+        });
+      }
       return;
     }
+
+    if (!fetchModels) return;
 
     // 2. 如果无缓存，先画一个 Loading 占位层，决不让界面卡死无响应
     const parent = anchorEl.parentElement;
@@ -5567,7 +5666,7 @@ export class PiAgentView extends ItemView {
     }
 
     try {
-      const result = await client.getAvailableModels();
+      const result = await fetchModels();
       if (!isCurrent()) return;
       if (!result.success || !result.data) {
         if (!cache) this.closeModelPopup();
@@ -5627,31 +5726,63 @@ export class PiAgentView extends ItemView {
     const isAgy = (this.activeTab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
     const currentProvider = this.activeTab?.modelProvider || (isAgy ? "antigravity" : this.plugin.settings.provider) || "";
     const currentModelId = this.activeTab?.modelId || (isAgy ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high") : this.plugin.settings.modelId) || "";
+    const currentEffort = this.activeTab?.thinkingLevel ?? (isAgy ? (this.plugin.settings.agyEffort || "high") : (this.plugin.settings.thinkingLevel ?? ""));
 
-    for (const [groupName, groupModels] of groups.entries()) {
+    if (isAgy) {
+      const families = groupAgyModelsByFamily(models);
+      const currentBaseId = parseAgyModelEffortSuffix(currentModelId)?.baseId || currentModelId;
       const titleEl = this.modelPopupEl.createDiv("pi-agent-model-popup-group-title");
-      titleEl.setText(groupName);
+      titleEl.setText("ANTIGRAVITY");
 
-      for (const model of groupModels) {
-        const isCurrent = currentModelId === model.id && (!currentProvider || currentProvider === model.provider);
+      for (const family of families) {
+        const isCurrent =
+          currentModelId === family.defaultModelId ||
+          currentBaseId === family.baseId;
         const itemEl = this.modelPopupEl.createDiv({
           cls: `pi-agent-model-popup-item ${isCurrent ? "is-active" : ""}`
         });
 
         const iconEl = itemEl.createDiv("pi-agent-model-popup-item-icon");
-        setIcon(iconEl, this.getProviderIconName(model.provider, model.id));
+        setIcon(iconEl, this.getProviderIconName("antigravity", family.defaultModelId));
 
-        const shortName = model.name || this.getModelShortName(model.id);
-        itemEl.createSpan({ text: shortName, cls: "pi-agent-model-popup-item-name" });
+        itemEl.createSpan({ text: family.name, cls: "pi-agent-model-popup-item-name" });
 
         itemEl.onclick = (e) => {
           e.stopPropagation();
+          const targetModelId = resolveAgyFamilyVariant(family, currentEffort);
           this.runAsync(async () => {
-            await this.updateActiveTabModel(model.provider, model.id);
-            new Notice(isZh ? `模型已切换为 ${shortName}` : `Model set to ${shortName}`);
+            await this.updateActiveTabModel("antigravity", targetModelId);
+            new Notice(isZh ? `模型已切换为 ${family.name}` : `Model set to ${family.name}`);
             this.closeModelPopup();
           });
         };
+      }
+    } else {
+      for (const [groupName, groupModels] of groups.entries()) {
+        const titleEl = this.modelPopupEl.createDiv("pi-agent-model-popup-group-title");
+        titleEl.setText(groupName);
+
+        for (const model of groupModels) {
+          const isCurrent = currentModelId === model.id && (!currentProvider || currentProvider === model.provider);
+          const itemEl = this.modelPopupEl.createDiv({
+            cls: `pi-agent-model-popup-item ${isCurrent ? "is-active" : ""}`
+          });
+
+          const iconEl = itemEl.createDiv("pi-agent-model-popup-item-icon");
+          setIcon(iconEl, this.getProviderIconName(model.provider, model.id));
+
+          const shortName = model.name || this.getModelShortName(model.id);
+          itemEl.createSpan({ text: shortName, cls: "pi-agent-model-popup-item-name" });
+
+          itemEl.onclick = (e) => {
+            e.stopPropagation();
+            this.runAsync(async () => {
+              await this.updateActiveTabModel(model.provider, model.id);
+              new Notice(isZh ? `模型已切换为 ${shortName}` : `Model set to ${shortName}`);
+              this.closeModelPopup();
+            });
+          };
+        }
       }
     }
 
@@ -5675,14 +5806,25 @@ export class PiAgentView extends ItemView {
     }
     this.closeModelPopup();
 
-    // Pull latest Pi state so the popup renders against current model
+    // Pull latest Pi/AGY state so the popup renders against current model
     // metadata (reasoning / thinkingLevelMap) instead of stale local data.
     const tab = this.activeTab;
     const client = tab?.client;
     const request = ++this.effortPopupSeq;
     this.effortPopupPending = true;
     try {
+      const isAgy = (tab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+      if (isAgy && (!this.agyModelsCache || this.agyModelsCache.length === 0)) {
+        const models = await AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath);
+        if (models.length > 0) {
+          this.setModelsCacheForEngine("antigravity", models);
+        }
+      }
       if (client) await this.syncTabStateFromPi(tab!);
+      if (tab && isAgy) {
+        const activeModelId = tab.modelId || this.plugin.settings.agyModel || "gemini-3.8-flash-high";
+        tab.piModelMeta = buildAgyModelMeta(activeModelId, this.agyModelsCache);
+      }
       if (this.viewClosed || request !== this.effortPopupSeq || this.activeTab !== tab
         || tab?.client !== client || !anchorEl.isConnected) return;
       this.renderEffortPopup(anchorEl);
@@ -5740,7 +5882,15 @@ export class PiAgentView extends ItemView {
     note?: string;
   } {
     const isZh = this.plugin.settings.language === "zh";
-    const meta = tab?.piModelMeta;
+    const isAgy = (tab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    const meta =
+      tab?.piModelMeta ||
+      (isAgy
+        ? buildAgyModelMeta(
+            tab?.modelId || this.plugin.settings.agyModel || "gemini-3.8-flash-high",
+            this.agyModelsCache
+          )
+        : undefined);
 
     if (!meta) {
       return {
@@ -6645,6 +6795,7 @@ export class PiAgentView extends ItemView {
     const tab = this.activeTab;
     const client = this.client;
     if (!tab || !client) return;
+    tab.historySnapshot = undefined;
 
     this.forkMessagesByEntryId.clear();
     const scopeVersion = ++this.forkScopeVersion;
@@ -7621,12 +7772,17 @@ export class PiAgentView extends ItemView {
 
   private updateModelDisplay(provider: string, modelId: string): void {
     if (!this.footerModelLabel) return;
-    const shortName = modelId
-      .replace(/^claude-/, "")
-      .replace(/^gemini-/, "Gemini ")
-      .replace(/^gpt-/, "GPT-")
-      .replace(/^deepseek-/, "DeepSeek ")
-      .slice(0, 22);
+    const isAgy =
+      provider === "antigravity" ||
+      (this.activeTab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    const shortName = isAgy
+      ? formatAgyModelDisplayName(modelId, this.agyModelsCache).slice(0, 24)
+      : modelId
+          .replace(/^claude-/, "")
+          .replace(/^gemini-/, "Gemini ")
+          .replace(/^gpt-/, "GPT-")
+          .replace(/^deepseek-/, "DeepSeek ")
+          .slice(0, 22);
     this.footerModelLabel.setText(shortName || provider);
     this.footerModelLabel.setAttribute("title", `${provider}/${modelId}`);
   }
@@ -7785,6 +7941,13 @@ export class PiAgentView extends ItemView {
     // A new turn may have started while history was in flight. Never erase
     // visible live deltas with an earlier snapshot; settled will reconcile it.
     if (options.replace && tab.isStreaming) return;
+
+    if (client.engine !== "antigravity" && !tab.isStreaming && (branchHistory !== null || usedFile)) {
+      tab.historySnapshot = {
+        client, sessionFile: tab.sessionFile, sessionId: tab.sessionId,
+        messages: branchHistory ?? messages, total, complete: branchHistory !== null,
+      };
+    }
 
     if (options.replace) {
       this.resetActiveRenderState();
@@ -8926,6 +9089,12 @@ export class PiAgentView extends ItemView {
   private setModelsCacheForEngine(engine: string, models: PiModel[]): void {
     if (engine === "antigravity") {
       this.agyModelsCache = models;
+      for (const tab of this.tabs) {
+        if (tab.engine === "antigravity") {
+          const activeModelId = tab.modelId || this.plugin.settings.agyModel || "gemini-3.8-flash-high";
+          tab.piModelMeta = buildAgyModelMeta(activeModelId, models);
+        }
+      }
     } else {
       this.piModelsCache = models;
     }

@@ -18,6 +18,9 @@ const rl = require('node:readline').createInterface({ input: process.stdin });
 process.stdout.write(JSON.stringify({type:'fixture_ready'}) + '\\n');
 rl.on('line', line => {
   const req = JSON.parse(line);
+  if (req.type === 'get_state') {
+    process.stdout.write(JSON.stringify({type:'response', id:req.id, command:req.type, success:true, data:{}}) + '\\n');
+  }
   if (req.type === 'get_messages') {
     if (process.env.FIXTURE_MODE === 'crash') return process.exit(23);
     process.stdout.write(JSON.stringify({type:'response', id:req.id,

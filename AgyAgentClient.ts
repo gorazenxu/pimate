@@ -126,6 +126,469 @@ const AGY_ABORT_CLOSE_GRACE_MS = 250;
 const AGY_PRINT_TIMEOUT = "15m";
 const AGY_PROMPT_WAIT_TIMEOUT_MS = 15 * 60 * 1_000;
 
+export const AGY_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type AgyEffortLevel = (typeof AGY_EFFORT_LEVELS)[number];
+
+const AGY_EFFORT_LEVEL_SET = new Set<string>(AGY_EFFORT_LEVELS);
+const AGY_BASE_PI_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+const AGY_EFFORT_SUFFIX_RE = /^(.*)-(low|medium|high|xhigh|max)$/;
+
+export function isAgyEffortLevel(level: string | undefined | null): level is AgyEffortLevel {
+  return typeof level === "string" && AGY_EFFORT_LEVEL_SET.has(level.trim().toLowerCase());
+}
+
+export function parseAgyModelEffortSuffix(
+  modelId: string
+): { baseId: string; effort: AgyEffortLevel } | null {
+  const match = modelId.trim().match(AGY_EFFORT_SUFFIX_RE);
+  if (!match) return null;
+  return {
+    baseId: match[1],
+    effort: match[2] as AgyEffortLevel,
+  };
+}
+
+/**
+ * Orchestrator models in AGY CLI have a fixed reasoning budget
+ * (`adjustable: false`) and reject `--effort` / `/effort`.
+ */
+export function isAgyFixedEffortModel(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  return (
+    normalized === "gemini-pro-orchestrator" ||
+    normalized.startsWith("gemini-pro-orchestrator-") ||
+    normalized.startsWith("orchestrator")
+  );
+}
+
+/**
+ * Build a Pi-compatible `thinkingLevelMap` for an AGY model.
+ * `PiAgentView.buildThinkingLevelOptions` starts from Pi's base set
+ * (`off`, `minimal`, `low`, `medium`, `high`) and removes keys mapped to `null`,
+ * so unsupported base levels (always `off` and `minimal` for AGY) must be
+ * explicitly mapped to `null`.
+ */
+export function buildAgyThinkingLevelMap(
+  availableLevels: readonly string[]
+): Record<string, string | null> {
+  const allowed = new Set(
+    availableLevels
+      .map((level) => level.trim().toLowerCase())
+      .filter((level): level is AgyEffortLevel => AGY_EFFORT_LEVEL_SET.has(level))
+  );
+  const map: Record<string, string | null> = {};
+  for (const base of AGY_BASE_PI_LEVELS) {
+    map[base] = allowed.has(base as AgyEffortLevel) ? base : null;
+  }
+  for (const extra of ["xhigh", "max"] as const) {
+    if (allowed.has(extra)) {
+      map[extra] = extra;
+    }
+  }
+  return map;
+}
+
+export function getAgyFallbackEffortLevels(modelId: string): AgyEffortLevel[] {
+  if (isAgyFixedEffortModel(modelId)) return [];
+  const suffix = parseAgyModelEffortSuffix(modelId);
+  const baseId = (suffix?.baseId || modelId).trim().toLowerCase();
+  if (baseId === "gemini-4-neon" || baseId === "gemini-4-hydrogen") {
+    return ["low", "medium", "high", "xhigh"];
+  }
+  if (baseId === "gpt-oss-120b") {
+    return ["medium"];
+  }
+  const levels: AgyEffortLevel[] = ["low", "medium", "high"];
+  if (suffix && !levels.includes(suffix.effort)) {
+    levels.push(suffix.effort);
+  }
+  return levels;
+}
+
+export function getAgyModelEffortLevels(
+  modelId: string,
+  cachedModels?: readonly PiModel[] | null
+): AgyEffortLevel[] {
+  const trimmed = modelId.trim();
+  if (!trimmed || isAgyFixedEffortModel(trimmed)) return [];
+  if (cachedModels && cachedModels.length > 0) {
+    const families = groupAgyModelsByFamily(cachedModels);
+    const baseId = parseAgyModelEffortSuffix(trimmed)?.baseId || trimmed;
+    const family = families.find(
+      (f) => f.baseId === baseId || f.defaultModelId === trimmed
+    );
+    if (family) {
+      return [...family.levels];
+    }
+  }
+  return getAgyFallbackEffortLevels(trimmed);
+}
+
+export function pickClosestAgyEffort(
+  availableLevels: readonly AgyEffortLevel[],
+  preferredEffort?: string
+): AgyEffortLevel | "" {
+  if (availableLevels.length === 0) return "";
+  const normalized = preferredEffort?.trim().toLowerCase() || "";
+  if (isAgyEffortLevel(normalized) && availableLevels.includes(normalized)) {
+    return normalized;
+  }
+  const fallbackOrder: AgyEffortLevel[] =
+    normalized === "max"
+      ? ["xhigh", "high", "medium", "low"]
+      : normalized === "xhigh"
+        ? ["high", "medium", "low", "max"]
+        : normalized === "low"
+          ? ["medium", "high", "xhigh", "max"]
+          : normalized === "high"
+            ? ["medium", "xhigh", "low", "max"]
+            : ["medium", "high", "low", "xhigh", "max"];
+  for (const candidate of fallbackOrder) {
+    if (availableLevels.includes(candidate)) return candidate;
+  }
+  return availableLevels[0];
+}
+
+export function clampAgyEffortForModel(
+  modelId: string,
+  preferredEffort?: string,
+  cachedModels?: readonly PiModel[] | null
+): { modelId: string; effort: AgyEffortLevel | "" } {
+  const trimmed = modelId.trim();
+  if (!trimmed) {
+    return { modelId: "gemini-3.8-flash-high", effort: "high" };
+  }
+  if (isAgyFixedEffortModel(trimmed)) {
+    return { modelId: trimmed, effort: "" };
+  }
+  const suffix = parseAgyModelEffortSuffix(trimmed);
+  const baseId = suffix?.baseId || trimmed;
+
+  if (cachedModels && cachedModels.length > 0) {
+    const families = groupAgyModelsByFamily(cachedModels);
+    const family = families.find(
+      (f) => f.baseId === baseId || f.defaultModelId === trimmed
+    );
+    if (family) {
+      const resolvedModelId = resolveAgyFamilyVariant(
+        family,
+        preferredEffort || suffix?.effort
+      );
+      const resolvedSuffix = parseAgyModelEffortSuffix(resolvedModelId);
+      const resolvedEffort =
+        resolvedSuffix?.effort ||
+        pickClosestAgyEffort(family.levels, preferredEffort || suffix?.effort);
+      return { modelId: resolvedModelId, effort: resolvedEffort };
+    }
+  }
+
+  const levels = getAgyFallbackEffortLevels(trimmed);
+  // Without a verified catalog we cannot assume a sibling model exists.
+  // Preserve the exact ID; only clamp the separate effort argument.
+  const effort = suffix?.effort || pickClosestAgyEffort(levels, preferredEffort);
+  return {
+    modelId: trimmed,
+    effort,
+  };
+}
+
+export function buildAgyModelMeta(
+  modelId: string,
+  cachedModels?: readonly PiModel[] | null,
+  name?: string
+): PiModel {
+  const trimmed = modelId.trim();
+  if (cachedModels && cachedModels.length > 0) {
+    const exact = cachedModels.find((m) => m.id === trimmed);
+    if (exact) {
+      return {
+        ...exact,
+        thinkingLevelMap: exact.thinkingLevelMap
+          ? { ...exact.thinkingLevelMap }
+          : exact.thinkingLevelMap,
+      };
+    }
+  }
+  if (isAgyFixedEffortModel(trimmed)) {
+    return {
+      id: trimmed,
+      provider: "antigravity",
+      name: name || formatAgyModelDisplayName(trimmed, cachedModels),
+      reasoning: false,
+      thinkingLevelMap: buildAgyThinkingLevelMap([]),
+    };
+  }
+  const levels = getAgyModelEffortLevels(trimmed, cachedModels);
+  return {
+    id: trimmed,
+    provider: "antigravity",
+    name: name || formatAgyModelDisplayName(trimmed, cachedModels),
+    reasoning: levels.length > 0,
+    thinkingLevelMap: buildAgyThinkingLevelMap(levels),
+  };
+}
+
+/**
+ * Parse `agy models` stdout into PiModel entries, stripping carriage-return
+ * spinner frames and deriving each model family's supported effort tiers
+ * directly from the published sibling IDs.
+ */
+export function parseAgyModelsOutput(stdout: string): PiModel[] {
+  const rawEntries: Array<{ id: string; name: string }> = [];
+  const seenIds = new Set<string>();
+
+  for (const rawLine of stdout.split("\n")) {
+    // `agy models` writes spinner updates separated by `\r` before the first
+    // model row on the same line; keep only the final overwritten segment.
+    const segments = rawLine.replace(/\r$/, "").split("\r");
+    const line = (segments[segments.length - 1] || "").trim();
+    if (!line || line.startsWith("Fetching") || /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(line)) {
+      continue;
+    }
+
+    const parts = line.includes("\t") ? line.split(/\t+/) : line.split(/\s{2,}/);
+    if (parts.length < 2) continue;
+    const id = parts[0].trim();
+    const name = parts[1].trim();
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    rawEntries.push({ id, name });
+  }
+
+  const familyLevels = new Map<string, Set<AgyEffortLevel>>();
+  for (const entry of rawEntries) {
+    const suffix = parseAgyModelEffortSuffix(entry.id);
+    if (!suffix) continue;
+    let set = familyLevels.get(suffix.baseId);
+    if (!set) {
+      set = new Set<AgyEffortLevel>();
+      familyLevels.set(suffix.baseId, set);
+    }
+    set.add(suffix.effort);
+  }
+
+  return rawEntries.map(({ id, name }) => {
+    if (isAgyFixedEffortModel(id)) {
+      return {
+        id,
+        provider: "antigravity",
+        name,
+        reasoning: false,
+        thinkingLevelMap: buildAgyThinkingLevelMap([]),
+      };
+    }
+    const suffix = parseAgyModelEffortSuffix(id);
+    if (suffix) {
+      const levels = AGY_EFFORT_LEVELS.filter((level) =>
+        familyLevels.get(suffix.baseId)?.has(level)
+      );
+      return {
+        id,
+        provider: "antigravity",
+        name,
+        reasoning: true,
+        thinkingLevelMap: buildAgyThinkingLevelMap(levels),
+      };
+    }
+    return {
+      id,
+      provider: "antigravity",
+      name,
+      reasoning: true,
+      thinkingLevelMap: buildAgyThinkingLevelMap(["low", "medium", "high"]),
+    };
+  });
+}
+
+const AGY_EFFORT_LABEL_SUFFIX_RE = /\s*\((?:low|medium|high|xhigh|extra|max)\)\s*$/i;
+
+export interface AgyModelFamily {
+  /** Base family identifier (without `-low`/`-medium`/`-high`/`-xhigh`/`-max`). */
+  baseId: string;
+  /** Clean display name without the trailing `(Low)`/`(Medium)`/... effort label. */
+  name: string;
+  /** Default concrete CLI model ID for this family. */
+  defaultModelId: string;
+  /** Available concrete CLI model IDs keyed by AGY effort level. */
+  variants: Partial<Record<AgyEffortLevel, string>>;
+  /** Ordered effort levels supported by this family (empty for fixed-budget models). */
+  levels: AgyEffortLevel[];
+  /** Whether this model family supports user-adjustable effort levels. */
+  adjustable: boolean;
+}
+
+export function stripAgyEffortLabelSuffix(name: string): string {
+  return name.replace(AGY_EFFORT_LABEL_SUFFIX_RE, "").trim();
+}
+
+/**
+ * Collapse AGY's per-effort model variants (e.g. `gemini-4-neon-low`,
+ * `gemini-4-neon-medium`, `gemini-4-neon-high`, `gemini-4-neon-xhigh`) into
+ * one selectable model family so Model and Effort can be chosen independently.
+ */
+export function groupAgyModelsByFamily(models: readonly PiModel[]): AgyModelFamily[] {
+  const families: AgyModelFamily[] = [];
+  const byBaseId = new Map<string, AgyModelFamily>();
+
+  for (const model of models) {
+    const id = model.id.trim();
+    if (!id) continue;
+    const rawName = (model.name || id).trim();
+
+    if (isAgyFixedEffortModel(id)) {
+      if (byBaseId.has(id)) continue;
+      const family: AgyModelFamily = {
+        baseId: id,
+        name: rawName,
+        defaultModelId: id,
+        variants: {},
+        levels: [],
+        adjustable: false,
+      };
+      byBaseId.set(id, family);
+      families.push(family);
+      continue;
+    }
+
+    const suffix = parseAgyModelEffortSuffix(id);
+    if (!suffix) {
+      if (byBaseId.has(id)) continue;
+      const family: AgyModelFamily = {
+        baseId: id,
+        name: rawName,
+        defaultModelId: id,
+        variants: {},
+        levels: ["low", "medium", "high"],
+        adjustable: true,
+      };
+      byBaseId.set(id, family);
+      families.push(family);
+      continue;
+    }
+
+    let family = byBaseId.get(suffix.baseId);
+    if (!family) {
+      family = {
+        baseId: suffix.baseId,
+        name: stripAgyEffortLabelSuffix(rawName) || suffix.baseId,
+        defaultModelId: id,
+        variants: {},
+        levels: [],
+        adjustable: true,
+      };
+      byBaseId.set(suffix.baseId, family);
+      families.push(family);
+    }
+    family.variants[suffix.effort] = id;
+    if (!family.levels.includes(suffix.effort)) {
+      family.levels = AGY_EFFORT_LEVELS.filter(
+        (level) => Boolean(family!.variants[level])
+      );
+    }
+  }
+
+  for (const family of families) {
+    if (family.levels.length > 0 && Object.keys(family.variants).length > 0) {
+      family.defaultModelId =
+        family.variants.medium ||
+        family.variants.high ||
+        family.variants.low ||
+        family.variants[family.levels[0]] ||
+        family.defaultModelId;
+      family.adjustable = family.levels.length > 1;
+    }
+  }
+
+  return families;
+}
+
+/**
+ * Pick the concrete AGY CLI model ID for a family given the user's preferred
+ * effort level, clamping gracefully when a family does not offer that tier
+ * (for example `xhigh` -> `high` when switching from Neon to Argon).
+ */
+export function resolveAgyFamilyVariant(
+  family: AgyModelFamily,
+  preferredEffort?: string
+): string {
+  const variantKeys = Object.keys(family.variants);
+  if (variantKeys.length === 0) return family.defaultModelId;
+
+  const normalized = preferredEffort?.trim().toLowerCase() || "";
+  if (isAgyEffortLevel(normalized) && family.variants[normalized]) {
+    return family.variants[normalized]!;
+  }
+
+  const fallbackOrder: AgyEffortLevel[] =
+    normalized === "max"
+      ? ["xhigh", "high", "medium", "low"]
+      : normalized === "xhigh"
+        ? ["high", "medium", "low", "max"]
+        : normalized === "low"
+          ? ["medium", "high", "xhigh", "max"]
+          : normalized === "high"
+            ? ["medium", "xhigh", "low", "max"]
+            : ["medium", "high", "low", "xhigh", "max"];
+
+  for (const level of fallbackOrder) {
+    if (family.variants[level]) return family.variants[level]!;
+  }
+  return family.defaultModelId;
+}
+
+/**
+ * Format an AGY model ID for the chat footer without repeating the effort
+ * tier (which is displayed in the adjacent Effort control).
+ */
+export function formatAgyModelDisplayName(
+  modelId: string,
+  cachedModels?: readonly PiModel[] | null
+): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return "";
+  if (cachedModels && cachedModels.length > 0) {
+    const exact = cachedModels.find((m) => m.id === trimmed);
+    if (exact?.name) {
+      return isAgyFixedEffortModel(trimmed)
+        ? exact.name.trim()
+        : stripAgyEffortLabelSuffix(exact.name);
+    }
+    const suffix = parseAgyModelEffortSuffix(trimmed);
+    if (suffix) {
+      const sibling = cachedModels.find(
+        (m) => parseAgyModelEffortSuffix(m.id)?.baseId === suffix.baseId && m.name
+      );
+      if (sibling?.name) {
+        return stripAgyEffortLabelSuffix(sibling.name);
+      }
+    }
+  }
+
+  if (isAgyFixedEffortModel(trimmed)) {
+    const lower = trimmed.toLowerCase();
+    if (lower === "gemini-pro-orchestrator-neon") return "Orchestrator (Neon)";
+    if (lower === "gemini-pro-orchestrator-g1-pro") return "Orchestrator (Argon)";
+    if (lower === "gemini-pro-orchestrator-carbon") return "Orchestrator (Carbon)";
+    if (lower === "gemini-pro-orchestrator") return "Orchestrator";
+    return trimmed;
+  }
+
+  const baseId = parseAgyModelEffortSuffix(trimmed)?.baseId || trimmed;
+  if (/^gpt-oss-120b$/i.test(baseId)) return "GPT-OSS 120B";
+  const claudeMatch = baseId.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)(?:-thinking)?$/i);
+  if (claudeMatch) {
+    const family = claudeMatch[1].charAt(0).toUpperCase() + claudeMatch[1].slice(1).toLowerCase();
+    return `Claude ${family} ${claudeMatch[2]}.${claudeMatch[3]}`;
+  }
+  return baseId
+    .split("-")
+    .map((part) => {
+      if (/^\d+(?:\.\d+)*$/.test(part)) return part;
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
 /**
  * Resolve the agy executable path on Windows and POSIX.
  */
@@ -200,6 +663,7 @@ export class AgyAgentClient extends EventEmitter {
     path: string;
     promise: Promise<RpcResponse<AgyQuotaStatus>>;
   } | null = null;
+  private static modelsCache = new Map<string, PiModel[]>();
 
   private process: ChildProcess | null = null;
   private abortingProcess: ChildProcess | null = null;
@@ -537,31 +1001,55 @@ export class AgyAgentClient extends EventEmitter {
     });
   }
 
+  private getModelsCacheKey(): string {
+    const resolved = resolveAgySpawn(this.options.agyPath);
+    return [resolved.cmd, ...resolved.scriptArgs].join("\u0000");
+  }
+
+  private buildModelMeta(modelId: string): PiModel {
+    const cached = AgyAgentClient.modelsCache.get(this.getModelsCacheKey());
+    return buildAgyModelMeta(modelId, cached);
+  }
+
   private async resolveLaunchSelection(): Promise<{
     modelId: string;
     effortArg?: string;
     effectiveEffort: string;
   }> {
     const modelId = this.currentModelId;
-    const effort = this.currentEffort;
-    const suffixMatch = modelId.match(/-(low|medium|high)$/);
+    const rawEffort = this.currentEffort?.trim().toLowerCase() || "";
+    const effort = isAgyEffortLevel(rawEffort) ? rawEffort : "";
 
-    // Models without an effort suffix accept --effort directly.
-    if (!suffixMatch) {
-      return { modelId, effortArg: effort, effectiveEffort: effort };
+    // Orchestrator models have a fixed reasoning budget and reject --effort.
+    if (isAgyFixedEffortModel(modelId)) {
+      return { modelId, effectiveEffort: "" };
     }
 
-    const encodedEffort = suffixMatch[1];
+    const suffix = parseAgyModelEffortSuffix(modelId);
+
+    // Models without an effort suffix accept --effort directly.
+    if (!suffix) {
+      const cached = AgyAgentClient.modelsCache.get(this.getModelsCacheKey());
+      const safeEffort = pickClosestAgyEffort(getAgyModelEffortLevels(modelId, cached), effort);
+      return {
+        modelId,
+        effortArg: effort ? safeEffort || undefined : undefined,
+        effectiveEffort: effort ? safeEffort : "",
+      };
+    }
+
+    const encodedEffort = suffix.effort;
     if (!effort || effort === encodedEffort) {
       return { modelId, effectiveEffort: encodedEffort };
     }
 
     // AGY rejects a model ID carrying one effort together with a different
-    // --effort flag. Prefer the matching sibling when the installed CLI
-    // exposes it (for example gemini-3.8-flash-low). Some model families do
-    // not publish every effort, so fall back to the encoded model instead of
-    // launching a command that the CLI will reject.
-    const candidateModelId = `${modelId.slice(0, -encodedEffort.length)}${effort}`;
+    // --effort flag (including -xhigh and -max variants). Prefer the matching
+    // sibling when the installed CLI exposes it (for example
+    // gemini-4-neon-xhigh). Some model families do not publish every effort,
+    // so fall back to the encoded model instead of launching a command that
+    // the CLI will reject.
+    const candidateModelId = `${suffix.baseId}-${effort}`;
     const availableModels = await AgyAgentClient.getAvailableModels(this.options.agyPath);
     if (availableModels.some((model) => model.id === candidateModelId)) {
       return { modelId: candidateModelId, effectiveEffort: effort };
@@ -1577,6 +2065,10 @@ export class AgyAgentClient extends EventEmitter {
    * Authoritative state getter.
    */
   async getState(): Promise<RpcResponse<PiAgentState>> {
+    const modelMeta = this.buildModelMeta(this.currentModelId);
+    const effectiveEffort = isAgyFixedEffortModel(this.currentModelId)
+      ? ""
+      : this.currentEffort;
     return {
       type: "response",
       command: "get_state",
@@ -1584,14 +2076,8 @@ export class AgyAgentClient extends EventEmitter {
       data: {
         isStreaming: this.isTurnStreaming,
         pendingMessageCount: this.pendingPrompts.length,
-        model: {
-          id: this.currentModelId,
-          provider: "antigravity",
-          name: this.currentModelId,
-          reasoning: true,
-          thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-        },
-        thinkingLevel: this.currentEffort,
+        model: modelMeta,
+        thinkingLevel: effectiveEffort,
         sessionId: this.conversationId || undefined,
         sessionName: "Antigravity Session",
       },
@@ -1605,18 +2091,16 @@ export class AgyAgentClient extends EventEmitter {
     provider: string,
     modelId: string
   ): Promise<RpcResponse<SetModelResult>> {
+    const suffix = parseAgyModelEffortSuffix(modelId);
+    const fixedEffort = isAgyFixedEffortModel(modelId);
     if (this.currentModelId === modelId && this.isRunning()) {
+      if (suffix) this.currentEffort = suffix.effort;
+      else if (fixedEffort) this.currentEffort = "";
       return {
         type: "response",
         command: "set_model",
         success: true,
-        data: {
-          id: modelId,
-          provider: "antigravity",
-          name: modelId,
-          reasoning: true,
-          thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-        },
+        data: this.buildModelMeta(this.currentModelId),
       };
     }
     if (this.isTurnStreaming) {
@@ -1628,6 +2112,15 @@ export class AgyAgentClient extends EventEmitter {
       };
     }
     this.currentModelId = modelId;
+    // When the user explicitly selects a suffixed AGY model (e.g.
+    // gemini-4-neon-xhigh), align currentEffort to that suffix so
+    // resolveLaunchSelection honors the chosen tier instead of silently
+    // switching back to the previous tab effort.
+    if (suffix) {
+      this.currentEffort = suffix.effort;
+    } else if (fixedEffort) {
+      this.currentEffort = "";
+    }
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
     }
@@ -1635,13 +2128,7 @@ export class AgyAgentClient extends EventEmitter {
       type: "response",
       command: "set_model",
       success: true,
-      data: {
-        id: modelId,
-        provider: "antigravity",
-        name: modelId,
-        reasoning: true,
-        thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-      },
+      data: this.buildModelMeta(this.currentModelId),
     };
   }
 
@@ -1649,7 +2136,24 @@ export class AgyAgentClient extends EventEmitter {
    * Set thinking effort level.
    */
   async setThinkingLevel(level: string): Promise<RpcResponse> {
-    if (this.currentEffort === level && this.isRunning()) {
+    const normalized = level.trim().toLowerCase();
+    if (isAgyFixedEffortModel(this.currentModelId)) {
+      return {
+        type: "response",
+        command: "set_thinking_level",
+        success: false,
+        error: "Reasoning effort is not adjustable for this Antigravity model",
+      };
+    }
+    if (!isAgyEffortLevel(normalized)) {
+      return {
+        type: "response",
+        command: "set_thinking_level",
+        success: false,
+        error: `Unsupported Antigravity reasoning effort "${level}" (valid: ${AGY_EFFORT_LEVELS.join(", ")})`,
+      };
+    }
+    if (this.currentEffort === normalized && this.isRunning()) {
       return {
         type: "response",
         command: "set_thinking_level",
@@ -1664,7 +2168,7 @@ export class AgyAgentClient extends EventEmitter {
         error: "Wait for the current Antigravity turn to finish before changing effort",
       };
     }
-    this.currentEffort = level;
+    this.currentEffort = normalized;
     if (this.isRunning() && !this.isTurnStreaming) {
       await this.restart();
     }
@@ -2259,6 +2763,7 @@ export class AgyAgentClient extends EventEmitter {
    */
   static async getAvailableModels(userAgyPath?: string): Promise<PiModel[]> {
     const resolved = resolveAgySpawn(userAgyPath);
+    const cacheKey = [resolved.cmd, ...resolved.scriptArgs].join("\u0000");
 
     return new Promise((resolve) => {
       execFile(
@@ -2270,40 +2775,10 @@ export class AgyAgentClient extends EventEmitter {
             return resolve([]);
           }
 
-          const lines = stdout.split("\n");
-          const models: PiModel[] = [];
-
-          for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line || line.startsWith("Fetching")) continue;
-
-            const parts = line.split(/\t+/);
-            if (parts.length >= 2) {
-              const id = parts[0].trim();
-              const name = parts[1].trim();
-              models.push({
-                id,
-                provider: "antigravity",
-                name,
-                reasoning: true,
-                thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-              });
-            } else {
-              const spaceParts = line.split(/\s{2,}/);
-              if (spaceParts.length >= 2) {
-                const id = spaceParts[0].trim();
-                const name = spaceParts[1].trim();
-                models.push({
-                  id,
-                  provider: "antigravity",
-                  name,
-                  reasoning: true,
-                  thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
-                });
-              }
-            }
+          const models = parseAgyModelsOutput(stdout);
+          if (models.length > 0) {
+            AgyAgentClient.modelsCache.set(cacheKey, models);
           }
-
           resolve(models);
         }
       );
