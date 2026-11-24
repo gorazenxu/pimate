@@ -61,3 +61,10 @@ test("missing raw AGY total falls back to input plus output before cache", () =>
     1_025
   );
 });
+
+test("AGY pricing strips -xhigh and -max effort suffixes", () => {
+  const usage = { input: 1_000_000, output: 1_000_000, thinking: 0, cacheRead: 0, total: 2_000_000 };
+  const base = calculateAgyCost("gemini-3.8-flash-high", usage);
+  assert.equal(calculateAgyCost("gemini-3.8-flash-xhigh", usage), base);
+  assert.equal(calculateAgyCost("gemini-3.8-flash-max", usage), base);
+});

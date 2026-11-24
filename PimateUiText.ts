@@ -28,8 +28,10 @@ const EN_TEXT = {
   exportedAt: "Exported at: {time}",
   exportUserRole: "👤 User",
   exportAssistantRole: "🤖 Pi Agent",
+  exportAgyAssistantRole: "✦ Antigravity",
   exportThinking: "Thinking",
   exportToolCall: "Tool call",
+  exportToolResult: "Tool output",
   exportNoteSuccess: "Note exported: {fileName}",
   exportNoteFailure: "Failed to export note: {error}",
 } as const;
@@ -64,8 +66,10 @@ const ZH_TEXT: Record<PimateUiTextKey, string> = {
   exportedAt: "导出时间: {time}",
   exportUserRole: "👤 用户",
   exportAssistantRole: "🤖 Pi Agent",
+  exportAgyAssistantRole: "✦ Antigravity",
   exportThinking: "思考过程",
   exportToolCall: "工具调用",
+  exportToolResult: "工具输出",
   exportNoteSuccess: "已导出笔记: {fileName}",
   exportNoteFailure: "导出笔记失败: {error}",
 };

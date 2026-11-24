@@ -200,6 +200,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
   // 误跳焦点问题（自定义 provider 区里的 input 也匹配 input[type=password]）。
   justAddedBuiltinId: string | null = null;
   private activeSettingsTab: "pi" | "agy" | "general" | "display" = "pi";
+  private renderSeq = 0;
 
   constructor(app: App, plugin: PiAgentPlugin) {
     super(app, plugin);
@@ -228,6 +229,23 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
   private removeAuthProvider(provider: string): void {
     updatePiAuthFile(this.getAuthJsonPath(), data => { delete data[provider]; });
+  }
+
+  private async restartPiTabsInViews(): Promise<void> {
+    const leaves = this.app.workspace.getLeavesOfType(PI_AGENT_VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view as {
+        restartPiClients?: () => Promise<void>;
+        activeTab?: { engine?: string };
+        client?: { engine?: string; restart?: () => Promise<void> };
+      } | undefined;
+      if (!view) continue;
+      if (typeof view.restartPiClients === "function") {
+        await view.restartPiClients();
+      } else if (view.client && view.client.engine === "pi" && typeof view.client.restart === "function") {
+        await view.client.restart();
+      }
+    }
   }
 
   // 辅助方法：获取 models.json 的绝对路径（自定义 provider 定义）
@@ -499,6 +517,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    this.renderSeq++;
     const { containerEl } = this;
     containerEl.empty();
 
@@ -608,6 +627,15 @@ export class PiAgentSettingTab extends PluginSettingTab {
           })
       );
 
+    // Start the models probe first so checkAuthStatus coalesces onto the
+    // same in-flight `agy models` request instead of spawning a second CLI.
+    const renderSeq = this.renderSeq;
+    const isCurrentRender = () =>
+      renderSeq === this.renderSeq && containerEl.isConnected;
+    const modelsPromise = AgyAgentClient.getAvailableModels(
+      this.plugin.settings.agyPath
+    );
+
     // 动态探测状态卡片
     const agyStatusCard = containerEl.createDiv("agy-status-card");
     const statusHeader = agyStatusCard.createDiv("agy-status-card-header");
@@ -620,6 +648,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     // 异步探测
     AgyAgentClient.checkAuthStatus(this.plugin.settings.agyPath).then((status) => {
+      if (!isCurrentRender()) return;
       statusActions.empty();
       const account = readAgyAccountBridge();
       if (!status.installed) {
@@ -662,7 +691,10 @@ export class PiAgentSettingTab extends PluginSettingTab {
           const refreshBtn = statusActions.createEl("button", {
             text: isZh ? "刷新显示" : "Refresh",
           });
-          refreshBtn.onclick = () => this.display();
+          refreshBtn.onclick = () => {
+            AgyAgentClient.clearModelsCache();
+            this.display();
+          };
           const removeBtn = statusActions.createEl("button", {
             text: isZh ? "关闭账号显示" : "Disable account display",
           });
@@ -729,6 +761,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         );
       }
     }).catch(() => {
+      if (!isCurrentRender()) return;
       agyStatusCard.className = "agy-status-card is-not-installed";
       statusTitle.setText(isZh ? "🔴 探测 Antigravity 状态失败" : "🔴 Failed to Probe Antigravity");
       statusDesc.setText(isZh ? "请检查系统权限或在下方配置正确的可执行路径。" : "Please verify permissions or configure the executable path below.");
@@ -826,6 +859,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         });
 
         const showModelsUnavailable = () => {
+          if (!isCurrentRender()) return;
           const current = this.plugin.settings.agyModel || currentVal;
           const base = parseAgyModelEffortSuffix(current)?.baseId || current;
           dropdown.selectEl.empty();
@@ -833,7 +867,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
           dropdown.setValue(base);
           dropdown.setDisabled(true);
         };
-        AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath).then((models) => {
+        modelsPromise.then((models) => {
+          if (!isCurrentRender()) return;
           if (models.length > 0) {
             loadedAgyModels = models;
             loadedAgyFamilies = groupAgyModelsByFamily(models);
@@ -1018,19 +1053,24 @@ export class PiAgentSettingTab extends PluginSettingTab {
     // 预设模型映射表，当选择 provider 时可以关联更新 modelId 的 placeholder 和推荐的默认值
     const providerDefaults: Record<string, { model: string; desc: string; placeholder: string }> = {
       "anthropic": {
-        model: "claude-3-5-sonnet-latest",
-        desc: isZh ? "推荐: claude-3-5-sonnet-latest, claude-3-5-haiku-latest" : "Recommended: claude-3-5-sonnet-latest, claude-3-5-haiku-latest",
-        placeholder: "claude-3-5-sonnet-latest"
+        model: "claude-sonnet-4-6",
+        desc: isZh ? "推荐: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5" : "Recommended: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5",
+        placeholder: "claude-sonnet-4-6"
       },
       "openai-codex": {
+        model: "gpt-5.5",
+        desc: isZh ? "推荐: gpt-5.5, gpt-5.3-codex-spark" : "Recommended: gpt-5.5, gpt-5.3-codex-spark",
+        placeholder: "gpt-5.5"
+      },
+      "openai": {
         model: "gpt-4o",
-        desc: isZh ? "推荐: gpt-4o, gpt-4o-mini, o1, o3-mini" : "Recommended: gpt-4o, gpt-4o-mini, o1, o3-mini",
+        desc: isZh ? "推荐: gpt-4o, gpt-4.1, gpt-4.1-mini" : "Recommended: gpt-4o, gpt-4.1, gpt-4.1-mini",
         placeholder: "gpt-4o"
       },
       "deepseek": {
-        model: "deepseek-chat",
-        desc: isZh ? "推荐: deepseek-chat, deepseek-reasoner" : "Recommended: deepseek-chat, deepseek-reasoner",
-        placeholder: "deepseek-chat"
+        model: "deepseek-v4-pro",
+        desc: isZh ? "推荐: deepseek-v4-pro, deepseek-flash" : "Recommended: deepseek-v4-pro, deepseek-flash",
+        placeholder: "deepseek-v4-pro"
       },
       "minimax": {
         model: "MiniMax-M2.7",
@@ -1101,36 +1141,33 @@ export class PiAgentSettingTab extends PluginSettingTab {
         dropdown.setValue(this.plugin.settings.provider || "anthropic")
           .onChange(async (value) => {
             this.plugin.settings.provider = value;
-            // 联动更新模型ID默认值
+            // 联动更新模型ID默认值；若目标厂商无预设推荐模型则清空旧厂商残留 ID，避免跨厂商启动失败
             const def = providerDefaults[value];
-            if (def) {
-              this.plugin.settings.modelId = def.model;
-            }
+            this.plugin.settings.modelId = def ? def.model : "";
             await this.plugin.saveSettings();
             
             // 实时刷新设置页，以展示新 provider 的 Placeholder 和模型 ID 值
             this.display();
 
-            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口，
-            // 让设置页修改的默认 provider/model 也通过 getState() 兜底。
+            // 联动更新聊天视图 — 仅作用于当前处于 Pi 引擎且 provider/modelId 均非空的激活 Tab。
+            const targetModelId = this.plugin.settings.modelId;
+            if (!targetModelId) return;
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
-              if (view) {
-                if (typeof view.updateActiveTabModel === "function") {
-                  try {
-                    await view.updateActiveTabModel(value, this.plugin.settings.modelId);
-                  } catch (err) {
-                    // Pi 拒绝了模型切换时，保持设置已写入但 UI 状态由
-                    // view 内部同步入口统一刷新；此处仅记录错误。
-                    console.warn("[pimate] updateActiveTabModel failed in settings:", err);
-                  }
-                } else if (view.client && typeof view.client.setModel === "function") {
-                  // 兜底：旧版本 view 仍直接调用底层 RPC。
-                  await view.client.setModel(value, this.plugin.settings.modelId);
-                  if (typeof view.updateModelDisplay === "function") {
-                    view.updateModelDisplay(value, this.plugin.settings.modelId);
-                  }
+              if (!view) continue;
+              const activeEngine = view.activeTab?.engine || this.plugin.settings.defaultEngine;
+              if (activeEngine !== "pi") continue;
+              if (typeof view.updateActiveTabModel === "function") {
+                try {
+                  await view.updateActiveTabModel(value, targetModelId);
+                } catch (err) {
+                  console.warn("[pimate] updateActiveTabModel failed in settings:", err);
+                }
+              } else if (view.client && view.client.engine === "pi" && typeof view.client.setModel === "function") {
+                await view.client.setModel(value, targetModelId);
+                if (typeof view.updateModelDisplay === "function") {
+                  view.updateModelDisplay(value, targetModelId);
                 }
               }
             }
@@ -1152,22 +1189,24 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.plugin.settings.modelId = trimmed;
             await this.plugin.saveSettings();
 
-            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口。
+            if (!this.plugin.settings.provider || !trimmed) return;
+            // 联动更新聊天视图 — 仅作用于当前处于 Pi 引擎的激活 Tab。
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
-              if (view) {
-                if (typeof view.updateActiveTabModel === "function") {
-                  try {
-                    await view.updateActiveTabModel(this.plugin.settings.provider, trimmed);
-                  } catch (err) {
-                    console.warn("[pimate] updateActiveTabModel failed in settings:", err);
-                  }
-                } else if (view.client && typeof view.client.setModel === "function") {
-                  await view.client.setModel(this.plugin.settings.provider, trimmed);
-                  if (typeof view.updateModelDisplay === "function") {
-                    view.updateModelDisplay(this.plugin.settings.provider, trimmed);
-                  }
+              if (!view) continue;
+              const activeEngine = view.activeTab?.engine || this.plugin.settings.defaultEngine;
+              if (activeEngine !== "pi") continue;
+              if (typeof view.updateActiveTabModel === "function") {
+                try {
+                  await view.updateActiveTabModel(this.plugin.settings.provider, trimmed);
+                } catch (err) {
+                  console.warn("[pimate] updateActiveTabModel failed in settings:", err);
+                }
+              } else if (view.client && view.client.engine === "pi" && typeof view.client.setModel === "function") {
+                await view.client.setModel(this.plugin.settings.provider, trimmed);
+                if (typeof view.updateModelDisplay === "function") {
+                  view.updateModelDisplay(this.plugin.settings.provider, trimmed);
                 }
               }
             }
@@ -1192,22 +1231,23 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.plugin.settings.thinkingLevel = value;
             await this.plugin.saveSettings();
 
-            // 联动更新聊天视图 — 走 View 统一的 Pi 权威同步入口。
+            // 联动更新聊天视图 — 仅作用于当前处于 Pi 引擎的激活 Tab。
             const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
             for (const leaf of leaves) {
               const view = leaf.view as any;
-              if (view) {
-                if (typeof view.updateActiveTabThinkingLevel === "function") {
-                  try {
-                    await view.updateActiveTabThinkingLevel(value);
-                  } catch (err) {
-                    console.warn("[pimate] updateActiveTabThinkingLevel failed in settings:", err);
-                  }
-                } else if (view.client && typeof view.client.setThinkingLevel === "function") {
-                  await view.client.setThinkingLevel(value);
-                  if (view.footerEffortCurrent) {
-                    view.footerEffortCurrent.setText(view.getThinkingLevelLabel(value));
-                  }
+              if (!view) continue;
+              const activeEngine = view.activeTab?.engine || this.plugin.settings.defaultEngine;
+              if (activeEngine !== "pi") continue;
+              if (typeof view.updateActiveTabThinkingLevel === "function") {
+                try {
+                  await view.updateActiveTabThinkingLevel(value);
+                } catch (err) {
+                  console.warn("[pimate] updateActiveTabThinkingLevel failed in settings:", err);
+                }
+              } else if (view.client && view.client.engine === "pi" && typeof view.client.setThinkingLevel === "function") {
+                await view.client.setThinkingLevel(value);
+                if (view.footerEffortCurrent) {
+                  view.footerEffortCurrent.setText(view.getThinkingLevelLabel(value));
                 }
               }
             }
@@ -1753,11 +1793,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
             this.removeAuthProvider(id);
             this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
             this.display();
-            const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-            for (const leaf of leaves) {
-              const view = leaf.view as any;
-              if (view && view.client) await view.client.restart();
-            }
+            await this.restartPiTabsInViews();
           })().catch((err: unknown) => {
             console.error("[pimate] disconnect provider failed", err);
             new Notice(err instanceof Error ? err.message : String(err));
@@ -1794,11 +1830,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           this.writeApiKey(id, tempValue);
           this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
           this.display();
-          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-          for (const leaf of leaves) {
-            const view = leaf.view as any;
-            if (view && view.client) await view.client.restart();
-          }
+          await this.restartPiTabsInViews();
         }
       };
       const save = () => void saveValue().catch(() => new Notice(isZh
@@ -1818,11 +1850,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           this.removeAuthProvider(id);
           this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
           this.display();
-          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-          for (const leaf of leaves) {
-            const view = leaf.view as any;
-            if (view && view.client) await view.client.restart();
-          }
+          await this.restartPiTabsInViews();
         })().catch((err: unknown) => {
           console.error("[pimate] disconnect provider failed", err);
           new Notice(err instanceof Error ? err.message : String(err));
@@ -1844,7 +1872,10 @@ export class PiAgentSettingTab extends PluginSettingTab {
     const modelCount = models.length;
     const baseUrl = prov.baseUrl || "";
     const apiType = prov.api || "";
-    const hasKey = !!(authData[id] && authData[id].key);
+    const hasKey = !!(
+      (authData[id] && authData[id].key) ||
+      (typeof prov.apiKey === "string" && prov.apiKey.trim())
+    );
 
     const descParts: string[] = [];
     if (baseUrl) descParts.push(baseUrl);
@@ -1884,11 +1915,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
         if (tempValue) {
           this.writeApiKey(id, tempValue);
           this.display();
-          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-          for (const leaf of leaves) {
-            const view = leaf.view as any;
-            if (view && view.client) await view.client.restart();
-          }
+          await this.restartPiTabsInViews();
         }
       };
       const save = () => void saveValue().catch(() => new Notice(isZh
@@ -1916,11 +1943,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
           if (fs.existsSync(aPath)) this.removeAuthProvider(id);
           this.temporaryProviders = this.temporaryProviders.filter(pId => pId !== id);
           this.display();
-          const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-          for (const leaf of leaves) {
-            const view = leaf.view as any;
-            if (view && view.client) await view.client.restart();
-          }
+          await this.restartPiTabsInViews();
         })().catch((err: unknown) => {
           console.error("[pimate] delete custom provider failed", err);
           new Notice(err instanceof Error ? err.message : String(err));
@@ -1936,10 +1959,10 @@ export class PiAgentSettingTab extends PluginSettingTab {
       baseUrl: config.baseUrl.trim(),
       api: config.apiType,
     };
-    // API Key：写入 auth.json，models.json 里用 $ENV 占位或直接写 key
+    // API Key：明文密钥仅写入 0o600 权限的 auth.json（Pi 会优先从 auth.json 解析），
+    // 不在 models.json 中重复明文落盘；仅保留 $ENV / !command 形式引用。
     const apiKey = config.apiKey.trim();
-    if (apiKey) {
-      // 直接把 key 写进 models.json（最简单可靠，跟 siliconflow 现状一致）
+    if (apiKey && (apiKey.startsWith("$") || apiKey.startsWith("!"))) {
       prov.apiKey = apiKey;
     }
     // compat 选项
@@ -1950,7 +1973,7 @@ export class PiAgentSettingTab extends PluginSettingTab {
     prov.models = config.models.filter(m => m.id.trim());
 
     updatePiModelsFile(this.getModelsJsonPath(), config.providerId, prov);
-    if (apiKey) this.writeApiKey(config.providerId, apiKey);
+    if (apiKey && !apiKey.startsWith("$")) this.writeApiKey(config.providerId, apiKey);
 
     new Notice(isZh
       ? `已添加自定义 provider “${config.providerId}”到 models.json。重启 Pimate 生效。`
@@ -1958,14 +1981,8 @@ export class PiAgentSettingTab extends PluginSettingTab {
 
     this.display();
 
-    // 联动重启聊天视图
-    const leaves = this.app.workspace.getLeavesOfType("pimate-chat-view");
-    for (const leaf of leaves) {
-      const view = leaf.view as any;
-      if (view && view.client) {
-        void view.client.restart().catch((e: unknown) => console.error("[pimate] restart failed", e));
-      }
-    }
+    // 联动重启 Pi 聊天视图客户端
+    void this.restartPiTabsInViews().catch((e: unknown) => console.error("[pimate] restart failed", e));
   }
 
   // 辅助渲染单个技能项目
@@ -2066,22 +2083,14 @@ export class PiAgentSettingTab extends PluginSettingTab {
       // Refresh settings to show new "已配置" status
       this.display();
 
-      // Restart the chat client's Pi child process so the new token is used
-      const leaves = this.app.workspace.getLeavesOfType(
-        PI_AGENT_VIEW_TYPE as any
-      );
-      for (const leaf of leaves) {
-        const view = (leaf as any).view;
-        if (view && view.client) {
-          try {
-            await view.client.restart();
-          } catch (err) {
-            console.error(
-              "[pimate] failed to restart client after OAuth login",
-              err
-            );
-          }
-        }
+      // Restart Pi clients so the new token is used without touching AGY tabs
+      try {
+        await this.restartPiTabsInViews();
+      } catch (err) {
+        console.error(
+          "[pimate] failed to restart client after OAuth login",
+          err
+        );
       }
     } catch (err) {
       const message = (err as Error)?.message || String(err);

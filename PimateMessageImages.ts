@@ -1,6 +1,44 @@
 export interface MessageImage {
-  data: string;
-  mimeType: string;
+  data?: string;
+  mimeType?: string;
+  src?: string;
+  vaultPath?: string;
+  label?: string;
+}
+
+const AGY_VAULT_IMAGE_REF_RE = /@((?:999agy对话图片)\/[^\s"'<>`()\[\]]+\.(?:png|jpe?g|gif|webp|bmp|avif))/gi;
+
+/**
+ * Extract safe relative Vault image paths written by AGY attachment persistence,
+ * ignoring traversal segments and references inside fenced code blocks.
+ */
+export function extractAgyVaultImagePaths(text: string): string[] {
+  if (!text) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    AGY_VAULT_IMAGE_REF_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = AGY_VAULT_IMAGE_REF_RE.exec(line)) !== null) {
+      const candidate = match[1];
+      if (!candidate || candidate.includes("..") || candidate.includes("\\") || candidate.includes("://")) {
+        continue;
+      }
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        out.push(candidate);
+      }
+    }
+  }
+  return out;
 }
 
 /** Native Pi image blocks only: never load URLs or paths found in chat text. */

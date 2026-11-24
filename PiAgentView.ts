@@ -49,6 +49,7 @@ import {
   groupAgyModelsByFamily,
   isAgyFixedEffortModel,
   parseAgyModelEffortSuffix,
+  pickAgyTitleModel,
   resolveAgyFamilyVariant,
   type AgyConversationSummary,
   type AgyConversationWorkspaceStatus,
@@ -69,7 +70,12 @@ import {
   getAgyRequestStorePath,
 } from "./AgyRequestStore";
 import { normalizeAgyFileLinks } from "./AgyFileLinkUtils";
-import { getMessageImages, stripPiImageDimensionNotes } from "./PimateMessageImages";
+import {
+  extractAgyVaultImagePaths,
+  getMessageImages,
+  stripPiImageDimensionNotes,
+  type MessageImage,
+} from "./PimateMessageImages";
 import {
   getVaultFileExtension,
   getVaultFileIcon,
@@ -245,6 +251,7 @@ export class PiAgentView extends ItemView {
   client: AgentClient | null = null;
   private chatContainer: HTMLElement | null = null;
   private messageNavEl: HTMLElement | null = null;
+  private inputAreaEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
   private streamingTextEl: HTMLElement | null = null;
   private streamingCursorEl: HTMLElement | null = null;
@@ -256,6 +263,7 @@ export class PiAgentView extends ItemView {
   private contextRowEl: HTMLElement | null = null;
   private imagePreviewEl: HTMLElement | null = null;
   private widgetEl: HTMLElement | null = null;
+  private historyBtnEl: HTMLElement | null = null;
   private abortBtn: HTMLButtonElement | null = null;
   private steerBtn: HTMLButtonElement | null = null;
   private statusBar: HTMLElement | null = null;
@@ -547,6 +555,22 @@ export class PiAgentView extends ItemView {
 
     this.scrollFollower?.dispose();
     this.chatContainer = container.createDiv("pi-agent-chat");
+    this.chatContainer.addEventListener("click", (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || target.tagName !== "IMG") return;
+      if (target.closest(".pi-agent-message-image")) return;
+      const src = (target as HTMLImageElement).getAttribute("src") || "";
+      if (!/^(app:|capacitor:|blob:|data:image\/)/i.test(src)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const alt = (target as HTMLImageElement).getAttribute("alt") || "";
+      new PimateImageZoomModal(
+        this.app,
+        [{ src, label: alt || undefined }],
+        0,
+        this.plugin.settings.language !== "en"
+      ).open();
+    });
     this.scrollFollower = new ChatScrollFollower(this.chatContainer, () => this.plugin.settings.autoScroll);
     this.renderEmptyState();
 
@@ -634,6 +658,7 @@ export class PiAgentView extends ItemView {
     });
 
     const historyBtn = composerActions.createDiv("pi-agent-mini-action");
+    this.historyBtnEl = historyBtn;
     setIcon(historyBtn, "history");
     historyBtn.setAttribute("title", isZh ? "恢复会话/历史" : "History sessions");
     historyBtn.onclick = () => this.runAsync(() => this.toggleHistoryPanel());
@@ -647,7 +672,7 @@ export class PiAgentView extends ItemView {
             .setIcon("folder")
             .onClick(() => {
               try {
-                const historyDir = join(homedir(), ".pi", "sessions");
+                const historyDir = join(homedir(), ".pi", "agent", "sessions");
                 const electron = (window as unknown as { require?: (moduleName: string) => { shell?: { openPath: (target: string) => Promise<string> } } }).require?.("electron");
                 void electron?.shell?.openPath(historyDir);
               } catch (err) {
@@ -659,6 +684,7 @@ export class PiAgentView extends ItemView {
     });
 
     const inputArea = container.createDiv("pi-agent-input-area");
+    this.inputAreaEl = inputArea;
     this.contextRowEl = inputArea.createDiv("pi-agent-context-row");
     this.imagePreviewEl = inputArea.createDiv("pi-agent-image-preview");
 
@@ -814,11 +840,25 @@ export class PiAgentView extends ItemView {
     };
 
     // 1. Model Selector Container (Compat with Claudian)
+    const initialIsAgy =
+      this.plugin.settings.enableAntigravity !== false &&
+      this.plugin.settings.defaultEngine === "antigravity";
+    const initialProvider = initialIsAgy
+      ? "antigravity"
+      : (this.plugin.settings.provider || "");
+    const initialModelId = initialIsAgy
+      ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high")
+      : (this.plugin.settings.modelId || "Sonnet");
+    const initialEffort = initialIsAgy
+      ? (isAgyFixedEffortModel(initialModelId)
+          ? (isZh ? "固定" : "Fixed")
+          : this.getThinkingLevelLabel(this.plugin.settings.agyEffort || "high"))
+      : this.getThinkingLevelLabel(this.plugin.settings.thinkingLevel);
+
     const modelSelector = footerLeft.createDiv("pi-agent-model-selector");
     const footerModelBtn = modelSelector.createDiv("pi-agent-model-btn");
     this.footerModelLabel = footerModelBtn.createSpan("pi-agent-model-label");
-    this.footerModelLabel.setText(this.getModelShortName(this.plugin.settings.modelId || "Sonnet"));
-    this.footerModelLabel.setAttribute("title", `${this.plugin.settings.provider || ""}/${this.plugin.settings.modelId || ""}`);
+    this.updateModelDisplay(initialProvider, initialModelId);
     
     // 点击模型按钮，在按钮正上方弹起局部的模型选择浮层
     footerModelBtn.onclick = (e) => {
@@ -832,7 +872,7 @@ export class PiAgentView extends ItemView {
     effortLabel.setText(isZh ? "Effort:" : "Effort:");
     this.effortGearsEl = this.effortSelector.createDiv("pi-agent-thinking-gears");
     this.footerEffortCurrent = this.effortGearsEl.createDiv("pi-agent-thinking-current");
-    this.footerEffortCurrent.setText(this.getThinkingLevelLabel(this.plugin.settings.thinkingLevel));
+    this.footerEffortCurrent.setText(initialEffort);
     
     // 点击思考强度，在上方弹起局部的思考强度选择浮层
     this.effortGearsEl.onclick = (e) => {
@@ -1383,12 +1423,42 @@ export class PiAgentView extends ItemView {
       const data = JSON.parse(readFileSync(filePath, "utf-8"));
       const item = data?.[provider];
       if (item && item.type === "api_key" && typeof item.key === "string") {
-        return item.key.trim();
+        const trimmed = item.key.trim();
+        // Keep !command credentials in auth.json for Pi itself to execute;
+        // injecting "!..." into process.env would override it as a literal string.
+        return trimmed.startsWith("!") ? "" : trimmed;
       }
       return "";
     } catch (e) {
       console.warn("[pimate] readProviderApiKey failed:", e);
       return "";
+    }
+  }
+
+  /**
+   * Refresh cached credentials and restart Pi clients without touching AGY tabs.
+   */
+  public async restartPiClients(): Promise<void> {
+    const settings = this.plugin.settings;
+    for (const tab of [...this.tabs]) {
+      const effectiveEngine = tab.engine || settings.defaultEngine;
+      if (effectiveEngine === "antigravity" || !tab.client || tab.client.engine !== "pi") {
+        continue;
+      }
+      const piClient = tab.client as PiAgentClient;
+      const provider = tab.modelProvider || settings.provider || "";
+      const nextKey = this.readProviderApiKey(provider) || settings.apiKey;
+      piClient.setApiKey(nextKey);
+      if (piClient.isRunning()) {
+        await piClient.restart();
+        if (this.activeTab === tab) {
+          await this.refreshStateDisplay();
+        }
+      } else {
+        await piClient.destroy().catch(() => undefined);
+        if (tab.client === piClient) tab.client = null;
+        if (this.client === piClient) this.client = null;
+      }
     }
   }
 
@@ -1661,7 +1731,7 @@ export class PiAgentView extends ItemView {
       }
       if (levelChanged && tab === this.activeTab && this.footerEffortCurrent) {
         this.footerEffortCurrent.setText(
-          this.getThinkingLevelLabel(tab.thinkingLevel ?? "")
+          this.getTabEffortDisplayLabel(tab, tab.thinkingLevel ?? "")
         );
       }
     }
@@ -1846,6 +1916,22 @@ export class PiAgentView extends ItemView {
         this.setStatus("✅ Compaction complete", "ok");
         break;
 
+      case "auto_retry_start": {
+        const attempt = typeof event.attempt === "number" ? event.attempt : 1;
+        const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : 3;
+        this.setStatus(
+          this.plugin.settings.language !== "en"
+            ? `↻ 正在自动重试 (${attempt}/${maxAttempts})…`
+            : `↻ Auto-retrying (${attempt}/${maxAttempts})…`,
+          "thinking"
+        );
+        break;
+      }
+
+      case "auto_retry_end":
+        this.renderActiveTabRuntimeStatus();
+        break;
+
       case "extension_error":
         console.error("[pi-agent] Extension error", event);
         if (event.event !== "command") {
@@ -1913,9 +1999,14 @@ export class PiAgentView extends ItemView {
       }
 
       const rendered = this.addMessage("user", this.stripRecentContextGuard(visibleContent));
-      // Prefer Pi's authoritative normalized image blocks. Pending originals
-      // remain a fallback for older Pi echoes and AGY's text-only adapter.
-      const images = nativeImages.length > 0 ? nativeImages : tab?.pendingUserImages || [];
+      // Prefer Pi's authoritative normalized image blocks, then pending originals,
+      // and finally AGY's persisted Vault image references.
+      const images: MessageImage[] =
+        nativeImages.length > 0
+          ? nativeImages
+          : tab?.pendingUserImages?.length
+            ? tab.pendingUserImages
+            : this.resolveAgyVaultImagesFromText(visibleContent);
       if (images.length > 0) this.renderUserMessageImages(rendered, images);
       if (tab) tab.pendingUserImages = [];
     } else if (message.role === "assistant") {
@@ -2622,6 +2713,20 @@ export class PiAgentView extends ItemView {
         new Notice(
           `🔔 ${(event.message as string) || ""}`
         );
+      } else if (method === "setStatus") {
+        const statusText = typeof event.statusText === "string" ? event.statusText.trim() : "";
+        if (statusText) {
+          this.setStatus(statusText, "thinking");
+        } else {
+          this.renderActiveTabRuntimeStatus();
+        }
+      } else if (method === "set_editor_text") {
+        if (this.inputEl && typeof event.text === "string") {
+          this.inputEl.value = event.text;
+          if (this.activeTab) this.activeTab.draft = event.text;
+          this.resizeInputEl();
+          this.updateButtons();
+        }
       } else if (method === "setWidget") {
         console.log("[pimate] setWidget event received:", event);
         const widgetKey = event.widgetKey as string;
@@ -3054,9 +3159,9 @@ export class PiAgentView extends ItemView {
       return false;
     }
 
-    // Pi 0.84 does not expose a clear-queue RPC. If follow-ups already exist,
-    // a short RPC-process restart after abort is the only safe way to ensure
-    // they cannot run after the selected redirect message.
+    // Pi 1.3.0 exposes `clear_queue` RPC to flush steering and follow-up queues
+    // without tearing down the process. Keep restartClientAfterHardSteer as a
+    // fallback only when clearQueue is unavailable or fails.
     const queuedBeforeAbort = [...this.pendingQueuedMessages];
     const hasQueuedMessages =
       queuedBeforeAbort.length > 0 || (tab.queueCount || 0) > 0;
@@ -3083,8 +3188,21 @@ export class PiAgentView extends ItemView {
           // incorrectly reject a valid redirect.
           this.discardQueuedMessageBubbles(queuedBeforeAbort);
         } else {
-          client = await this.restartClientAfterHardSteer(tab, initialClient);
-          this.discardQueuedMessageBubbles(queuedBeforeAbort);
+          let clearedInPlace = false;
+          if (typeof (initialClient as PiAgentClient).clearQueue === "function") {
+            const clearRes = await (initialClient as PiAgentClient).clearQueue().catch(() => null);
+            if (clearRes?.success) {
+              tab.queueCount = 0;
+              tab.steeringCount = 0;
+              tab.followUpCount = 0;
+              this.discardQueuedMessageBubbles(queuedBeforeAbort);
+              clearedInPlace = true;
+            }
+          }
+          if (!clearedInPlace) {
+            client = await this.restartClientAfterHardSteer(tab, initialClient);
+            this.discardQueuedMessageBubbles(queuedBeforeAbort);
+          }
         }
       }
 
@@ -3435,6 +3553,29 @@ export class PiAgentView extends ItemView {
     }
   }
 
+  private getTabEffortDisplayLabel(
+    tab: ChatTab | null | undefined,
+    fallbackLevel?: string
+  ): string {
+    const isAgy = (tab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    const modelId =
+      tab?.modelId ||
+      tab?.piModelMeta?.id ||
+      (isAgy
+        ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high")
+        : (this.plugin.settings.modelId || ""));
+    if (isAgy && modelId && isAgyFixedEffortModel(modelId)) {
+      return this.plugin.settings.language === "zh" ? "固定" : "Fixed";
+    }
+    const level =
+      fallbackLevel ??
+      tab?.thinkingLevel ??
+      (isAgy
+        ? (this.plugin.settings.agyEffort || "high")
+        : (this.plugin.settings.thinkingLevel ?? ""));
+    return this.getThinkingLevelLabel(level);
+  }
+
   private renderActiveTabModelAndEffort(): void {
     const tab = this.activeTab;
     if (!tab) return;
@@ -3442,10 +3583,9 @@ export class PiAgentView extends ItemView {
     const isAgy = (tab.engine || this.plugin.settings.defaultEngine) === "antigravity";
     const provider = tab.modelProvider || (isAgy ? "antigravity" : (this.plugin.settings.provider || ""));
     const modelId = tab.modelId || (isAgy ? (this.plugin.settings.agyModel || "gemini-3.8-flash-high") : (this.plugin.settings.modelId || ""));
-    const level = tab.thinkingLevel ?? (isAgy ? (this.plugin.settings.agyEffort || "high") : (this.plugin.settings.thinkingLevel ?? ""));
     this.updateModelDisplay(provider, modelId);
     if (this.footerEffortCurrent) {
-      this.footerEffortCurrent.setText(this.getThinkingLevelLabel(level));
+      this.footerEffortCurrent.setText(this.getTabEffortDisplayLabel(tab));
     }
   }
 
@@ -3818,6 +3958,7 @@ export class PiAgentView extends ItemView {
     if (!this.inputEl) return;
     const isBash = this.inputEl.value.trimStart().startsWith("!");
     this.inputEl.toggleClass("is-bash-mode", isBash);
+    this.inputAreaEl?.toggleClass("is-bash-mode", isBash);
     this.inputEl.setAttribute(
       "placeholder",
       isBash
@@ -4594,10 +4735,16 @@ export class PiAgentView extends ItemView {
       settings.agyTitleConversationTurns = 0;
     }
 
+    const titleSelection = pickAgyTitleModel(
+      this.agyModelsCache,
+      tab.modelId || settings.agyModel || "gemini-3.8-flash-high",
+      tab.thinkingLevel || settings.agyEffort || "high"
+    );
+
     const titleClient = new AgyAgentClient({
       agyPath: settings.agyPath,
-      modelId: tab.modelId || settings.agyModel || "gemini-3.8-flash-high",
-      effort: tab.thinkingLevel || settings.agyEffort || "high",
+      modelId: titleSelection.modelId,
+      effort: titleSelection.effort || undefined,
       cwd: workspacePath,
       workspacePath,
       conversationId: conversationId || undefined,
@@ -5148,16 +5295,33 @@ export class PiAgentView extends ItemView {
       const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "-");
       const fileName = `Pimate Export ${dateStr} ${timeStr}.md`;
 
+      const isAgy = (this.activeTab?.engine || this.client.engine) === "antigravity";
       let mdContent = `# ${getPimateUiText(language, "exportTitle", { date: dateStr })}\n\n`;
       mdContent += `> ${getPimateUiText(language, "exportedAt", {
         time: now.toLocaleString(language === "zh" ? "zh-CN" : "en-US"),
       })}\n\n---\n\n`;
 
       for (const msg of rawMessages) {
+        if (msg.role === "toolResult") {
+          const toolText = typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content
+                  .filter((c: any) => c?.type === "text" && c.text)
+                  .map((c: any) => c.text)
+                  .join("\n")
+              : "";
+          const header = `> [!example]- ${getPimateUiText(language, "exportToolResult")}${msg.toolName ? ` \`${msg.toolName}\`` : ""}`;
+          mdContent += toolText.trim()
+            ? `${header}\n> ${toolText.trim().replace(/\n/g, "\n> ")}\n\n---\n\n`
+            : `${header}\n\n---\n\n`;
+          continue;
+        }
+
         const roleStr = msg.role === "user"
           ? getPimateUiText(language, "exportUserRole")
           : msg.role === "assistant"
-            ? getPimateUiText(language, "exportAssistantRole")
+            ? getPimateUiText(language, isAgy ? "exportAgyAssistantRole" : "exportAssistantRole")
             : msg.role;
         mdContent += `### ${roleStr}\n\n`;
         if (typeof msg.content === "string") {
@@ -5168,7 +5332,7 @@ export class PiAgentView extends ItemView {
               mdContent += `${item.text}\n\n`;
             } else if (item.type === "thinking" && item.thinking) {
               mdContent += `> [!note] ${getPimateUiText(language, "exportThinking")}\n> ${item.thinking.replace(/\n/g, "\n> ")}\n\n`;
-            } else if (item.type === "tool_call") {
+            } else if (item.type === "tool_call" || item.type === "toolCall") {
               mdContent += `> [!info] ${getPimateUiText(language, "exportToolCall")} \`${item.name}\`\n\n`;
             }
           }
@@ -5902,6 +6066,14 @@ export class PiAgentView extends ItemView {
     }
 
     if (meta.reasoning !== true) {
+      if (isAgy && isAgyFixedEffortModel(meta.id)) {
+        return {
+          options: [],
+          note: isZh
+            ? "当前模型在 AGY CLI 中使用固定推理预算，无需手动调节档位"
+            : "This model uses a fixed reasoning budget in AGY CLI (not adjustable)",
+        };
+      }
       return {
         options: [],
         note: isZh
@@ -6014,11 +6186,7 @@ export class PiAgentView extends ItemView {
   private async toggleHistoryPanel(): Promise<void> {
     this.isHistoryOpen = !this.isHistoryOpen;
     
-    const historyBtn = this.containerEl.querySelector(".pi-agent-mini-action:has(svg.svg-icon[class*='history'])") || 
-                       this.containerEl.querySelector(".pi-agent-mini-action svg[class*='history']")?.parentElement;
-    if (historyBtn) {
-      historyBtn.toggleClass("is-active", this.isHistoryOpen);
-    }
+    this.historyBtnEl?.toggleClass("is-active", this.isHistoryOpen);
 
     if (this.isHistoryOpen) {
       if (this.chatContainer) this.chatContainer.addClass("pi-agent-hidden");
@@ -7349,25 +7517,34 @@ export class PiAgentView extends ItemView {
 
     if (this.imagePreviewEl) {
       this.imagePreviewEl.toggleClass("has-content", images.length > 0);
-      for (const item of images) {
-        const card = this.imagePreviewEl.createDiv("pi-agent-image-card");
+      const zoomItems: ImageZoomModalItem[] = images.map((imgItem) => ({
+        src: `data:${imgItem.mimeType || "image/png"};base64,${imgItem.value}`,
+        label: imgItem.label,
+      }));
+      images.forEach((item, index) => {
+        const card = this.imagePreviewEl!.createDiv("pi-agent-image-card");
         const img = card.createEl("img", {
           cls: "pi-agent-image-card-thumb",
           attr: {
-            src: `data:${item.mimeType || "image/png"};base64,${item.value}`,
+            src: zoomItems[index].src,
             title: item.label,
           },
         });
         img.onclick = (e) => {
           e.stopPropagation();
-          new ContextPreviewModal(this.app, item).open();
+          new PimateImageZoomModal(
+            this.app,
+            zoomItems,
+            index,
+            this.plugin.settings.language !== "en"
+          ).open();
         };
         const remove = card.createSpan({ text: "×", cls: "pi-agent-image-card-remove" });
         remove.onclick = (e) => {
           e.stopPropagation();
           this.removeContextItem(item.id);
         };
-      }
+      });
     }
 
     this.contextRowEl.toggleClass("has-content", others.length > 0);
@@ -7429,12 +7606,40 @@ export class PiAgentView extends ItemView {
   }
 
   /**
+   * Resolve safe `@999agy对话图片/...` references in AGY user messages back into
+   * Vault-backed image items for live and history bubble thumbnails.
+   */
+  private resolveAgyVaultImagesFromText(text: string): MessageImage[] {
+    const vault = (this.app as { vault?: { getAbstractFileByPath?: (p: string) => unknown; getResourcePath?: (f: any) => string } } | undefined)?.vault;
+    if (!vault || typeof vault.getAbstractFileByPath !== "function" || typeof vault.getResourcePath !== "function") {
+      return [];
+    }
+    const paths = extractAgyVaultImagePaths(text);
+    const out: MessageImage[] = [];
+    for (const vaultPath of paths) {
+      const file = vault.getAbstractFileByPath(vaultPath) as { path?: string; name?: string; children?: unknown } | null;
+      if (!file || Array.isArray(file.children)) continue;
+      if (file instanceof TFile || (typeof file.path === "string" && !file.children)) {
+        const src = vault.getResourcePath(file);
+        if (src) {
+          out.push({
+            src,
+            vaultPath,
+            label: file.name || basename(vaultPath),
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
    * Render image attachments at the top of a user message bubble.
    * Mirrors Claudian's layout: image(s) above the text prompt, click to zoom.
    */
   private renderUserMessageImages(
     msg: RenderedMessage,
-    images: Array<{ data: string; mimeType: string }>
+    images: MessageImage[]
   ): void {
     // An optimistic queued bubble may already have previews when Pi echoes
     // its normalized images. Reuse its attachment row instead of duplicating it.
@@ -7445,21 +7650,41 @@ export class PiAgentView extends ItemView {
     attachments.empty();
     // Move the attachments block above the text content.
     msg.el.insertBefore(attachments, msg.contentEl);
-    for (const img of images) {
+
+    const rawText = msg.el.getAttribute("data-raw-content") || msg.contentEl.textContent || "";
+    const agyVaultPaths = extractAgyVaultImagePaths(rawText);
+    const zoomItems: ImageZoomModalItem[] = [];
+    const resolvedImages: Array<{ src: string; itemIndex: number; label: string }> = [];
+
+    images.forEach((img, idx) => {
+      const src = img.src || (img.data ? `data:${img.mimeType || "image/png"};base64,${img.data}` : "");
+      if (!src) return;
+      const vaultPath = img.vaultPath || agyVaultPaths[idx];
+      const label = img.label || (vaultPath ? basename(vaultPath) : `Image ${zoomItems.length + 1}`);
+      const itemIndex = zoomItems.length;
+      zoomItems.push({ src, label, vaultPath });
+      resolvedImages.push({ src, itemIndex, label });
+    });
+
+    const isZh = this.plugin?.settings?.language !== "en";
+    for (const entry of resolvedImages) {
       const card = attachments.createDiv("pi-agent-message-image");
       const el = card.createEl("img", {
         attr: {
-          src: `data:${img.mimeType || "image/png"};base64,${img.data}`,
-          alt: "Attached image",
+          src: entry.src,
+          alt: entry.label || "Attached image",
+          title: isZh ? "点击放大查看细节" : "Click to zoom",
           loading: "lazy",
           decoding: "async",
         },
       });
-      el.onclick = (e) => {
+      const openZoom = (e: MouseEvent) => {
+        e.preventDefault();
         e.stopPropagation();
-        const url = `data:${img.mimeType || "image/png"};base64,${img.data}`;
-        window.open(url, "_blank");
+        new PimateImageZoomModal(this.app, zoomItems, entry.itemIndex, isZh).open();
       };
+      card.onclick = openZoom;
+      el.onclick = openZoom;
     }
   }
 
@@ -7736,9 +7961,15 @@ export class PiAgentView extends ItemView {
     tab.requiresBranchHistoryRpc = false;
 
     if (newEngine === "antigravity") {
+      const clamped = clampAgyEffortForModel(
+        this.plugin.settings.agyModel || "gemini-3.8-flash-high",
+        this.plugin.settings.agyEffort || "high",
+        this.agyModelsCache
+      );
       tab.modelProvider = "antigravity";
-      tab.modelId = this.plugin.settings.agyModel || "gemini-3.8-flash-high";
-      tab.thinkingLevel = this.plugin.settings.agyEffort || "high";
+      tab.modelId = clamped.modelId;
+      tab.thinkingLevel = clamped.effort;
+      tab.piModelMeta = buildAgyModelMeta(clamped.modelId, this.agyModelsCache);
     } else {
       tab.modelProvider = this.plugin.settings.provider;
       tab.modelId = this.plugin.settings.modelId;
@@ -7794,7 +8025,7 @@ export class PiAgentView extends ItemView {
   private updateSmartReviewToggleUI(): void {
     if (!this.smartReviewToggleEl) return;
     const isEnabled = this.plugin.settings.smartReviewEnabled === true;
-    const isZh = this.plugin.settings.language !== "en";
+    const isZh = this.plugin.settings.language === "zh";
     this.smartReviewToggleEl.setText(isZh ? "审" : "Review");
     this.smartReviewToggleEl.setAttribute(
       "title",
@@ -8100,8 +8331,12 @@ export class PiAgentView extends ItemView {
           : Array.isArray(msg.content)
             ? msg.content.map((c: any) => c?.text || "").join("")
             : "";
-      const images = getMessageImages(msg.content);
-      const visibleContent = stripPiImageDimensionNotes(content, images.length);
+      const nativeImages = getMessageImages(msg.content);
+      const visibleContent = stripPiImageDimensionNotes(content, nativeImages.length);
+      const images: MessageImage[] =
+        nativeImages.length > 0
+          ? nativeImages
+          : this.resolveAgyVaultImagesFromText(visibleContent);
       const rendered = this.addMessage("user", this.stripRecentContextGuard(visibleContent), messageOptions);
       if (images.length > 0) this.renderUserMessageImages(rendered, images);
     } else if (msg.role === "compactionSummary") {
@@ -9020,6 +9255,13 @@ export class PiAgentView extends ItemView {
     const isZh = this.plugin.settings.language === "zh";
 
     const tab = this.activeTab;
+    const isAgy = (tab?.engine || this.plugin.settings.defaultEngine) === "antigravity";
+    if (isAgy && (!this.agyModelsCache || this.agyModelsCache.length === 0)) {
+      const models = await AgyAgentClient.getAvailableModels(this.plugin.settings.agyPath);
+      if (models.length > 0) {
+        this.setModelsCacheForEngine("antigravity", models);
+      }
+    }
     if (tab?.client) {
       await this.syncTabStateFromPi(tab);
     }
@@ -9032,7 +9274,10 @@ export class PiAgentView extends ItemView {
     } else {
       modalOptions = options.map((opt) => ({
         id: opt.id,
-        name: `${opt.name} (${opt.id})`,
+        name:
+          opt.name.toLowerCase() === opt.id.toLowerCase()
+            ? this.getThinkingLevelLabel(opt.id)
+            : `${opt.name} (${opt.id})`,
         desc: opt.desc,
       }));
     }
@@ -9500,6 +9745,289 @@ class PiAgentConfirmModal extends Modal {
   onClose(): void {
     this.contentEl.empty();
     if (!this.answered) this.done(false);
+  }
+}
+
+export interface ImageZoomModalItem {
+  src: string;
+  label?: string;
+  vaultPath?: string;
+}
+
+export class PimateImageZoomModal extends Modal {
+  private currentIndex: number;
+  private scale = 1;
+  private panX = 0;
+  private panY = 0;
+  private naturalSize = false;
+  private dragging = false;
+  private movedDistance = 0;
+  private dragStartX = 0;
+  private dragStartY = 0;
+  private dragOriginX = 0;
+  private dragOriginY = 0;
+  private stageEl: HTMLElement | null = null;
+  private imgEl: HTMLImageElement | null = null;
+  private zoomLabelEl: HTMLElement | null = null;
+  private countLabelEl: HTMLElement | null = null;
+  private openFileBtn: HTMLButtonElement | null = null;
+  private naturalBtn: HTMLButtonElement | null = null;
+  private prevBtn: HTMLButtonElement | null = null;
+  private nextBtn: HTMLButtonElement | null = null;
+  private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+
+  constructor(
+    app: App,
+    private readonly items: ImageZoomModalItem[],
+    initialIndex = 0,
+    private readonly isZh = true
+  ) {
+    super(app);
+    this.currentIndex = Math.max(0, Math.min(items.length - 1, initialIndex));
+  }
+
+  onOpen(): void {
+    const contentEl = this.contentEl as HTMLElement;
+    if (!contentEl) return;
+    contentEl.empty?.();
+    contentEl.addClass?.("pi-agent-image-lightbox-content");
+    (this as { modalEl?: { addClass?: (c: string) => void } }).modalEl?.addClass?.("pi-agent-image-lightbox-modal");
+
+    const toolbar = contentEl.createDiv("pi-agent-image-lightbox-toolbar");
+    const navGroup = toolbar.createDiv("pi-agent-image-lightbox-group");
+    if (this.items.length > 1) {
+      this.prevBtn = navGroup.createEl("button", {
+        cls: "pi-agent-image-lightbox-btn",
+        text: "‹",
+        attr: { title: this.isZh ? "上一张 (←)" : "Previous (←)" },
+      }) as HTMLButtonElement;
+      this.prevBtn.onclick = () => this.stepImage(-1);
+
+      this.countLabelEl = navGroup.createSpan({ cls: "pi-agent-image-lightbox-count" });
+
+      this.nextBtn = navGroup.createEl("button", {
+        cls: "pi-agent-image-lightbox-btn",
+        text: "›",
+        attr: { title: this.isZh ? "下一张 (→)" : "Next (→)" },
+      }) as HTMLButtonElement;
+      this.nextBtn.onclick = () => this.stepImage(1);
+    }
+
+    const controlsGroup = toolbar.createDiv("pi-agent-image-lightbox-group");
+    const zoomOutBtn = controlsGroup.createEl("button", {
+      cls: "pi-agent-image-lightbox-btn",
+      text: "−",
+      attr: { title: this.isZh ? "缩小 (-)" : "Zoom out (-)" },
+    }) as HTMLButtonElement;
+    zoomOutBtn.onclick = () => this.adjustZoom(1 / 1.25);
+
+    this.zoomLabelEl = controlsGroup.createSpan({ cls: "pi-agent-image-lightbox-zoom-label", text: "100%" });
+
+    const zoomInBtn = controlsGroup.createEl("button", {
+      cls: "pi-agent-image-lightbox-btn",
+      text: "+",
+      attr: { title: this.isZh ? "放大 (+)" : "Zoom in (+)" },
+    }) as HTMLButtonElement;
+    zoomInBtn.onclick = () => this.adjustZoom(1.25);
+
+    this.naturalBtn = controlsGroup.createEl("button", {
+      cls: "pi-agent-image-lightbox-btn",
+      text: "1:1",
+      attr: { title: this.isZh ? "切换原始尺寸 / 适应窗口" : "Toggle 1:1 natural size / fit" },
+    }) as HTMLButtonElement;
+    this.naturalBtn.onclick = () => {
+      this.naturalSize = !this.naturalSize;
+      this.scale = 1;
+      this.panX = 0;
+      this.panY = 0;
+      this.applyTransform();
+    };
+
+    const resetBtn = controlsGroup.createEl("button", {
+      cls: "pi-agent-image-lightbox-btn",
+      text: "↺",
+      attr: { title: this.isZh ? "重置视图 (0)" : "Reset view (0)" },
+    }) as HTMLButtonElement;
+    resetBtn.onclick = () => this.resetView();
+
+    this.openFileBtn = controlsGroup.createEl("button", {
+      cls: "pi-agent-image-lightbox-btn is-open-file pi-agent-hidden",
+      text: this.isZh ? "打开原图" : "Open file",
+      attr: { title: this.isZh ? "在 Obsidian 标签页中打开" : "Open in Obsidian tab" },
+    }) as HTMLButtonElement;
+    this.openFileBtn.onclick = () => this.openVaultFile();
+
+    this.stageEl = contentEl.createDiv("pi-agent-image-lightbox-stage");
+    this.imgEl = this.stageEl.createEl("img", {
+      cls: "pi-agent-image-lightbox-img",
+      attr: { draggable: "false" },
+    }) as HTMLImageElement;
+
+    this.stageEl.addEventListener?.("wheel", (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      this.adjustZoom(factor);
+    }, { passive: false });
+
+    this.stageEl.addEventListener?.("pointerdown", (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      this.dragging = true;
+      this.movedDistance = 0;
+      this.dragStartX = e.clientX;
+      this.dragStartY = e.clientY;
+      this.dragOriginX = this.panX;
+      this.dragOriginY = this.panY;
+      this.stageEl?.addClass?.("is-dragging");
+      try {
+        this.stageEl?.setPointerCapture?.(e.pointerId);
+      } catch {
+        // Ignore in headless/test environments.
+      }
+    });
+
+    this.stageEl.addEventListener?.("pointermove", (e: PointerEvent) => {
+      if (!this.dragging) return;
+      const dx = e.clientX - this.dragStartX;
+      const dy = e.clientY - this.dragStartY;
+      this.movedDistance = Math.hypot(dx, dy);
+      this.panX = this.dragOriginX + dx;
+      this.panY = this.dragOriginY + dy;
+      this.applyTransform();
+    });
+
+    const endDrag = () => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      this.stageEl?.removeClass?.("is-dragging");
+    };
+    this.stageEl.addEventListener?.("pointerup", endDrag);
+    this.stageEl.addEventListener?.("pointercancel", endDrag);
+
+    this.stageEl.addEventListener?.("dblclick", (e: MouseEvent) => {
+      e.preventDefault();
+      if (this.movedDistance > 6) return;
+      if (this.scale > 1.05 || this.naturalSize) {
+        this.resetView();
+      } else {
+        this.scale = 2.5;
+        this.panX = 0;
+        this.panY = 0;
+        this.applyTransform();
+      }
+    });
+
+    contentEl.createDiv({
+      cls: "pi-agent-image-lightbox-hint",
+      text: this.isZh
+        ? "滚轮缩放 · 拖拽移动 · 双击快速放大 · 快捷键 +/-/0"
+        : "Scroll to zoom · Drag to pan · Double-click to toggle zoom · Keys +/-/0",
+    });
+
+    if (typeof activeDocument !== "undefined" && typeof activeDocument.addEventListener === "function") {
+      this.keydownHandler = (e: KeyboardEvent) => {
+        if (e.key === "+" || e.key === "=") {
+          e.preventDefault();
+          this.adjustZoom(1.25);
+        } else if (e.key === "-") {
+          e.preventDefault();
+          this.adjustZoom(1 / 1.25);
+        } else if (e.key === "0") {
+          e.preventDefault();
+          this.resetView();
+        } else if (e.key === "ArrowLeft" && this.items.length > 1) {
+          e.preventDefault();
+          this.stepImage(-1);
+        } else if (e.key === "ArrowRight" && this.items.length > 1) {
+          e.preventDefault();
+          this.stepImage(1);
+        }
+      };
+      activeDocument.addEventListener("keydown", this.keydownHandler);
+    }
+
+    this.renderCurrentImage();
+  }
+
+  private stepImage(delta: -1 | 1): void {
+    if (this.items.length <= 1) return;
+    this.currentIndex = (this.currentIndex + delta + this.items.length) % this.items.length;
+    this.renderCurrentImage();
+  }
+
+  private renderCurrentImage(): void {
+    const item = this.items[this.currentIndex];
+    if (!item || !this.imgEl) return;
+    (this as { titleEl?: { setText?: (t: string) => void } }).titleEl?.setText?.(
+      item.label || (this.isZh ? "图片预览" : "Image Preview")
+    );
+    this.imgEl.setAttribute("src", item.src);
+    this.imgEl.setAttribute("alt", item.label || "Image");
+    if (this.countLabelEl) {
+      this.countLabelEl.setText(`${this.currentIndex + 1} / ${this.items.length}`);
+    }
+    const vaultFile = this.resolveVaultFile(item.vaultPath);
+    this.openFileBtn?.toggleClass?.("pi-agent-hidden", !vaultFile);
+    this.resetView();
+  }
+
+  private resolveVaultFile(vaultPath?: string): TFile | null {
+    if (!vaultPath) return null;
+    const vault = (this.app as { vault?: { getAbstractFileByPath?: (p: string) => unknown } } | undefined)?.vault;
+    const file = vault?.getAbstractFileByPath?.(vaultPath);
+    return file instanceof TFile ? file : null;
+  }
+
+  private openVaultFile(): void {
+    const item = this.items[this.currentIndex];
+    const file = this.resolveVaultFile(item?.vaultPath);
+    if (!file) return;
+    void this.app.workspace.getLeaf("tab").openFile(file).catch((err: unknown) => {
+      console.error("[pimate] open zoomed image file failed", err);
+    });
+    this.close();
+  }
+
+  private adjustZoom(factor: number): void {
+    const next = Math.max(0.25, Math.min(8, Number((this.scale * factor).toFixed(3))));
+    if (next === this.scale) return;
+    this.scale = next;
+    if (this.scale <= 1 && !this.naturalSize) {
+      this.panX = 0;
+      this.panY = 0;
+    }
+    this.applyTransform();
+  }
+
+  private resetView(): void {
+    this.scale = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.naturalSize = false;
+    this.applyTransform();
+  }
+
+  private applyTransform(): void {
+    this.imgEl?.toggleClass?.("is-natural-size", this.naturalSize);
+    this.naturalBtn?.toggleClass?.("is-active", this.naturalSize);
+    this.stageEl?.toggleClass?.("is-zoomed", this.scale > 1.01 || this.naturalSize);
+    const cssImg = this.imgEl as (HTMLImageElement & { setCssProps?: (props: Record<string, string>) => void }) | null;
+    cssImg?.setCssProps?.({
+      "--pimate-zoom-scale": String(this.scale),
+      "--pimate-zoom-x": `${Math.round(this.panX)}px`,
+      "--pimate-zoom-y": `${Math.round(this.panY)}px`,
+    });
+    if (this.zoomLabelEl) {
+      const pct = `${Math.round(this.scale * 100)}%`;
+      this.zoomLabelEl.setText(this.naturalSize ? `1:1 · ${pct}` : pct);
+    }
+  }
+
+  onClose(): void {
+    if (this.keydownHandler && typeof activeDocument !== "undefined" && typeof activeDocument.removeEventListener === "function") {
+      activeDocument.removeEventListener("keydown", this.keydownHandler);
+      this.keydownHandler = null;
+    }
+    this.contentEl?.empty?.();
   }
 }
 

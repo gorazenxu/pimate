@@ -408,6 +408,11 @@ summary.pi-agent-skill-details-summary:hover {
   background: var(--background-secondary);
   max-width: 220px;
   cursor: zoom-in;
+  transition: border-color 0.15s ease;
+}
+
+.pi-agent-message-image:hover {
+  border-color: var(--interactive-accent);
 }
 
 .pi-agent-message-image img {
@@ -415,6 +420,110 @@ summary.pi-agent-skill-details-summary:hover {
   max-width: 220px;
   max-height: 160px;
   object-fit: cover;
+}
+
+/* ─── Built-in Image Zoom Lightbox Modal ───────────────────── */
+.modal.pi-agent-image-lightbox-modal {
+  width: min(92vw, 1200px);
+  max-width: 92vw;
+}
+
+.pi-agent-image-lightbox-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pi-agent-image-lightbox-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pi-agent-image-lightbox-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-agent-image-lightbox-btn {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.pi-agent-image-lightbox-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-image-lightbox-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.pi-agent-image-lightbox-zoom-label,
+.pi-agent-image-lightbox-count {
+  min-width: 48px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.pi-agent-image-lightbox-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: min(74vh, 800px);
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  cursor: grab;
+  touch-action: none;
+}
+
+.pi-agent-image-lightbox-stage.is-dragging {
+  cursor: grabbing;
+}
+
+.pi-agent-image-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  transform-origin: center center;
+  transform: translate(var(--pimate-zoom-x, 0px), var(--pimate-zoom-y, 0px)) scale(var(--pimate-zoom-scale, 1));
+  transition: transform 0.08s ease-out;
+}
+
+.pi-agent-image-lightbox-stage.is-dragging .pi-agent-image-lightbox-img {
+  transition: none;
+}
+
+.pi-agent-image-lightbox-img.is-natural-size {
+  max-width: none;
+  max-height: none;
+}
+
+.pi-agent-image-lightbox-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
 }
 
 .pi-agent-text-block {
@@ -1472,7 +1581,7 @@ summary.pi-agent-skill-details-summary:hover {
 .pi-agent-input.is-bash-mode {
   color: var(--color-orange);
 }
-.pi-agent-input-area:has(.pi-agent-input.is-bash-mode) {
+.pi-agent-input-area.is-bash-mode {
   border-color: var(--color-orange);
   box-shadow: 0 0 0 1px rgba(255, 165, 0, 0.15);
 }
@@ -3288,3 +3397,14 @@ summary.pi-agent-history-group-title:hover {
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* Provider Brand SVG Colors */
+.pi-agent-svg-openai { color: #10a37f; }
+.pi-agent-svg-claude { color: #cc5a37; }
+.pi-agent-svg-deepseek { color: #0066ff; }
+.pi-agent-svg-minimax { color: #ff4d4f; }
+.pi-agent-svg-gemini { color: #7c3aed; }
+.pi-agent-svg-xiaomi { color: #ff6700; }
+.pi-agent-svg-volcengine { color: #1664ff; }
+.pi-agent-svg-siliconflow { color: #00a3ff; }
+.pi-agent-svg-zhipu { color: #3b82f6; }

@@ -432,6 +432,13 @@ export class PiAgentClient extends EventEmitter {
   }
 
   /**
+   * Update the cached API key used when spawning/restarting the Pi process.
+   */
+  setApiKey(apiKey?: string): void {
+    this.options.apiKey = apiKey;
+  }
+
+  /**
    * Start the pi process and initialize
    */
   async start(): Promise<void> {
@@ -453,10 +460,9 @@ export class PiAgentClient extends EventEmitter {
 
     const args = ["--mode", "rpc"];
 
-    if (this.options.provider) {
-      args.push("--provider", this.options.provider);
-    }
-    if (this.options.modelId) {
+    if (this.options.provider && this.options.modelId) {
+      args.push("--provider", this.options.provider, "--model", this.options.modelId);
+    } else if (this.options.modelId) {
       args.push("--model", this.options.modelId);
     }
     if (this.options.thinkingLevel) {
@@ -476,32 +482,35 @@ export class PiAgentClient extends EventEmitter {
       string,
       string
     >;
-    if (this.options.apiKey) {
+    const trimmedKey = this.options.apiKey?.trim();
+    if (trimmedKey && !trimmedKey.startsWith("!")) {
       // Set common API key env vars based on provider
       const provider = this.options.provider || "anthropic";
       const keyMap: Record<string, string> = {
         anthropic: "ANTHROPIC_API_KEY",
         openai: "OPENAI_API_KEY",
-        google: "GOOGLE_API_KEY",
+        google: "GEMINI_API_KEY",
         deepseek: "DEEPSEEK_API_KEY",
         groq: "GROQ_API_KEY",
         xai: "XAI_API_KEY",
+        openrouter: "OPENROUTER_API_KEY",
         mistral: "MISTRAL_API_KEY",
-        // 自定义 provider（在 ~/.pi/agent/models.json 里用 "$XXX_API_KEY" 鉴权）：
-        // Pimate 面板"凭证配置区"填的 key 存 auth.json，这里按 provider 注入
-        // 对应环境变量，让 pi 后端能解析 models.json 的 apiKey 引用。
-        "minimax": "MINIMAX_API_KEY",
-        // Pi 官方 env 映射：国内 MiniMax 使用 MINIMAX_CN_API_KEY。
-        // 之前误写成 MINIMAX_API_KEY，会让国际 minimax 也被 getAvailable()
-        // 判定为已配置，导致模型 picker 同时出现 MINIMAX 和 MINIMAX-CN 两组。
+        together: "TOGETHER_API_KEY",
+        fireworks: "FIREWORKS_API_KEY",
+        nvidia: "NVIDIA_API_KEY",
+        minimax: "MINIMAX_API_KEY",
         "minimax-cn": "MINIMAX_CN_API_KEY",
-        "siliconflow": "SILICONFLOW_API_KEY",
-        "zai": "ZAI_API_KEY",
+        moonshotai: "MOONSHOT_API_KEY",
+        "moonshotai-cn": "MOONSHOT_API_KEY",
+        xiaomi: "XIAOMI_API_KEY",
+        "kimi-coding": "KIMI_API_KEY",
+        siliconflow: "SILICONFLOW_API_KEY",
+        zai: "ZAI_API_KEY",
         "zai-coding-cn": "ZAI_CODING_CN_API_KEY",
       };
       const envVar = keyMap[provider];
       if (envVar) {
-        env[envVar] = this.options.apiKey;
+        env[envVar] = trimmedKey;
       }
     }
 
@@ -779,6 +788,20 @@ export class PiAgentClient extends EventEmitter {
   }
 
   /**
+   * Clear pending steering and follow-up queues without restarting Pi.
+   */
+  async clearQueue(): Promise<RpcResponse<{ steering: string[]; followUp: string[] }>> {
+    return this.sendCommand({ type: "clear_queue" });
+  }
+
+  /**
+   * Cancel an active automatic retry loop.
+   */
+  async abortRetry(): Promise<RpcResponse> {
+    return this.sendCommand({ type: "abort_retry" });
+  }
+
+  /**
    * Get full Pi agent state, including current model and thinkingLevel.
    * This is the authoritative source for clamping / sync decisions.
    */
@@ -932,26 +955,62 @@ export class PiAgentClient extends EventEmitter {
     }
   }
 
-  async promptAndWait(message: string): Promise<RpcResponse> {
-    await this.prompt(message);
-    return this.waitForAgentSettled().then(() => this.getLastAssistantText());
-  }
-
-  private waitForAgentSettled(timeoutMs = 120_000): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.off("event", onEvent);
-        reject(new Error("Timed out waiting for assistant response"));
-      }, timeoutMs);
-      const onEvent = (event: RpcEvent) => {
-        if (event.type === "agent_settled") {
-          window.clearTimeout(timeout);
-          this.off("event", onEvent);
-          resolve();
-        }
-      };
-      this.on("event", onEvent);
+  async promptAndWait(message: string, timeoutMs = 120_000): Promise<RpcResponse> {
+    let settledResolve!: () => void;
+    let settledReject!: (err: Error) => void;
+    let timer: number | null = null;
+    const onEvent = (event: RpcEvent) => {
+      if (event.type === "agent_settled") {
+        cleanup();
+        settledResolve();
+      }
+    };
+    const onClose = () => {
+      cleanup();
+      settledReject(new Error("Pi process exited before settling"));
+    };
+    const cleanup = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      this.off("event", onEvent);
+      this.off("close", onClose);
+    };
+    const settledPromise = new Promise<void>((resolve, reject) => {
+      settledResolve = resolve;
+      settledReject = reject;
     });
+    settledPromise.catch(() => undefined);
+    this.on("event", onEvent);
+    this.on("close", onClose);
+    timer = window.setTimeout(() => {
+      cleanup();
+      settledReject(new Error("Timed out waiting for assistant response"));
+    }, timeoutMs);
+
+    try {
+      const promptRes = await this.prompt(message);
+      if (!promptRes.success) {
+        cleanup();
+        throw new Error(promptRes.error || "Prompt rejected by Pi");
+      }
+      const disposition = (promptRes.data as { disposition?: string } | undefined)?.disposition;
+      if (disposition === "handled") {
+        cleanup();
+        return {
+          type: "response",
+          command: "get_last_assistant_text",
+          success: true,
+          data: { text: "" },
+        };
+      }
+      await settledPromise;
+      return await this.getLastAssistantText();
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
   }
 
   /**
@@ -1073,27 +1132,44 @@ export class PiAgentClient extends EventEmitter {
   private terminateChild(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      let timer: number;
+      let timer: number | undefined;
       let finished = false;
       const finish = (error?: Error) => {
         if (finished) return;
         finished = true;
-        window.clearTimeout(timer);
+        if (timer !== undefined) window.clearTimeout(timer);
         child.removeListener("close", onClose);
         if (error) reject(error); else resolve();
       };
       const onClose = () => finish();
       child.once("close", onClose);
-      timer = window.setTimeout(() => {
-        if (child.exitCode !== null || child.signalCode !== null) return finish();
-        try { child.kill("SIGKILL"); } catch { return finish(new Error("Could not terminate Pi process")); }
+
+      const sendSignals = () => {
         if (finished) return;
+        if (child.exitCode !== null || child.signalCode !== null) return finish();
         timer = window.setTimeout(() => {
-          if (child.exitCode !== null || child.signalCode !== null) finish();
-          else finish(new Error("Pi process did not exit after SIGKILL"));
+          if (child.exitCode !== null || child.signalCode !== null) return finish();
+          try { child.kill("SIGKILL"); } catch { return finish(new Error("Could not terminate Pi process")); }
+          if (finished) return;
+          timer = window.setTimeout(() => {
+            if (child.exitCode !== null || child.signalCode !== null) finish();
+            else finish(new Error("Pi process did not exit after SIGKILL"));
+          }, 500);
         }, 500);
-      }, 500);
-      try { child.kill("SIGTERM"); } catch { finish(new Error("Could not terminate Pi process")); }
+        try { child.kill("SIGTERM"); } catch { finish(new Error("Could not terminate Pi process")); }
+      };
+
+      const stdinStream = child.stdin as { end?: () => void } | null | undefined;
+      if (stdinStream && typeof stdinStream.end === "function") {
+        try {
+          stdinStream.end();
+        } catch {
+          // Ignore write stream errors during teardown.
+        }
+        timer = window.setTimeout(sendSignals, 50);
+      } else {
+        sendSignals();
+      }
     });
   }
 }

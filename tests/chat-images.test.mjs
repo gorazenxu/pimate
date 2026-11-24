@@ -17,7 +17,18 @@ const bundle = await build({
   bundle: true, write: false, platform: "node", format: "cjs", external: ["obsidian"],
 });
 class Base {}
-const obsidian = { ItemView: Base, Modal: Base, SuggestModal: Base,
+const openedModals = [];
+class ModalDouble {
+  constructor(app) {
+    this.app = app;
+    this.contentEl = new Element();
+    this.titleEl = new Element();
+    this.modalEl = new Element();
+  }
+  open() { openedModals.push(this); this.onOpen?.(); }
+  close() { this.onClose?.(); }
+}
+const obsidian = { ItemView: Base, Modal: ModalDouble, SuggestModal: Base, TFile: class {},
   Notice: class { constructor(text) { assert.fail(`Unexpected notice: ${text}`); } },
   MarkdownRenderer: { render: async () => {} }, setIcon: () => {} };
 const compiled = new Module(`${root}chat-images-test.cjs`);
@@ -26,7 +37,7 @@ compiled.paths = Module._nodeModulePaths(root);
 const originalRequire = compiled.require.bind(compiled);
 compiled.require = name => name === "obsidian" ? obsidian : originalRequire(name);
 compiled._compile(bundle.outputFiles[0].text, compiled.filename);
-const { PiAgentView, getMessageImages, stripPiImageDimensionNotes } = compiled.exports;
+const { PiAgentView, getMessageImages, stripPiImageDimensionNotes, extractAgyVaultImagePaths } = compiled.exports;
 globalThis.window = globalThis;
 
 // Small DOM double. Tests call the real addMessage, live-event and history
@@ -34,12 +45,21 @@ globalThis.window = globalThis;
 class Element {
   constructor(tag = "div") { this.tag = tag; }
   children = []; parentElement = null; attrs = new Map(); classes = new Set(); ownText = "";
+  cssProps = {};
   scrollTop = 0; scrollHeight = 100;
   classList = { contains: name => this.classes.has(name),
     add: (...names) => names.forEach(name => this.classes.add(name)),
     remove: (...names) => names.forEach(name => this.classes.delete(name)) };
   addClass(name) { this.classList.add(name); }
   removeClass(name) { this.classList.remove(name); }
+  toggleClass(name, force) {
+    if (force === undefined) {
+      if (this.classes.has(name)) this.classes.delete(name);
+      else this.classes.add(name);
+    } else if (force) this.classes.add(name);
+    else this.classes.delete(name);
+  }
+  setCssProps(props) { Object.assign(this.cssProps, props); }
   get textContent() { return this.ownText + this.children.map(child => child.textContent).join(""); }
   set textContent(text) { this.empty(); this.ownText = text; }
   get nextElementSibling() {
@@ -229,4 +249,48 @@ test("loading earlier history restores image cards in the older messages", async
   assert.equal(v.renderedMessages.length, 2);
   assertPreview(v.renderedMessages[0], 1, "Earlier image");
   assert.equal(v.historyShownCount, 2);
+});
+
+test("clicking a chat image opens the built-in zoom modal instead of window.open", () => {
+  openedModals.length = 0;
+  const origOpen = globalThis.window.open;
+  globalThis.window.open = () => assert.fail("must not call window.open for data URLs");
+  try {
+    const { v, tab } = view();
+    v.handleMessageStart({ type: "message_start", message: message("Check zoom") }, tab);
+    const imgEl = v.renderedMessages[0].el.querySelectorAll("img")[0];
+    imgEl.onclick({ preventDefault: () => {}, stopPropagation: () => {} });
+    assert.equal(openedModals.length, 1);
+    const modal = openedModals[0];
+    const lightboxImg = modal.contentEl.querySelectorAll(".pi-agent-image-lightbox-img")[0];
+    assert.equal(lightboxImg.getAttribute("src"), `data:image/png;base64,${png}`);
+    const plusBtn = modal.contentEl.querySelectorAll("button").find(b => b.ownText === "+");
+    plusBtn.onclick();
+    assert.equal(lightboxImg.cssProps["--pimate-zoom-scale"], "1.25");
+  } finally {
+    globalThis.window.open = origOpen;
+  }
+});
+
+test("extractAgyVaultImagePaths and history restoration safely recover AGY vault images", () => {
+  const sample = [
+    "@999agy对话图片/agy-20261124-1-abc.jpg 请分析",
+    "@999agy对话图片/../secret.jpg",
+    "```md\n@999agy对话图片/ignored-in-fence.png\n```",
+  ].join("\n");
+  assert.deepEqual(extractAgyVaultImagePaths(sample), ["999agy对话图片/agy-20261124-1-abc.jpg"]);
+
+  const { v } = view({ engine: "antigravity" });
+  v.app = {
+    vault: {
+      getAbstractFileByPath: (p) => p === "999agy对话图片/agy-20261124-1-abc.jpg"
+        ? { path: p, name: "agy-20261124-1-abc.jpg" }
+        : null,
+      getResourcePath: (f) => `app://local/${f.path}`,
+    },
+  };
+  v.renderMessageFromHistory({ role: "user", content: "@999agy对话图片/agy-20261124-1-abc.jpg 这张图" });
+  const imgs = v.renderedMessages[0].el.querySelectorAll("img");
+  assert.equal(imgs.length, 1);
+  assert.equal(imgs[0].getAttribute("src"), "app://local/999agy对话图片/agy-20261124-1-abc.jpg");
 });

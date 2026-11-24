@@ -32,7 +32,7 @@ function modelFamily(modelId: string): string {
   return modelId
     .trim()
     .toLowerCase()
-    .replace(/-(low|medium|high)$/, "");
+    .replace(/-(low|medium|high|xhigh|max)$/, "");
 }
 
 /**

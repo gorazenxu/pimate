@@ -44,6 +44,13 @@ class Element {
     remove: (...names) => names.forEach(n => this.classes.delete(n)),
     contains: name => this.classes.has(name) };
   removeClass(name) { this.classList.remove(name); }
+  toggleClass(name, force) {
+    if (force === undefined) {
+      if (this.classes.has(name)) this.classes.delete(name);
+      else this.classes.add(name);
+    } else if (force) this.classes.add(name);
+    else this.classes.delete(name);
+  }
   get isConnected() { return this.connected || !!this.parentElement?.isConnected; }
   get childNodes() { return this.children; }
   contains(node) { return node === this || this.children.some(c => c.contains(node)); }
@@ -443,5 +450,85 @@ test("AGY effort options exclude off/minimal and reflect per-model xhigh/fixed b
     reasoning: false,
     thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null },
   };
-  assert.deepEqual(v.buildThinkingLevelOptions(tab).options, []);
+  const orchResult = v.buildThinkingLevelOptions(tab);
+  assert.deepEqual(orchResult.options, []);
+  assert.match(orchResult.note, /AGY CLI|fixed reasoning budget/);
+  assert.equal(v.getTabEffortDisplayLabel(tab), "Fixed");
+
+  // Non-reasoning Pi models keep the generic non-configurable note.
+  const { v: piView, tab: piTab } = view(null);
+  piTab.engine = "pi";
+  piTab.piModelMeta = { id: "plain-model", provider: "openai", reasoning: false };
+  assert.match(piView.buildThinkingLevelOptions(piTab).note, /does not expose configurable reasoning/);
+});
+
+test("exportSessionToVaultNote exports AGY toolCall/toolResult and Antigravity assistant heading", async () => {
+  const createdFiles = [];
+  const client = {
+    engine: "antigravity",
+    getMessages: async () => ({
+      success: true,
+      data: {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Check file" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "Inspecting" },
+              { type: "toolCall", name: "read_file" },
+              { type: "text", text: "Done" },
+            ],
+          },
+          { role: "toolResult", toolName: "read_file", content: "file body" },
+        ],
+      },
+    }),
+  };
+  const { v } = view(client);
+  v.app = {
+    vault: {
+      create: async (name, content) => {
+        createdFiles.push({ name, content });
+        return { path: name };
+      },
+    },
+    workspace: { getLeaf: () => ({ openFile: async () => {} }) },
+  };
+  await v.exportSessionToVaultNote();
+  assert.equal(createdFiles.length, 1);
+  const md = createdFiles[0].content;
+  assert.match(md, /### ✦ Antigravity/);
+  assert.match(md, /Tool call `read_file`/);
+  assert.match(md, /Tool output `read_file`\n> file body/);
+  assert.doesNotMatch(md, /### toolResult/);
+});
+
+test("hardSteerMessage uses native clearQueue RPC without restarting Pi process", async () => {
+  let aborted = 0;
+  let cleared = 0;
+  let prompted = [];
+  const client = {
+    engine: "pi",
+    isRunning: () => true,
+    abort: async () => { aborted++; return { success: true }; },
+    clearQueue: async () => { cleared++; return { success: true, data: { steering: [], followUp: ["old queued"] } }; },
+    prompt: async (msg) => { prompted.push(msg); return { success: true }; },
+  };
+  const { v, tab } = view(client);
+  tab.isStreaming = true;
+  tab.queueCount = 1;
+  tab.followUpCount = 1;
+  const queuedEl = v.chatContainer.createDiv();
+  v.renderedMessages = [{ el: queuedEl }];
+  v.pendingQueuedMessages = [{ rendered: v.renderedMessages[0], rpcMessage: "old queued" }];
+  v.updateButtons = () => {};
+  v.restartClientAfterHardSteer = () => assert.fail("must not restart Pi when clearQueue succeeds");
+
+  const ok = await v.hardSteerMessage("new direction", { userGoal: "new direction" });
+  assert.equal(ok, true);
+  assert.equal(aborted, 1);
+  assert.equal(cleared, 1);
+  assert.deepEqual(prompted, ["new direction"]);
+  assert.equal(tab.queueCount, 0);
+  assert.equal(v.pendingQueuedMessages.length, 0);
 });

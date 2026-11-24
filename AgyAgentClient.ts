@@ -125,6 +125,7 @@ const AGY_ABORT_CLOSE_GRACE_MS = 250;
 // reached.
 const AGY_PRINT_TIMEOUT = "15m";
 const AGY_PROMPT_WAIT_TIMEOUT_MS = 15 * 60 * 1_000;
+const AGY_MODELS_CACHE_TTL_MS = 30_000;
 
 export const AGY_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type AgyEffortLevel = (typeof AGY_EFFORT_LEVELS)[number];
@@ -249,6 +250,34 @@ export function pickClosestAgyEffort(
   return availableLevels[0];
 }
 
+export function resolveAgyOrchestratorAlias(
+  modelId: string,
+  availableModels: readonly PiModel[]
+): string {
+  const trimmed = modelId.trim();
+  if (!trimmed || availableModels.length === 0) return trimmed;
+  if (availableModels.some((m) => m.id === trimmed)) return trimmed;
+
+  const lower = trimmed.toLowerCase();
+  const candidates: string[] = [];
+  if (lower === "gemini-pro-orchestrator-g1-pro") {
+    candidates.push("gemini-pro-orchestrator-argon");
+  } else if (lower === "gemini-pro-orchestrator-argon") {
+    candidates.push("gemini-pro-orchestrator-g1-pro");
+  } else if (lower === "gemini-pro-orchestrator-carbon") {
+    candidates.push("gemini-pro-orchestrator");
+  } else if (lower === "gemini-pro-orchestrator") {
+    candidates.push("gemini-pro-orchestrator-carbon");
+  }
+
+  for (const candidate of candidates) {
+    if (availableModels.some((m) => m.id === candidate)) {
+      return candidate;
+    }
+  }
+  return trimmed;
+}
+
 export function clampAgyEffortForModel(
   modelId: string,
   preferredEffort?: string,
@@ -259,7 +288,12 @@ export function clampAgyEffortForModel(
     return { modelId: "gemini-3.8-flash-high", effort: "high" };
   }
   if (isAgyFixedEffortModel(trimmed)) {
-    return { modelId: trimmed, effort: "" };
+    return {
+      modelId: cachedModels?.length
+        ? resolveAgyOrchestratorAlias(trimmed, cachedModels)
+        : trimmed,
+      effort: "",
+    };
   }
   const suffix = parseAgyModelEffortSuffix(trimmed);
   const baseId = suffix?.baseId || trimmed;
@@ -290,6 +324,48 @@ export function clampAgyEffortForModel(
     modelId: trimmed,
     effort,
   };
+}
+
+export function pickAgyTitleModel(
+  cachedModels: readonly PiModel[] | null | undefined,
+  fallbackModelId: string,
+  fallbackEffort?: string
+): { modelId: string; effort: AgyEffortLevel | "" } {
+  if (cachedModels && cachedModels.length > 0) {
+    const preferredIds = [
+      "gemini-3.8-flash-low",
+      "gemini-4-hydrogen-low",
+      "gemini-3.8-flash-medium",
+      "gemini-4-hydrogen-medium",
+    ];
+    for (const candidateId of preferredIds) {
+      const hit = cachedModels.find((m) => m.id === candidateId);
+      if (hit) {
+        return {
+          modelId: hit.id,
+          effort: parseAgyModelEffortSuffix(hit.id)?.effort || "low",
+        };
+      }
+    }
+
+    if (isAgyFixedEffortModel(fallbackModelId)) {
+      const families = groupAgyModelsByFamily(cachedModels);
+      const nonFixed = families.find(
+        (family) => !isAgyFixedEffortModel(family.defaultModelId)
+      );
+      if (nonFixed) {
+        const resolvedId = resolveAgyFamilyVariant(nonFixed, "low");
+        return {
+          modelId: resolvedId,
+          effort: parseAgyModelEffortSuffix(resolvedId)?.effort || "low",
+        };
+      }
+    }
+
+    return clampAgyEffortForModel(fallbackModelId, "low", cachedModels);
+  }
+
+  return clampAgyEffortForModel(fallbackModelId, fallbackEffort || "low", null);
 }
 
 export function buildAgyModelMeta(
@@ -568,6 +644,7 @@ export function formatAgyModelDisplayName(
     const lower = trimmed.toLowerCase();
     if (lower === "gemini-pro-orchestrator-neon") return "Orchestrator (Neon)";
     if (lower === "gemini-pro-orchestrator-g1-pro") return "Orchestrator (Argon)";
+    if (lower === "gemini-pro-orchestrator-argon") return "Orchestrator (Argon)";
     if (lower === "gemini-pro-orchestrator-carbon") return "Orchestrator (Carbon)";
     if (lower === "gemini-pro-orchestrator") return "Orchestrator";
     return trimmed;
@@ -589,43 +666,90 @@ export function formatAgyModelDisplayName(
     .join(" ");
 }
 
+export interface ResolveAgySpawnOptions {
+  platform?: string;
+  pathValue?: string;
+  localAppData?: string;
+  userProfile?: string;
+  homeDir?: string;
+  exists?: (candidate: string) => boolean;
+}
+
 /**
  * Resolve the agy executable path on Windows and POSIX.
  */
 export function resolveAgySpawn(
-  userAgyPath?: string
+  userAgyPath?: string,
+  options: ResolveAgySpawnOptions = {}
 ): { cmd: string; scriptArgs: string[] } {
   const p = userAgyPath?.trim() || "agy";
+  const platform = options.platform ?? process.platform;
+  const exists = options.exists ?? fs.existsSync;
 
-  if (process.platform === "win32") {
-    if (fs.existsSync(p)) return { cmd: p, scriptArgs: [] };
-    const winCandidates = [
-      p,
-      p + ".exe",
-      p + ".cmd",
-      path.join(process.env.LOCALAPPDATA || "", "Programs", "agy", "agy.exe"),
-      path.join(process.env.USERPROFILE || "", ".local", "bin", "agy.exe"),
-    ];
-    for (const c of winCandidates) {
-      if (c && fs.existsSync(c)) return { cmd: c, scriptArgs: [] };
+  if (platform === "win32") {
+    const isCmdOrBat = /\.(cmd|bat)$/i.test(p);
+    const hasSeparator = /[\\/]/.test(p);
+
+    if (hasSeparator) {
+      if (!isCmdOrBat && exists(p)) return { cmd: p, scriptArgs: [] };
+      if (!/\.exe$/i.test(p) && !isCmdOrBat && exists(`${p}.exe`)) {
+        return { cmd: `${p}.exe`, scriptArgs: [] };
+      }
+      if (isCmdOrBat) {
+        const exeSibling = p.replace(/\.(cmd|bat)$/i, ".exe");
+        if (exists(exeSibling)) return { cmd: exeSibling, scriptArgs: [] };
+      }
     }
-    return { cmd: p, scriptArgs: [] };
+
+    const baseName = path.win32.basename(p).replace(/\.(exe|cmd|bat)$/i, "") || "agy";
+    const pathValue = options.pathValue ?? process.env.PATH ?? process.env.Path ?? "";
+    const pathDirs = pathValue
+      .split(path.win32.delimiter)
+      .map((dir) => dir.trim().replace(/^"|"$/g, ""))
+      .filter(Boolean);
+    const localAppData = options.localAppData ?? process.env.LOCALAPPDATA ?? "";
+    const userProfile = options.userProfile ?? process.env.USERPROFILE ?? "";
+
+    const winCandidates: string[] = [];
+    for (const dir of pathDirs) {
+      winCandidates.push(path.win32.join(dir, `${baseName}.exe`));
+    }
+    if (localAppData) {
+      winCandidates.push(path.win32.join(localAppData, "Programs", "agy", `${baseName}.exe`));
+    }
+    if (userProfile) {
+      winCandidates.push(path.win32.join(userProfile, ".local", "bin", `${baseName}.exe`));
+    }
+
+    const seenWin = new Set<string>();
+    for (const candidate of winCandidates) {
+      const key = candidate.toLowerCase();
+      if (!candidate || seenWin.has(key)) continue;
+      seenWin.add(key);
+      if (exists(candidate)) return { cmd: candidate, scriptArgs: [] };
+    }
+
+    return {
+      cmd: isCmdOrBat ? p.replace(/\.(cmd|bat)$/i, ".exe") : p,
+      scriptArgs: [],
+    };
   }
 
   // POSIX (macOS, Linux)
+  const homeDir = options.homeDir ?? process.env.HOME;
   let resolvedPosix = p;
-  if (resolvedPosix.startsWith("~/") && process.env.HOME) {
-    resolvedPosix = path.join(process.env.HOME, resolvedPosix.slice(2));
+  if (resolvedPosix.startsWith("~/") && homeDir) {
+    resolvedPosix = path.join(homeDir, resolvedPosix.slice(2));
   }
   if (path.isAbsolute(resolvedPosix)) {
-    if (fs.existsSync(resolvedPosix)) return { cmd: resolvedPosix, scriptArgs: [] };
+    if (exists(resolvedPosix)) return { cmd: resolvedPosix, scriptArgs: [] };
   }
 
   const searchDirs = [
-    process.env.HOME ? path.join(process.env.HOME, ".local", "bin") : "",
+    homeDir ? path.join(homeDir, ".local", "bin") : "",
     "/opt/homebrew/bin",
     "/usr/local/bin",
-    ...(process.env.PATH || "").split(path.delimiter),
+    ...(options.pathValue ?? process.env.PATH ?? "").split(path.delimiter),
     "/usr/bin",
     "/bin",
   ];
@@ -635,7 +759,7 @@ export function resolveAgySpawn(
     if (!dir || seen.has(dir)) continue;
     seen.add(dir);
     const candidate = path.join(dir, resolvedPosix);
-    if (fs.existsSync(candidate)) {
+    if (exists(candidate)) {
       return { cmd: candidate, scriptArgs: [] };
     }
   }
@@ -664,6 +788,8 @@ export class AgyAgentClient extends EventEmitter {
     promise: Promise<RpcResponse<AgyQuotaStatus>>;
   } | null = null;
   private static modelsCache = new Map<string, PiModel[]>();
+  private static modelsCacheExpiresAt = new Map<string, number>();
+  private static modelsRequests = new Map<string, Promise<PiModel[]>>();
 
   private process: ChildProcess | null = null;
   private abortingProcess: ChildProcess | null = null;
@@ -1022,7 +1148,18 @@ export class AgyAgentClient extends EventEmitter {
 
     // Orchestrator models have a fixed reasoning budget and reject --effort.
     if (isAgyFixedEffortModel(modelId)) {
-      return { modelId, effectiveEffort: "" };
+      const cacheKey = this.getModelsCacheKey();
+      const cached = AgyAgentClient.modelsCache.get(cacheKey);
+      let resolvedModelId = modelId;
+      if (cached && cached.some((m) => m.id === modelId)) {
+        resolvedModelId = modelId;
+      } else {
+        const availableModels = await AgyAgentClient.getAvailableModels(this.options.agyPath);
+        if (availableModels.length > 0) {
+          resolvedModelId = resolveAgyOrchestratorAlias(modelId, availableModels);
+        }
+      }
+      return { modelId: resolvedModelId, effectiveEffort: "" };
     }
 
     const suffix = parseAgyModelEffortSuffix(modelId);
@@ -2758,14 +2895,37 @@ export class AgyAgentClient extends EventEmitter {
     return filtered.sort((a, b) => b.mtime - a.mtime);
   }
 
+  static clearModelsCache(): void {
+    AgyAgentClient.modelsCache.clear();
+    AgyAgentClient.modelsCacheExpiresAt.clear();
+    AgyAgentClient.modelsRequests.clear();
+  }
+
   /**
    * Query available models from `agy models`.
+   * Coalesces concurrent requests and caches non-empty results for 30s.
    */
-  static async getAvailableModels(userAgyPath?: string): Promise<PiModel[]> {
+  static getAvailableModels(
+    userAgyPath?: string,
+    options: { force?: boolean } = {}
+  ): Promise<PiModel[]> {
     const resolved = resolveAgySpawn(userAgyPath);
     const cacheKey = [resolved.cmd, ...resolved.scriptArgs].join("\u0000");
+    const now = Date.now();
 
-    return new Promise((resolve) => {
+    if (!options.force) {
+      const cached = AgyAgentClient.modelsCache.get(cacheKey);
+      const expiresAt = AgyAgentClient.modelsCacheExpiresAt.get(cacheKey) || 0;
+      if (cached && cached.length > 0 && expiresAt > now) {
+        return Promise.resolve([...cached]);
+      }
+      const pending = AgyAgentClient.modelsRequests.get(cacheKey);
+      if (pending) {
+        return pending.then((models) => [...models]);
+      }
+    }
+
+    const promise = new Promise<PiModel[]>((resolve) => {
       execFile(
         resolved.cmd,
         [...resolved.scriptArgs, "models"],
@@ -2778,20 +2938,33 @@ export class AgyAgentClient extends EventEmitter {
           const models = parseAgyModelsOutput(stdout);
           if (models.length > 0) {
             AgyAgentClient.modelsCache.set(cacheKey, models);
+            AgyAgentClient.modelsCacheExpiresAt.set(
+              cacheKey,
+              Date.now() + AGY_MODELS_CACHE_TTL_MS
+            );
           }
           resolve(models);
         }
       );
+    }).finally(() => {
+      if (AgyAgentClient.modelsRequests.get(cacheKey) === promise) {
+        AgyAgentClient.modelsRequests.delete(cacheKey);
+      }
     });
+
+    AgyAgentClient.modelsRequests.set(cacheKey, promise);
+    return promise.then((models) => [...models]);
   }
 
   /**
    * Check whether agy is installed and whether Google OAuth is authenticated.
    */
   static async checkAuthStatus(
-    userAgyPath?: string
+    userAgyPath?: string,
+    options: { force?: boolean } = {}
   ): Promise<{ installed: boolean; authenticated: boolean | null; version?: string; error?: string }> {
     const resolved = resolveAgySpawn(userAgyPath);
+    const cacheKey = [resolved.cmd, ...resolved.scriptArgs].join("\u0000");
 
     // 1. Check version
     const versionRes = await new Promise<{ ok: boolean; version?: string; error?: string }>((res) => {
@@ -2816,7 +2989,32 @@ export class AgyAgentClient extends EventEmitter {
       };
     }
 
-    // 2. Check auth by querying models
+    // 2. Reuse cached/in-flight models when available to avoid spawning a
+    // second `agy models` process concurrently with the settings dropdown.
+    if (!options.force) {
+      const cached = AgyAgentClient.modelsCache.get(cacheKey);
+      const expiresAt = AgyAgentClient.modelsCacheExpiresAt.get(cacheKey) || 0;
+      if (cached && cached.length > 0 && expiresAt > Date.now()) {
+        return {
+          installed: true,
+          authenticated: true,
+          version: versionRes.version,
+        };
+      }
+      const pending = AgyAgentClient.modelsRequests.get(cacheKey);
+      if (pending) {
+        const models = await pending;
+        if (models.length > 0) {
+          return {
+            installed: true,
+            authenticated: true,
+            version: versionRes.version,
+          };
+        }
+      }
+    }
+
+    // 3. Check auth by querying models
     const authRes = await new Promise<{ status: boolean | null; error?: string }>((res) => {
       execFile(
         resolved.cmd,
@@ -2832,6 +3030,15 @@ export class AgyAgentClient extends EventEmitter {
               return res({ status: false, error: diagnostic });
             }
             return res({ status: null, error: diagnostic || "Could not query available models" });
+          }
+          const parsedModels = parseAgyModelsOutput(stdout);
+          if (parsedModels.length > 0) {
+            AgyAgentClient.modelsCache.set(cacheKey, parsedModels);
+            AgyAgentClient.modelsCacheExpiresAt.set(
+              cacheKey,
+              Date.now() + AGY_MODELS_CACHE_TTL_MS
+            );
+            return res({ status: true });
           }
           // If models list contains known model names or has at least 1 model
           if (stdout.includes("gemini") || stdout.includes("claude") || stdout.includes("gpt")) {

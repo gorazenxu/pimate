@@ -30,7 +30,14 @@ const compiled = new Module(`${root}pi-lifecycle-test.cjs`);
 compiled.paths = Module._nodeModulePaths(root);
 const originalRequire = compiled.require.bind(compiled);
 compiled.require = name => name === "child_process" ? { ...childProcess,
-  spawn: () => { const child = new Child(); children.push(child); return child; } } : originalRequire(name);
+  spawn: (executable, args, options) => {
+    const child = new Child();
+    child.spawnExecutable = executable;
+    child.spawnArgs = args;
+    child.spawnEnv = options?.env;
+    children.push(child);
+    return child;
+  } } : originalRequire(name);
 compiled._compile(bundle.outputFiles[0].text, compiled.filename = `${root}pi-lifecycle-test.cjs`);
 const { PiAgentClient } = compiled.exports;
 globalThis.window = globalThis;
@@ -142,4 +149,85 @@ test("explicit shutdown cancels queued restart instead of resurrecting a process
   const restarting = c.restart(); const rejected = assert.rejects(restarting, /cancelled/);
   await tick(); await c.destroy(); await rejected;
   assert.equal(children.length, before); assert.equal(c.process, null);
+});
+
+test("omits --provider when modelId is empty and maps GEMINI_API_KEY without leaking !command keys", async () => {
+  const withoutModel = new PiAgentClient({
+    piPath: "/nonexistent/pimate-test-pi",
+    cwd: root,
+    provider: "google",
+    modelId: "",
+    apiKey: "gemini-secret-123",
+  });
+  await withoutModel.start();
+  const childA = children.at(-1);
+  assert.equal(childA.spawnArgs.includes("--provider"), false);
+  assert.equal(childA.spawnArgs.includes("--model"), false);
+  assert.equal(childA.spawnEnv.GEMINI_API_KEY, "gemini-secret-123");
+  assert.equal(childA.spawnEnv.GOOGLE_API_KEY, undefined);
+  await withoutModel.destroy();
+
+  const withCmdKey = new PiAgentClient({
+    piPath: "/nonexistent/pimate-test-pi",
+    cwd: root,
+    provider: "google",
+    modelId: "gemini-2.5-flash",
+    apiKey: "!security find-generic-password -w",
+  });
+  await withCmdKey.start();
+  const childB = children.at(-1);
+  assert.deepEqual(childB.spawnArgs.slice(0, 6), [
+    "--mode", "rpc", "--provider", "google", "--model", "gemini-2.5-flash",
+  ]);
+  assert.equal(childB.spawnEnv.GEMINI_API_KEY, process.env.GEMINI_API_KEY);
+  await withCmdKey.destroy();
+});
+
+test("promptAndWait checks prompt failure, handled disposition, and early agent_settled", async () => {
+  const c = makeClient();
+  await c.start();
+  const p = children.at(-1);
+
+  let mode = "error";
+  p.stdin.write = (text, callback) => {
+    p.writes.push(text);
+    callback?.(null);
+    const req = JSON.parse(text);
+    if (req.type === "prompt") {
+      if (mode === "error") {
+        queueMicrotask(() => p.stdout.emit("data", Buffer.from(JSON.stringify({
+          type: "response", id: req.id, command: "prompt", success: false, error: "bad prompt",
+        }) + "\n")));
+      } else if (mode === "handled") {
+        queueMicrotask(() => p.stdout.emit("data", Buffer.from(JSON.stringify({
+          type: "response", id: req.id, command: "prompt", success: true, data: { disposition: "handled" },
+        }) + "\n")));
+      } else if (mode === "race") {
+        queueMicrotask(() => {
+          p.stdout.emit("data", Buffer.from(
+            JSON.stringify({ type: "event", ...{ type: "agent_settled" } }) + "\n" +
+            JSON.stringify({ type: "response", id: req.id, command: "prompt", success: true, data: { disposition: "started" } }) + "\n"
+          ));
+        });
+      }
+    } else if (req.type === "get_last_assistant_text") {
+      queueMicrotask(() => p.stdout.emit("data", Buffer.from(JSON.stringify({
+        type: "response", id: req.id, command: "get_last_assistant_text", success: true, data: { text: "settled reply" },
+      }) + "\n")));
+    }
+  };
+
+  await assert.rejects(c.promptAndWait("fail me", 500), /bad prompt/);
+
+  mode = "handled";
+  const handledRes = await c.promptAndWait("/extension-cmd", 500);
+  assert.equal(handledRes.success, true);
+  assert.equal(handledRes.data.text, "");
+
+  mode = "race";
+  const raceRes = await c.promptAndWait("fast turn", 500);
+  assert.equal(raceRes.success, true);
+  assert.equal(raceRes.data.text, "settled reply");
+
+  await c.destroy();
 });
