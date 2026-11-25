@@ -16,6 +16,7 @@ export interface AgyUsageSnapshot {
   model: string;
   observedAt: number;
   numTurns?: number;
+  origin?: "pimate" | "resumed";
   cumulative: AgyUsageTotals;
 }
 
@@ -61,6 +62,7 @@ function normalizeSnapshot(value: unknown): AgyUsageSnapshot | null {
       typeof raw.numTurns === "number" && Number.isFinite(raw.numTurns)
         ? raw.numTurns
         : undefined,
+    origin: raw.origin === "pimate" || raw.origin === "resumed" ? raw.origin : undefined,
     cumulative: normalizeTotals(raw.cumulative),
   };
 }

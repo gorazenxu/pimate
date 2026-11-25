@@ -839,6 +839,7 @@ export class AgyAgentClient extends EventEmitter {
   private usageModelId: string | null = null;
   private usageLoadPromise: Promise<void> = Promise.resolve();
   private usageStateRevision = 0;
+  private conversationOrigin: "pimate" | "resumed";
   private readonly trackUsage: boolean;
 
   private historyMessages: AgyHistoryMessage[] = [];
@@ -856,6 +857,7 @@ export class AgyAgentClient extends EventEmitter {
     super();
     this.options = { ...options };
     this.conversationId = options.conversationId || null;
+    this.conversationOrigin = options.conversationId ? "resumed" : "pimate";
     this.currentModelId = options.modelId || "gemini-3.8-flash-high";
     this.currentEffort = options.effort || "high";
     this.trackUsage = options.trackUsage !== false;
@@ -1275,6 +1277,7 @@ export class AgyAgentClient extends EventEmitter {
         typeof numTurns === "number" && Number.isFinite(numTurns)
           ? numTurns
           : undefined,
+      origin: this.conversationOrigin,
       cumulative: {
         input: this.inputTokens,
         output: this.outputTokens,
@@ -2457,7 +2460,9 @@ export class AgyAgentClient extends EventEmitter {
     }
 
     const previousConversationId = this.conversationId;
+    const previousOrigin = this.conversationOrigin;
     this.conversationId = conversationId;
+    this.conversationOrigin = "resumed";
     this.resetHistoryCache();
     this.usageLoadPromise = this.restorePersistedUsage(conversationId);
     await this.usageLoadPromise;
@@ -2473,6 +2478,7 @@ export class AgyAgentClient extends EventEmitter {
       // Reconnect the previous conversation so the user can retry without
       // restarting Obsidian.
       this.conversationId = previousConversationId;
+      this.conversationOrigin = previousOrigin;
       this.resetHistoryCache();
       this.usageLoadPromise = this.restorePersistedUsage(previousConversationId);
       await this.usageLoadPromise;
@@ -2490,6 +2496,7 @@ export class AgyAgentClient extends EventEmitter {
       const actualConversationId = this.conversationId;
       await this.destroyInternal();
       this.conversationId = previousConversationId;
+      this.conversationOrigin = previousOrigin;
       this.resetHistoryCache();
       this.usageLoadPromise = this.restorePersistedUsage(previousConversationId);
       await this.usageLoadPromise;

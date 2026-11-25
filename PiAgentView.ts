@@ -10466,13 +10466,24 @@ function isAgyUsageUnavailable(row: UsageModelRow): boolean {
   return row.provider === "Antigravity" && row.requestCount > 0 && !rowHasMeasuredUsage(row);
 }
 
+function normalizeUsageModelName(provider: string, model: string): string {
+  const trimmed = (model || "").trim();
+  if (!trimmed) return "unknown";
+  if (provider === "Antigravity") {
+    return trimmed
+      .toLowerCase()
+      .replace(/-(low|medium|high|xhigh|max)$/, "");
+  }
+  return trimmed;
+}
+
 function getUsageModelRow(
   byModel: Map<string, UsageModelRow>,
   provider: string,
   model: string
 ): UsageModelRow {
   const normalizedProvider = provider || "unknown";
-  const normalizedModel = model || "unknown";
+  const normalizedModel = normalizeUsageModelName(normalizedProvider, model);
   const key = `${normalizedProvider}::${normalizedModel}`;
   let row = byModel.get(key);
   if (!row) {
@@ -10864,7 +10875,7 @@ function agyUsageHasValues(usage: AgyUsageTotals): boolean {
   return usage.input > 0 || usage.output > 0 || usage.thinking > 0 || usage.cacheRead > 0 || usage.total > 0;
 }
 
-function deriveAgyUsageDeltas(
+export function deriveAgyUsageDeltas(
   snapshots: AgyUsageSnapshot[]
 ): Array<{ snapshot: AgyUsageSnapshot; delta: AgyUsageTotals; baseline: boolean }> {
   const grouped = new Map<string, AgyUsageSnapshot[]>();
@@ -10910,9 +10921,15 @@ function deriveAgyUsageDeltas(
         current.cacheRead < previous.cumulative.cacheRead ||
         current.total < previous.cumulative.total
       );
+      // When `previous` exists and AGY's cumulative counter resets, `current` is
+      // the new turn's own usage (not pre-Pimate history). When `!previous`,
+      // Pimate-originated conversations (even if Turn 1 failed before emitting
+      // usage and Turn 2 reports numTurns > 1) are also newly incurred usage.
       const baseline = !previous
-        ? snapshot.numTurns == null || snapshot.numTurns > 1
-        : reset;
+        ? snapshot.origin === "pimate"
+          ? false
+          : snapshot.numTurns == null || snapshot.numTurns > 1
+        : false;
       result.push({
         snapshot,
         delta: reset ? { ...current } : subtractAgyUsage(current, previous?.cumulative || null),

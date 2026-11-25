@@ -47,9 +47,13 @@ jobs:
           This release includes the bundled Obsidian plugin files: main.js, manifest.json, and styles.css.
           EOF
 
-          gh release create "$tag" \
-            --title "$tag" \
-            --notes-file release-notes.md \
-            --latest=true \
-            main.js manifest.json styles.css
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes-file release-notes.md \
+              --latest=true \
+              main.js manifest.json styles.css
+          fi
 

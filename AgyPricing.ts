@@ -27,6 +27,8 @@ export interface AgyModelPricing {
 
 const MILLION = 1_000_000;
 const GEMINI_37_INTRODUCTORY_PRICE_END = Date.UTC(2027, 0, 1);
+const GEMINI_38_INTRODUCTORY_PRICE_END = Date.UTC(2027, 0, 1);
+const GEMINI_4_INTRODUCTORY_PRICE_END = Date.UTC(2026, 11, 1);
 
 function modelFamily(modelId: string): string {
   return modelId
@@ -37,8 +39,9 @@ function modelFamily(modelId: string): string {
 
 /**
  * Return the official Gemini API Standard rates for an AGY model slug.
- * Prices are USD per 1M tokens. Gemini 3.7/3.6 introductory rates change on
- * 2027-01-01, so historical reports use the rate active at each observation.
+ * Prices are USD per 1M tokens. Introductory rates change on their
+ * documented cutover dates, so historical reports use the rate active at
+ * each observation.
  */
 export function getAgyModelPricing(
   modelId: string,
@@ -46,13 +49,45 @@ export function getAgyModelPricing(
 ): AgyModelPricing | null {
   const family = modelFamily(modelId);
   switch (family) {
-    case "gemini-3.8-flash":
+    case "gemini-4-hydrogen": {
       return {
         modelFamily: family,
-        inputPerMillion: 0.54,
-        outputPerMillion: 4.5,
-        cacheReadPerMillion: 0.054,
+        inputPerMillion: 1.5,
+        outputPerMillion: 7.5,
+        cacheReadPerMillion: 0.075,
       };
+    }
+    case "gemini-4-neon":
+    case "gemini-pro-orchestrator-neon":
+      return {
+        modelFamily: family,
+        inputPerMillion: 3.0,
+        outputPerMillion: 15.0,
+        cacheReadPerMillion: 0.15,
+      };
+    case "gemini-4-argon":
+    case "gemini-4-carbon":
+    case "gemini-pro-orchestrator-argon":
+    case "gemini-pro-orchestrator-g1-pro":
+    case "gemini-pro-orchestrator-carbon":
+    case "gemini-pro-orchestrator": {
+      const introductory = at < GEMINI_4_INTRODUCTORY_PRICE_END;
+      return {
+        modelFamily: family,
+        inputPerMillion: introductory ? 2.0 : 4.0,
+        outputPerMillion: introductory ? 10.0 : 20.0,
+        cacheReadPerMillion: introductory ? 0.1 : 0.2,
+      };
+    }
+    case "gemini-3.8-flash": {
+      const introductory = at < GEMINI_38_INTRODUCTORY_PRICE_END;
+      return {
+        modelFamily: family,
+        inputPerMillion: introductory ? 0.75 : 1.5,
+        outputPerMillion: introductory ? 3.75 : 7.5,
+        cacheReadPerMillion: introductory ? 0.075 : 0.15,
+      };
+    }
     case "gemini-3.7-flash":
     case "gemini-3.6-flash": {
       const introductory = at < GEMINI_37_INTRODUCTORY_PRICE_END;
@@ -67,9 +102,27 @@ export function getAgyModelPricing(
     case "gemini-3.1-pro-preview":
       return {
         modelFamily: family,
-        inputPerMillion: 2.7,
-        outputPerMillion: 16.2,
-        cacheReadPerMillion: 0.27,
+        // AGY usage aggregates tokens across a session and does not retain
+        // each request's prompt size, so use Google's <=200K standard tier.
+        inputPerMillion: 2.0,
+        outputPerMillion: 12.0,
+        cacheReadPerMillion: 0.2,
+      };
+    case "claude-sonnet-4-6":
+    case "claude-sonnet-4-6-thinking":
+      return {
+        modelFamily: family,
+        inputPerMillion: 3.0,
+        outputPerMillion: 15.0,
+        cacheReadPerMillion: 0.3,
+      };
+    case "claude-opus-4-6":
+    case "claude-opus-4-6-thinking":
+      return {
+        modelFamily: family,
+        inputPerMillion: 5.0,
+        outputPerMillion: 25.0,
+        cacheReadPerMillion: 0.5,
       };
     default:
       return null;

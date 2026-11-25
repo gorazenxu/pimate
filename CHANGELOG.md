@@ -10,6 +10,15 @@ commit 时把对应条目挪到对应版本的 📦 Released 下。
 
 ---
 
+## 📦 v1.1.29
+
+- 修：AGY 用量统计区分 Pimate 新建与恢复的会话；新建会话首次上报也计入本次用量，避免误按历史基线扣除，计数器重置后按新轮次统计。
+- 优：AGY 费用按模型系列合并不同 effort 后缀，补充 Gemini 4、Neon、Argon、Carbon、Orchestrator 和 Claude 4.6 的估算费率及适用日期。
+- 修：Gemini 3.8 Flash、Gemini 3.1 Pro 与 Gemini 4 Hydrogen 费率按官方标准价估算；按官方日期处理促销切换。3.1 Pro 用量无法还原单次提示长度时按 ≤200K 档估算。
+- 测：新增 usage origin、计数器重置、模型费率和 effort 后缀回归测试。
+
+---
+
 ## 📦 v1.1.28
 
 - 优：AGY 模型探测增加 30 秒缓存并合并并发请求，改善 Windows 下的可执行文件解析，减少设置页重复启动 CLI。

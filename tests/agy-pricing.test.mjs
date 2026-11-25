@@ -42,7 +42,7 @@ test("AGY cost prices uncached input and cache reads separately", () => {
   };
   const cost = calculateAgyCost("gemini-3.8-flash-high", usage);
   assert.ok(cost !== null);
-  assert.ok(Math.abs(cost - 7.47855) < 1e-9, `unexpected cost: ${cost}`);
+  assert.ok(Math.abs(cost - 9.008625) < 1e-9, `unexpected cost: ${cost}`);
   assert.equal(
     calculateAgyCost("gemini-3.8-flash-high", { ...usage, thinking: 0 }),
     cost
@@ -67,4 +67,32 @@ test("AGY pricing strips -xhigh and -max effort suffixes", () => {
   const base = calculateAgyCost("gemini-3.8-flash-high", usage);
   assert.equal(calculateAgyCost("gemini-3.8-flash-xhigh", usage), base);
   assert.equal(calculateAgyCost("gemini-3.8-flash-max", usage), base);
+});
+
+test("AGY pricing covers Gemini 4, Orchestrator, and Claude 4.6 models", () => {
+  const usage = { input: 1_000_000, output: 1_000_000, thinking: 0, cacheRead: 1_000_000, total: 2_000_000 };
+  const nov2026 = Date.UTC(2026, 10, 25);
+  const dec2026 = Date.UTC(2026, 11, 2);
+
+  assert.ok(Math.abs(calculateAgyCost("gemini-4-hydrogen-medium", usage, nov2026) - 9.075) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("gemini-4-hydrogen-high", usage, dec2026) - 9.075) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("gemini-pro-orchestrator-neon", usage, nov2026) - 18.15) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("gemini-4-argon-high", usage, nov2026) - 12.1) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("gemini-4-argon-high", usage, dec2026) - 24.2) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("claude-sonnet-4-6", usage, nov2026) - 18.3) < 1e-9);
+  assert.ok(Math.abs(calculateAgyCost("claude-opus-4-6-thinking", usage, nov2026) - 30.5) < 1e-9);
+});
+
+test("Gemini 3.8 Flash pricing follows its 2027 standard-rate cutover", () => {
+  const usage = { input: 1_000_000, output: 1_000_000, thinking: 0, cacheRead: 1_000_000, total: 2_000_000 };
+  const beforeCutover = Date.UTC(2026, 11, 31, 23, 59, 59);
+  const atCutover = Date.UTC(2027, 0, 1);
+
+  assert.equal(calculateAgyCost("gemini-3.8-flash", usage, beforeCutover), 4.575);
+  assert.equal(calculateAgyCost("gemini-3.8-flash", usage, atCutover), 9.15);
+});
+
+test("Gemini 3.1 Pro estimate uses the official <=200K standard tier", () => {
+  const usage = { input: 1_000_000, output: 1_000_000, thinking: 0, cacheRead: 1_000_000, total: 2_000_000 };
+  assert.equal(calculateAgyCost("gemini-3.1-pro-preview", usage), 14.2);
 });

@@ -27,7 +27,7 @@ compiled.paths = Module._nodeModulePaths(root);
 const requireOriginal = compiled.require.bind(compiled);
 compiled.require = name => name === "obsidian" ? obsidian : requireOriginal(name);
 compiled._compile(bundle.outputFiles[0].text, compiled.filename);
-const { PiAgentView } = compiled.exports;
+const { PiAgentView, deriveAgyUsageDeltas } = compiled.exports;
 globalThis.window = globalThis;
 globalThis.activeDocument = new EventTarget();
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => {
@@ -531,4 +531,42 @@ test("hardSteerMessage uses native clearQueue RPC without restarting Pi process"
   assert.deepEqual(prompted, ["new direction"]);
   assert.equal(tab.queueCount, 0);
   assert.equal(v.pendingQueuedMessages.length, 0);
+});
+
+test("deriveAgyUsageDeltas keeps pimate-origin multi-turn first observations and post-reset turns", () => {
+  const rows = deriveAgyUsageDeltas([
+    {
+      conversationId: "pimate-conv",
+      cwd: "/",
+      model: "gemini-4-hydrogen-medium",
+      observedAt: 1000,
+      numTurns: 2,
+      origin: "pimate",
+      cumulative: { input: 500, output: 100, thinking: 20, cacheRead: 0, total: 600 },
+    },
+    {
+      conversationId: "pimate-conv",
+      cwd: "/",
+      model: "gemini-4-hydrogen-medium",
+      observedAt: 2000,
+      numTurns: 3,
+      origin: "pimate",
+      cumulative: { input: 200, output: 50, thinking: 10, cacheRead: 0, total: 250 },
+    },
+    {
+      conversationId: "resumed-conv",
+      cwd: "/",
+      model: "gemini-4-hydrogen-medium",
+      observedAt: 1500,
+      numTurns: 5,
+      origin: "resumed",
+      cumulative: { input: 4000, output: 400, thinking: 50, cacheRead: 1000, total: 4400 },
+    },
+  ]);
+
+  assert.equal(rows[0].baseline, false);
+  assert.equal(rows[0].delta.total, 600);
+  assert.equal(rows[1].baseline, false);
+  assert.equal(rows[1].delta.total, 250);
+  assert.equal(rows[2].baseline, true);
 });
